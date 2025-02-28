@@ -1,5 +1,11 @@
 {
     "check_interval": 600,
-    "window_geometry": "1065x611+104+104",
-    "ip_window_geometry": "300x100+4139+816"
+    "window_geometry": "1065x614+700+271",
+    "ip_window_geometry": "350x100+1749+401",
+    "ad_sync_geometry": "324x186+2166+708",
+    "ad_sync_select_geometry": "591x442+198+355",
+    "edit_window_geometry": "347x166+1806+485",
+    "ad_username": "login2",
+    "ad_password": "flyubi",
+    "settings_window_geometry": "138x179+260+260"
 }
