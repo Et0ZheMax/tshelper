@@ -5,8 +5,10 @@ import os
 import threading
 import queue
 import webbrowser
+from pywinauto import Application
 import ctypes
 import platform
+import time
 import json
 import datetime
 import locale
@@ -183,6 +185,35 @@ class UserButton(ttk.Button):
         url = f"https://inv.pak-cspmz.ru/front/search.php?globalsearch={last_name}"
         webbrowser.open(url)
 
+    def open_user_properties_in_ad(self, cn):
+        
+        # Формируем DN пользователя
+        dn = f"CN={cn},{AD_BASE_DN}"
+        try:
+            # Запускаем оснастку ADUC (здесь пример с dsa.msc, укажите правильный путь, если нужно)
+            run_as_admin("mmc.exe", r"C:\Windows\System32\dsa.msc" + f" /select:\"{dn}\"")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть AD: {e}")
+            log_message(f"Ошибка при открытии AD: {e}")
+            return
+
+        # Даем время оснастке загрузиться
+        time.sleep(5)
+        try:
+            # Подключаемся к окну ADUC через pywinauto
+            app = Application(backend="uia").connect(title_re=".*Active Directory Users and Computers.*", timeout=10)
+            window = app.window(title_re=".*Active Directory Users and Computers.*")
+            # Ищем элемент с именем пользователя (CN)
+            user_item = window.child_window(title=cn, control_type="DataItem")
+            # Имитируем двойной клик по найденному элементу
+            user_item.double_click_input()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось открыть свойства пользователя: {e}")
+            log_message(f"Ошибка открытия свойств в AD: {e}")
+
+
+
+    
     def show_actions(self):
         # Левый клик – открывает меню с базовыми функциями
         menu = tk.Menu(self.master, tearoff=0)
@@ -192,6 +223,7 @@ class UserButton(ttk.Button):
         menu.add_command(label="Получить IP", command=self.get_ip)
         menu.add_command(label="Открыть PS терминал", command=self.open_ps_terminal)
         menu.add_command(label="Открыть в GLPI", command=self.open_glpi)
+        menu.add_command(label="Показать в AD pak", command=lambda: self.open_user_properties_in_ad(self.user["name"]))
         x = self.winfo_rootx()
         y = self.winfo_rooty() + self.winfo_height()
         menu.post(x, y)
@@ -661,7 +693,7 @@ class MainWindow:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.geometry("1310x814+645+308")
+    root.geometry("1310x734+443+125")
     root.resizable(False, False)
     try:
         root.iconbitmap('ts-logo.ico')
