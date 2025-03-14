@@ -428,26 +428,24 @@ class MainWindow:
         """
         Сбрасывает пароль пользователя с использованием PowerShell.
         target_domain: "pak-cspmz.ru" или "omg.cspfmba.ru"
-        Новый пароль устанавливается на "12340987".
+        Новый пароль берется из настроек ("reset_password").
         """
-        new_password = "#EDC3edc3edc"
-        # Извлекаем sAMAccountName из поля pc_name, предполагая, что оно начинается с "w-"
+        # Извлекаем пароль для сброса из настроек:
+        new_password = self.settings_manager.get_setting("reset_password", "12340987")
+        # Извлекаем sAMAccountName из pc_name (если pc_name начинается с "w-", убираем его)
         sam = user["pc_name"]
         if sam.lower().startswith("w-"):
             sam = sam[2:]
-        # Формируем базовую команду PowerShell.
         ps_command = (
             "Import-Module ActiveDirectory; "
             f"Set-ADAccountPassword -Identity '{sam}' -Reset -NewPassword "
             f"(ConvertTo-SecureString -AsPlainText '{new_password}' -Force) -PassThru"
         )
-        # Если домен отличается, можно добавить параметр -Server
         if target_domain == "pak-cspmz.ru":
             ps_command += " -Server 'pak-cspmz.ru'"
         elif target_domain == "omg.cspfmba.ru":
             ps_command += " -Server 'omg.cspfmba.ru'"
         try:
-            # Запускаем PowerShell команду через subprocess
             result = subprocess.run(["powershell", "-Command", ps_command],
                                     capture_output=True, text=True, check=True)
             messagebox.showinfo("Успех", f"Пароль успешно сброшен в домене {target_domain}")
@@ -597,35 +595,83 @@ class MainWindow:
             self.populate_buttons()
 
     def open_settings(self):
+        # Создаём окно настроек большего размера
         settings_window = tk.Toplevel(self.master)
         settings_window.title("Настройки")
-        geom = self.settings_manager.get_setting("settings_window_geometry")
-        if geom:
-            settings_window.geometry(geom)
+        # Восстанавливаем геометрию окна, если она сохранена, иначе задаём размер 600x400
+        geom = self.settings_manager.get_setting("settings_window_geometry", "600x400")
+        settings_window.geometry(geom)
+        settings_window.configure(bg="#f0f0f5")  # светлый фон, имитирующий Apple‑style
         settings_window.protocol("WM_DELETE_WINDOW", lambda w=settings_window: self.on_toplevel_close(w, "settings_window_geometry"))
-        ttk.Label(settings_window, text="Учетные данные AD", font=("Arial", 10, "bold")).pack(pady=5)
-        ttk.Label(settings_window, text="Логин:").pack(pady=2)
-        username_entry = ttk.Entry(settings_window)
+        
+        # Создаём Notebook для двух вкладок
+        notebook = ttk.Notebook(settings_window)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Вкладка "Учетные данные AD"
+        tab_ad = ttk.Frame(notebook)
+        notebook.add(tab_ad, text="Учетные данные AD")
+        
+        ad_label = ttk.Label(tab_ad, text="Учетные данные AD", font=("Helvetica", 14, "bold"))
+        ad_label.pack(pady=10)
+        
+        ttk.Label(tab_ad, text="Логин:").pack(pady=5, anchor="w", padx=10)
+        username_entry = ttk.Entry(tab_ad)
         username_entry.insert(0, self.settings_manager.get_setting("ad_username", ""))
-        username_entry.pack(pady=2, fill="x", expand=True)
+        username_entry.pack(pady=5, padx=10, fill="x")
         self.add_clipboard_bindings(username_entry)
-        ttk.Label(settings_window, text="Пароль:").pack(pady=2)
-        password_entry = ttk.Entry(settings_window, show="*")
+        
+        ttk.Label(tab_ad, text="Пароль:").pack(pady=5, anchor="w", padx=10)
+        password_entry = ttk.Entry(tab_ad, show="*")
         password_entry.insert(0, self.settings_manager.get_setting("ad_password", ""))
-        password_entry.pack(pady=2, fill="x", expand=True)
+        password_entry.pack(pady=5, padx=10, fill="x")
         self.add_clipboard_bindings(password_entry)
+        
+        # Вкладка "Пароль для сброса"
+        tab_reset = ttk.Frame(notebook)
+        notebook.add(tab_reset, text="Пароль для сброса")
+
+        reset_label = ttk.Label(tab_reset, text="Пароль для сброса", font=("Helvetica", 14, "bold"))
+        reset_label.pack(pady=10)
+
+        ttk.Label(tab_reset, text="Новый пароль:").pack(pady=5, anchor="w", padx=10)
+        # Поле ввода с маскировкой (показываются звездочки)
+        reset_entry = ttk.Entry(tab_reset, show="*")
+        reset_entry.insert(0, self.settings_manager.get_setting("reset_password", "12340987"))
+        reset_entry.pack(pady=5, padx=10, fill="x")
+        self.add_clipboard_bindings(reset_entry)
+
+        # Кнопка для переключения отображения пароля
+        toggle_button = ttk.Button(tab_reset, text="Показать", width=10)
+        toggle_button.pack(pady=5, padx=10, anchor="e")
+
+        def toggle_password():
+            current = reset_entry.cget("show")
+            if current == "*":
+                reset_entry.config(show="")  # Убираем маску
+                toggle_button.config(text="Скрыть")
+            else:
+                reset_entry.config(show="*")  # Восстанавливаем маску
+                toggle_button.config(text="Показать")
+
+        toggle_button.config(command=toggle_password)
+    
+        # Кнопка "Сохранить" для обоих вкладок
+        save_button = ttk.Button(settings_window, text="Сохранить", command=lambda: save_settings())
+        save_button.pack(pady=10)
+    
         def save_settings():
             username = username_entry.get().strip()
             password = password_entry.get().strip()
-            if not username or not password:
+            reset_pwd = reset_entry.get().strip()
+            if not username or not password or not reset_pwd:
                 messagebox.showerror("Ошибка", "Заполните все поля")
                 return
             self.settings_manager.set_setting("ad_username", username)
             self.settings_manager.set_setting("ad_password", password)
+            self.settings_manager.set_setting("reset_password", reset_pwd)
             self.ad_credentials = {"username": username, "password": password}
             self.on_toplevel_close(settings_window, "settings_window_geometry")
-        save_button = ttk.Button(settings_window, text="Сохранить", command=save_settings)
-        save_button.pack(pady=10)
 
     def show_ip_window(self, ip):
         top = tk.Toplevel(self.master)
