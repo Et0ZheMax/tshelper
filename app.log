@@ -76,3 +76,37 @@
 2025-03-05 09:27:22.453156 - ╬°шсър юЄъЁ√Єш  яюы№чютрЄхы  т AD: [WinError 740] ╟ряЁю°хээр  юяхЁрЎш  ЄЁхсєхЄ яют√°хэш 
 2025-03-05 09:49:17.526194 - ╬°шсър юЄъЁ√Єш  ётющёЄт т AD: 
 2025-03-05 09:49:43.851458 - ╬°шсър юЄъЁ√Єш  ётющёЄт т AD: 
+2025-03-14 09:13:21.730226 - ╬°шсър яЁш ЁрсюЄх ё Active Directory: automatic bind not successful - invalidCredentials
+2025-03-14 09:29:08.985053 - ═рщфхэю чряшёхщ: 379
+2025-03-14 09:29:33.781341 - ╬°шсър ёсЁюёр ярЁюы  т pak-cspmz.ru фы  testovich: Set-ADAccountPassword : Пароль не соответствует требованиям домена, касающимся длины, сложности или истории использования.
+строка:1 знак:32
++ ... eDirectory; Set-ADAccountPassword -Identity 'testovich' -Reset -NewPa ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidData: (testovich:ADAccount) [Set-ADAccountPassword], ADPasswordComplexityException
+    + FullyQualifiedErrorId : ActiveDirectoryServer:1325,Microsoft.ActiveDirectory.Management.Commands.SetADAccountPassword
+ 
+
+2025-03-14 09:30:01.808824 - ╬°шсър ёсЁюёр ярЁюы  т omg.cspfmba.ru фы  testovich: Set-ADAccountPassword : Не удается найти объект с удостоверением: "testovich" в "DC=omg,DC=cspfmba,DC=ru".
+строка:1 знак:32
++ ... eDirectory; Set-ADAccountPassword -Identity 'testovich' -Reset -NewPa ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (testovich:ADAccount) [Set-ADAccountPassword], ADIdentityNotFoundException
+    + FullyQualifiedErrorId : ActiveDirectoryCmdlet:Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException,Microsoft.ActiveDirectory.Management.Commands.SetADAccountPassword
+ 
+
+2025-03-14 09:30:51.960093 - ╬°шсър ёсЁюёр ярЁюы  т omg.cspfmba.ru фы  testovich: Set-ADAccountPassword : Не удается найти объект с удостоверением: "testovich" в "DC=omg,DC=cspfmba,DC=ru".
+строка:1 знак:32
++ ... eDirectory; Set-ADAccountPassword -Identity 'testovich' -Reset -NewPa ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (testovich:ADAccount) [Set-ADAccountPassword], ADIdentityNotFoundException
+    + FullyQualifiedErrorId : ActiveDirectoryCmdlet:Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException,Microsoft.ActiveDirectory.Management.Commands.SetADAccountPassword
+ 
+
+2025-03-14 09:32:07.170315 - ╬°шсър ёсЁюёр ярЁюы  т omg.cspfmba.ru фы  testovich: Set-ADAccountPassword : Не удается найти объект с удостоверением: "testovich" в "DC=omg,DC=cspfmba,DC=ru".
+строка:1 знак:32
++ ... eDirectory; Set-ADAccountPassword -Identity 'testovich' -Reset -NewPa ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (testovich:ADAccount) [Set-ADAccountPassword], ADIdentityNotFoundException
+    + FullyQualifiedErrorId : ActiveDirectoryCmdlet:Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException,Microsoft.ActiveDirectory.Management.Commands.SetADAccountPassword
+ 
+

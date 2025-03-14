@@ -192,7 +192,6 @@ class UserButton(ttk.Button):
 
     
     def show_actions(self):
-        # Левый клик – открывает меню с базовыми функциями
         menu = tk.Menu(self.master, tearoff=0)
         menu.add_command(label="RDP", command=self.rdp_connect)
         menu.add_command(label="Удаленный помощник", command=self.remote_assistance)
@@ -200,10 +199,13 @@ class UserButton(ttk.Button):
         menu.add_command(label="Получить IP", command=self.get_ip)
         menu.add_command(label="Открыть PS терминал", command=self.open_ps_terminal)
         menu.add_command(label="Открыть в GLPI", command=self.open_glpi)
-    
+        # Добавляем пункты сброса пароля через PowerShell:
+        menu.add_command(label="Сбросить пароль pak", command=lambda: self.app.reset_password_ps("pak-cspmz.ru", self.user))
+        menu.add_command(label="Сбросить пароль omg", command=lambda: self.app.reset_password_ps("omg.cspfmba.ru", self.user))
         x = self.winfo_rootx()
         y = self.winfo_rooty() + self.winfo_height()
         menu.post(x, y)
+
         
     def open_ps_terminal(self):
         try:
@@ -420,6 +422,40 @@ class MainWindow:
             return "break"
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
+
+
+    def reset_password_ps(self, target_domain, user):
+        """
+        Сбрасывает пароль пользователя с использованием PowerShell.
+        target_domain: "pak-cspmz.ru" или "omg.cspfmba.ru"
+        Новый пароль устанавливается на "12340987".
+        """
+        new_password = "#EDC3edc3edc"
+        # Извлекаем sAMAccountName из поля pc_name, предполагая, что оно начинается с "w-"
+        sam = user["pc_name"]
+        if sam.lower().startswith("w-"):
+            sam = sam[2:]
+        # Формируем базовую команду PowerShell.
+        ps_command = (
+            "Import-Module ActiveDirectory; "
+            f"Set-ADAccountPassword -Identity '{sam}' -Reset -NewPassword "
+            f"(ConvertTo-SecureString -AsPlainText '{new_password}' -Force) -PassThru"
+        )
+        # Если домен отличается, можно добавить параметр -Server
+        if target_domain == "pak-cspmz.ru":
+            ps_command += " -Server 'pak-cspmz.ru'"
+        elif target_domain == "omg.cspfmba.ru":
+            ps_command += " -Server 'omg.cspfmba.ru'"
+        try:
+            # Запускаем PowerShell команду через subprocess
+            result = subprocess.run(["powershell", "-Command", ps_command],
+                                    capture_output=True, text=True, check=True)
+            messagebox.showinfo("Успех", f"Пароль успешно сброшен в домене {target_domain}")
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("Ошибка", f"Ошибка сброса пароля: {e.stderr}")
+            log_message(f"Ошибка сброса пароля в {target_domain} для {sam}: {e.stderr}")
+
+
 
     def on_configure(self, event):
         new_width = self.canvas.winfo_width()
