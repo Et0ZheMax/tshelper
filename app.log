@@ -110,3 +110,4 @@
     + FullyQualifiedErrorId : ActiveDirectoryCmdlet:Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException,Microsoft.ActiveDirectory.Management.Commands.SetADAccountPassword
  
 
+2025-03-19 12:22:50.722460 - Ошибка подключения по ssh: bufsize must be an integer
