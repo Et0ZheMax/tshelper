@@ -188,22 +188,24 @@ class UserButton(ttk.Button):
 
    
     def open_ssh_connection(self):
-        # Считываем SSH-данные из настроек
         ssh_login = self.app.settings_manager.get_setting("ssh_login", "")
         ssh_password = self.app.settings_manager.get_setting("ssh_password", "")
-        if not ssh_login:
+        if not ssh_login or not ssh_password:
             messagebox.showerror("Ошибка", "Не заданы данные SSH в настройках")
             return
-        # Имя ПК берем из данных кнопки (при необходимости можно убрать префикс "w-")
         pc_name = self.user["pc_name"]
-        # Формируем команду для запуска PowerShell с ssh
-        # Если используется опция -yes, она добавляется к команде
-        cmd = f"ssh {ssh_login}@{pc_name} -yes"
+        if pc_name.lower().startswith("w-"):
+            pc_name = pc_name[2:]
+        # Формируем команду: сначала смена кодовой страницы, затем запуск plink
+        cmd = f"chcp 65001; plink.exe -ssh -batch -pw \"{ssh_password}\" {ssh_login}@{pc_name}"
         try:
             subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось подключиться по ssh: {e}")
             log_message(f"Ошибка подключения по ssh: {e}")
+
+
+
 
 
 
