@@ -236,6 +236,22 @@ class UserButton(ttk.Button):
 
 
 
+<<<<<<< HEAD
+=======
+
+
+
+
+
+
+
+
+
+
+
+
+
+>>>>>>> 34c325a... Добавлена опция сохранения пароля для SSH(её также можно отключить)
     
     def show_actions(self):
         menu = tk.Menu(self.master, tearoff=0)
