@@ -188,37 +188,52 @@ class UserButton(ttk.Button):
 
    
     def open_ssh_connection(self):
-        """Подключение по ssh с выбором терминала:
-        - Если выбран Windows Terminal – используется sshpass (для WSL-профиля Ubuntu)
-        - Если выбран CMD или PowerShell – используется plink.exe
+        """
+        Подключение по ssh с выбором терминала.
+        Если включена опция автоматической передачи пароля, используется sshpass (или plink для CMD/PowerShell).
+        Если опция не включена, вызывается команда ssh без автоматической подстановки пароля.
         """
         ssh_login = self.app.settings_manager.get_setting("ssh_login", "")
         ssh_password = self.app.settings_manager.get_setting("ssh_password", "")
-        if not ssh_login or not ssh_password:
-            messagebox.showerror("Ошибка", "Не заданы данные SSH в настройках")
+        if not ssh_login:
+            messagebox.showerror("Ошибка", "Не задан SSH Login в настройках")
             return
         pc_name = self.user["pc_name"]
         if pc_name.lower().startswith("w-"):
             pc_name = pc_name[2:]
         terminal_type = self.app.settings_manager.get_setting("ssh_terminal", "Windows Terminal")
+        auto_pass = self.app.settings_manager.get_setting("ssh_pass_enabled", False)
         try:
-            if terminal_type == "Windows Terminal":
-                # Используем sshpass для автоматической передачи пароля
-                cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{pc_name}'
-                subprocess.Popen(["wt.exe", "-p", "Ubuntu", "ubuntu.exe", "-c", cmd])
-            elif terminal_type == "CMD":
-                # Используем plink.exe для подключения через CMD
-                cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
-                subprocess.Popen(["cmd.exe", "/k", cmd])
-            elif terminal_type == "PowerShell":
-                # Используем plink.exe для подключения через PowerShell
-                cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
-                subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
+            if auto_pass:
+                # Если опция включена, используем автоматическую передачу пароля
+                if terminal_type == "Windows Terminal":
+                    cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{pc_name}'
+                    subprocess.Popen(["wt.exe", "-p", "Ubuntu", "ubuntu.exe", "-c", cmd])
+                elif terminal_type == "CMD":
+                    cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
+                    subprocess.Popen(["cmd.exe", "/k", cmd])
+                elif terminal_type == "PowerShell":
+                    cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
+                    subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
+                else:
+                    messagebox.showerror("Ошибка", f"Неизвестный тип терминала: {terminal_type}")
             else:
-                messagebox.showerror("Ошибка", f"Неизвестный тип терминала: {terminal_type}")
+                # Если опция не включена, вызываем ssh без автоматической передачи пароля (интерактивный ввод)
+                if terminal_type == "Windows Terminal":
+                    cmd = f'ssh {ssh_login}@{pc_name}'
+                    subprocess.Popen(["wt.exe", "-p", "Ubuntu", "ubuntu.exe", "-c", cmd])
+                elif terminal_type == "CMD":
+                    cmd = f'ssh {ssh_login}@{pc_name}'
+                    subprocess.Popen(["cmd.exe", "/k", cmd])
+                elif terminal_type == "PowerShell":
+                    cmd = f'ssh {ssh_login}@{pc_name}'
+                    subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
+                else:
+                    messagebox.showerror("Ошибка", f"Неизвестный тип терминала: {terminal_type}")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось подключиться по ssh: {e}")
             log_message(f"Ошибка подключения по ssh: {e}")
+
 
 
 
@@ -725,6 +740,12 @@ class MainWindow:
         ssh_terminal_combo.set(default_terminal)
         ssh_terminal_combo.pack(pady=5, padx=10, fill="x")
 
+        # Чекбокс "Передавать пароль автоматически"
+        ssh_pass_enabled_var = tk.BooleanVar()
+        ssh_pass_enabled_var.set(self.settings_manager.get_setting("ssh_pass_enabled", False))
+        check_ssh_pass = ttk.Checkbutton(tab_ssh, text="Передавать пароль автоматически", variable=ssh_pass_enabled_var)
+        check_ssh_pass.pack(pady=5, padx=10, anchor="w")
+
 
         # Кнопка "Сохранить" для обоих вкладок
         save_button = ttk.Button(settings_window, text="Сохранить", command=lambda: save_settings())
@@ -741,6 +762,7 @@ class MainWindow:
                 return
             self.settings_manager.set_setting("ad_username", ad_user)
             self.settings_manager.set_setting("ad_password", ad_pass)
+            self.settings_manager.set_setting("ssh_pass_enabled", ssh_pass_enabled_var.get())
             self.settings_manager.set_setting("reset_password", reset_pwd)
             self.settings_manager.set_setting("ssh_login", ssh_login)
             self.settings_manager.set_setting("ssh_password", ssh_pass)
