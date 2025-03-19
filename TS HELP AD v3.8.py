@@ -188,22 +188,49 @@ class UserButton(ttk.Button):
 
    
     def open_ssh_connection(self):
-        # Считываем SSH-данные из настроек
+        """Подключение по ssh с выбором терминала:
+        - Если выбран Windows Terminal – используется sshpass (для WSL-профиля Ubuntu)
+        - Если выбран CMD или PowerShell – используется plink.exe
+        """
         ssh_login = self.app.settings_manager.get_setting("ssh_login", "")
         ssh_password = self.app.settings_manager.get_setting("ssh_password", "")
-        if not ssh_login:
+        if not ssh_login or not ssh_password:
             messagebox.showerror("Ошибка", "Не заданы данные SSH в настройках")
             return
-        # Имя ПК берем из данных кнопки (при необходимости можно убрать префикс "w-")
         pc_name = self.user["pc_name"]
-        # Формируем команду для запуска PowerShell с ssh
-        # Если используется опция -yes, она добавляется к команде
-        cmd = f"ssh {ssh_login}@{pc_name} -yes"
+        if pc_name.lower().startswith("w-"):
+            pc_name = pc_name[2:]
+        terminal_type = self.app.settings_manager.get_setting("ssh_terminal", "Windows Terminal")
         try:
-            subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
+            if terminal_type == "Windows Terminal":
+                # Используем sshpass для автоматической передачи пароля
+                cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{pc_name}'
+                subprocess.Popen(["wt.exe", "-p", "Ubuntu", "ubuntu.exe", "-c", cmd])
+            elif terminal_type == "CMD":
+                # Используем plink.exe для подключения через CMD
+                cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
+                subprocess.Popen(["cmd.exe", "/k", cmd])
+            elif terminal_type == "PowerShell":
+                # Используем plink.exe для подключения через PowerShell
+                cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
+                subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
+            else:
+                messagebox.showerror("Ошибка", f"Неизвестный тип терминала: {terminal_type}")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось подключиться по ssh: {e}")
             log_message(f"Ошибка подключения по ssh: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -369,7 +396,6 @@ class MainWindow:
                 return on_copy(event)
         entry.bind("<Control-KeyPress>", paste_wrapper)
         entry.bind("<Control-KeyPress>", copy_wrapper, add="+")
-
 
 
 
@@ -678,16 +704,27 @@ class MainWindow:
         tab_ssh = ttk.Frame(notebook)
         notebook.add(tab_ssh, text="SSH")
         ttk.Label(tab_ssh, text="SSH настройки", font=("Helvetica", 14, "bold")).pack(pady=10)
+
         ttk.Label(tab_ssh, text="SSH Login:", font=("Helvetica", 12)).pack(pady=5, anchor="w", padx=10)
         ssh_login_entry = ttk.Entry(tab_ssh)
         ssh_login_entry.insert(0, self.settings_manager.get_setting("ssh_login", ""))
         ssh_login_entry.pack(pady=5, padx=10, fill="x")
         self.add_clipboard_bindings(ssh_login_entry)
+
         ttk.Label(tab_ssh, text="SSH Password:", font=("Helvetica", 12)).pack(pady=5, anchor="w", padx=10)
         ssh_password_entry = ttk.Entry(tab_ssh, show="*")
         ssh_password_entry.insert(0, self.settings_manager.get_setting("ssh_password", ""))
         ssh_password_entry.pack(pady=5, padx=10, fill="x")
         self.add_clipboard_bindings(ssh_password_entry)
+
+        ttk.Label(tab_ssh, text="Терминал для SSH:", font=("Helvetica", 12)).pack(pady=5, anchor="w", padx=10)
+        ssh_terminal_var = tk.StringVar()
+        ssh_terminal_combo = ttk.Combobox(tab_ssh, textvariable=ssh_terminal_var, state="readonly")
+        ssh_terminal_combo["values"] = ("Windows Terminal", "CMD", "PowerShell")
+        default_terminal = self.settings_manager.get_setting("ssh_terminal", "Windows Terminal")
+        ssh_terminal_combo.set(default_terminal)
+        ssh_terminal_combo.pack(pady=5, padx=10, fill="x")
+
 
         # Кнопка "Сохранить" для обоих вкладок
         save_button = ttk.Button(settings_window, text="Сохранить", command=lambda: save_settings())
@@ -707,6 +744,7 @@ class MainWindow:
             self.settings_manager.set_setting("reset_password", reset_pwd)
             self.settings_manager.set_setting("ssh_login", ssh_login)
             self.settings_manager.set_setting("ssh_password", ssh_pass)
+            self.settings_manager.set_setting("ssh_terminal", ssh_terminal_var.get())
             self.ad_credentials = {"username": ad_user, "password": ad_pass}
             self.on_toplevel_close(settings_window, "settings_window_geometry")
     
