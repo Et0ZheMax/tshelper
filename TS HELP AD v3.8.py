@@ -188,7 +188,10 @@ class UserButton(ttk.Button):
 
    
     def open_ssh_connection(self):
-        """Подключение по ssh через sshpass с выбором терминала из настроек."""
+        """Подключение по ssh с выбором терминала:
+        - Если выбран Windows Terminal – используется sshpass (для WSL-профиля Ubuntu)
+        - Если выбран CMD или PowerShell – используется plink.exe
+        """
         ssh_login = self.app.settings_manager.get_setting("ssh_login", "")
         ssh_password = self.app.settings_manager.get_setting("ssh_password", "")
         if not ssh_login or not ssh_password:
@@ -197,20 +200,26 @@ class UserButton(ttk.Button):
         pc_name = self.user["pc_name"]
         if pc_name.lower().startswith("w-"):
             pc_name = pc_name[2:]
-        cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{pc_name}'
         terminal_type = self.app.settings_manager.get_setting("ssh_terminal", "Windows Terminal")
         try:
             if terminal_type == "Windows Terminal":
+                # Используем sshpass для автоматической передачи пароля
+                cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{pc_name}'
                 subprocess.Popen(["wt.exe", "-p", "Ubuntu", "ubuntu.exe", "-c", cmd])
             elif terminal_type == "CMD":
+                # Используем plink.exe для подключения через CMD
+                cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
                 subprocess.Popen(["cmd.exe", "/k", cmd])
             elif terminal_type == "PowerShell":
+                # Используем plink.exe для подключения через PowerShell
+                cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc_name}'
                 subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
             else:
                 messagebox.showerror("Ошибка", f"Неизвестный тип терминала: {terminal_type}")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось подключиться по ssh: {e}")
             log_message(f"Ошибка подключения по ssh: {e}")
+
 
 
 
