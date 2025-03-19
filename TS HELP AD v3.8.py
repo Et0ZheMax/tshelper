@@ -187,6 +187,23 @@ class UserButton(ttk.Button):
         webbrowser.open(url)
 
    
+    def open_ssh_connection(self):
+        # Считываем SSH-данные из настроек
+        ssh_login = self.app.settings_manager.get_setting("ssh_login", "")
+        ssh_password = self.app.settings_manager.get_setting("ssh_password", "")
+        if not ssh_login:
+            messagebox.showerror("Ошибка", "Не заданы данные SSH в настройках")
+            return
+        # Имя ПК берем из данных кнопки (при необходимости можно убрать префикс "w-")
+        pc_name = self.user["pc_name"]
+        # Формируем команду для запуска PowerShell с ssh
+        # Если используется опция -yes, она добавляется к команде
+        cmd = f"ssh {ssh_login}@{pc_name} -yes"
+        try:
+            subprocess.Popen(["powershell", "-NoExit", "-Command", cmd])
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось подключиться по ssh: {e}")
+            log_message(f"Ошибка подключения по ssh: {e}")
 
 
 
@@ -202,6 +219,8 @@ class UserButton(ttk.Button):
         # Добавляем пункты сброса пароля через PowerShell:
         menu.add_command(label="Сбросить пароль pak", command=lambda: self.app.reset_password_ps("pak-cspmz.ru", self.user))
         menu.add_command(label="Сбросить пароль omg", command=lambda: self.app.reset_password_ps("omg.cspfmba.ru", self.user))
+        # Новый пункт для SSH-подключения
+        menu.add_command(label="Подключение по ssh", command=self.open_ssh_connection)
         x = self.winfo_rootx()
         y = self.winfo_rooty() + self.winfo_height()
         menu.post(x, y)
@@ -633,14 +652,13 @@ class MainWindow:
 
         reset_label = ttk.Label(tab_reset, text="Пароль для сброса", font=("Helvetica", 14, "bold"))
         reset_label.pack(pady=10)
-
         ttk.Label(tab_reset, text="Новый пароль:").pack(pady=5, anchor="w", padx=10)
         # Поле ввода с маскировкой (показываются звездочки)
         reset_entry = ttk.Entry(tab_reset, show="*")
         reset_entry.insert(0, self.settings_manager.get_setting("reset_password", "12340987"))
         reset_entry.pack(pady=5, padx=10, fill="x")
-        self.add_clipboard_bindings(reset_entry)
-
+        self.add_clipboard_bindings(reset_entry)     
+       
         # Кнопка для переключения отображения пароля
         toggle_button = ttk.Button(tab_reset, text="Показать", width=10)
         toggle_button.pack(pady=5, padx=10, anchor="e")
@@ -656,22 +674,42 @@ class MainWindow:
 
         toggle_button.config(command=toggle_password)
     
+        # Вкладка "SSH"
+        tab_ssh = ttk.Frame(notebook)
+        notebook.add(tab_ssh, text="SSH")
+        ttk.Label(tab_ssh, text="SSH настройки", font=("Helvetica", 14, "bold")).pack(pady=10)
+        ttk.Label(tab_ssh, text="SSH Login:", font=("Helvetica", 12)).pack(pady=5, anchor="w", padx=10)
+        ssh_login_entry = ttk.Entry(tab_ssh)
+        ssh_login_entry.insert(0, self.settings_manager.get_setting("ssh_login", ""))
+        ssh_login_entry.pack(pady=5, padx=10, fill="x")
+        self.add_clipboard_bindings(ssh_login_entry)
+        ttk.Label(tab_ssh, text="SSH Password:", font=("Helvetica", 12)).pack(pady=5, anchor="w", padx=10)
+        ssh_password_entry = ttk.Entry(tab_ssh, show="*")
+        ssh_password_entry.insert(0, self.settings_manager.get_setting("ssh_password", ""))
+        ssh_password_entry.pack(pady=5, padx=10, fill="x")
+        self.add_clipboard_bindings(ssh_password_entry)
+
         # Кнопка "Сохранить" для обоих вкладок
         save_button = ttk.Button(settings_window, text="Сохранить", command=lambda: save_settings())
         save_button.pack(pady=10)
     
         def save_settings():
-            username = username_entry.get().strip()
-            password = password_entry.get().strip()
+            ad_user = username_entry.get().strip()
+            ad_pass = password_entry.get().strip()
             reset_pwd = reset_entry.get().strip()
-            if not username or not password or not reset_pwd:
-                messagebox.showerror("Ошибка", "Заполните все поля")
+            ssh_login = ssh_login_entry.get().strip()
+            ssh_pass = ssh_password_entry.get().strip()
+            if not ad_user or not ad_pass or not reset_pwd or not ssh_login:
+                messagebox.showerror("Ошибка", "Заполните все обязательные поля")
                 return
-            self.settings_manager.set_setting("ad_username", username)
-            self.settings_manager.set_setting("ad_password", password)
+            self.settings_manager.set_setting("ad_username", ad_user)
+            self.settings_manager.set_setting("ad_password", ad_pass)
             self.settings_manager.set_setting("reset_password", reset_pwd)
-            self.ad_credentials = {"username": username, "password": password}
+            self.settings_manager.set_setting("ssh_login", ssh_login)
+            self.settings_manager.set_setting("ssh_password", ssh_pass)
+            self.ad_credentials = {"username": ad_user, "password": ad_pass}
             self.on_toplevel_close(settings_window, "settings_window_geometry")
+    
 
     def show_ip_window(self, ip):
         top = tk.Toplevel(self.master)

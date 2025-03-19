@@ -1,12 +1,14 @@
 {
     "check_interval": 600,
-    "window_geometry": "1314x440+443+125",
+    "window_geometry": "1310x634+443+125",
     "ip_window_geometry": "350x100+1749+401",
     "ad_sync_geometry": "324x186+2166+708",
     "ad_sync_select_geometry": "591x442+1610+587",
     "edit_window_geometry": "347x166+1806+485",
     "ad_username": "login",
     "ad_password": "pass$",
-    "settings_window_geometry": "473x306+959+462",
-    "reset_password": "$RFV4rfv4сrfv"
+    "settings_window_geometry": "739x358+691+446",
+    "reset_password": "!QAZ1qaz1qaz",
+    "ssh_login": "login",
+    "ssh_password": "123"
 }
