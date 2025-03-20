@@ -1,6 +1,10 @@
 {
     "check_interval": 600,
+<<<<<<< HEAD
     "window_geometry": "1310x334+443+125",
+=======
+    "window_geometry": "1310x634+443+125",
+>>>>>>> 34c325a... Добавлена опция сохранения пароля для SSH(её также можно отключить)
     "ip_window_geometry": "350x100+1749+401",
     "ad_sync_geometry": "324x186+2166+708",
     "ad_sync_select_geometry": "591x442+1610+587",
@@ -10,6 +14,7 @@
     "settings_window_geometry": "739x382+691+446",
     "reset_password": "!QAZ1qaz1qaz",
     "ssh_login": "111",
-    "ssh_password": "111",
-    "ssh_terminal": "Windows Terminal"
+    "ssh_password": "0111",
+    "ssh_terminal": "PowerShell",
+    "ssh_pass_enabled": false
 }
