@@ -11,6 +11,6 @@
     "reset_password": "!QAZ1qaz1qaz",
     "ssh_login": "111",
     "ssh_password": "0111",
-    "ssh_terminal": "PowerShell",
+    "ssh_terminal": "Windows Terminal",
     "ssh_pass_enabled": false
 }
