@@ -16,5 +16,6 @@
     "glpi_api_url": "",
     "glpi_app_token": "",
     "glpi_user_token": "",
-    "glpi_prefix_field": "name"
+    "glpi_prefix_field": "name",
+    "glpi_verify_ssl": true
 }
