@@ -1277,6 +1277,8 @@ class MainWindow:
                 _pbx_dump("peersplain.txt", text)
 
 
+                active_now = set()
+
                 for ext in watch_exts:
                     block = extract_block_for_ext(text, ext)
                     if block:
@@ -1301,18 +1303,29 @@ class MainWindow:
                         num, name = caller
                         who = (num or "unknown") + (f" ({name})" if name else "")
                         key = f"{ext}|{who}|{int(time.time()/dup_ttl)}"
+                        active_now.add(ext)
                         if key not in seen:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
                             log_message(f"CALL {ext}: {who}")
 
                             # 1) показать сверху
                             with self.calls_lock:
+                                self.active_calls = [c for c in self.active_calls if c["ext"] != ext]
                                 self.active_calls.insert(0, {"ext":ext, "num":num or "", "name":name or "", "ts":time.time()})
                             self.master.after(0, self.populate_buttons)
 
                             # 2) всплывашка
                             if popup_on:
                                 self.master.after(0, lambda e=ext, w=who: self._popup(f"Звонок на {e}", w))
+
+                with self.calls_lock:
+                    now_ts = time.time()
+                    filtered_calls = [c for c in self.active_calls if c["ext"] in active_now and now_ts - c["ts"] < self.calls_ttl]
+                    removed = len(filtered_calls) != len(self.active_calls)
+                    self.active_calls = filtered_calls
+
+                if removed:
+                    self.master.after(0, self.populate_buttons)
 
             except Exception as e:
                 log_message(f"CallWatcher error: {e}")
