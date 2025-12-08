@@ -1233,6 +1233,7 @@ class UserButton(ttk.Frame):
         m.add_command(label="Удаленный помощник", command=self.remote_assistance)
         m.add_command(label="Проводник (C$)", command=self.open_explorer)
         m.add_command(label="Получить IP", command=self.get_ip)
+        m.add_command(label="Открыть в GLPI", command=self.open_glpi)
         m.add_separator()
         m.add_command(label="Сброс пароля pak", command=lambda: self.reset_password_ps("pak"))
         m.add_command(label="Сброс пароля omg", command=lambda: self.reset_password_ps("omg"))
@@ -1268,6 +1269,16 @@ class UserButton(ttk.Frame):
             os.startfile(f"\\\\{self.user['pc_name']}\\c$")
         except Exception as e:
             messagebox.showerror("Проводник", str(e))
+
+    def open_glpi(self):
+        try:
+            last_name = self.user["name"].split()[0]
+        except Exception:
+            return messagebox.showerror("GLPI", "Не удалось определить фамилию пользователя")
+        if not last_name:
+            return messagebox.showerror("GLPI", "Не удалось определить фамилию пользователя")
+        url = f"https://inv.pak-cspmz.ru/front/search.php?globalsearch={urllib.parse.quote(last_name)}"
+        webbrowser.open(url)
 
     def get_ip(self):
         def task():
