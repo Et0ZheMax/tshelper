@@ -1749,6 +1749,15 @@ class MainWindow:
 
     # ----------------- Call Watcher -----------------
     def start_call_watcher(self):
+        if not self.settings.get_setting("cw_enabled", True):
+            log_message("CallWatcher: отключен в настройках, поток не запущен")
+            return
+
+        url = self._normalize_pbx_url(self.settings.get_setting("cw_url", ""))
+        if not url:
+            log_message("CallWatcher: не задан URL Peers-страницы, слежение не запущено")
+            return
+
         self._stop_cw = False
         t = threading.Thread(target=self._call_watcher_loop, daemon=True)
         t.start()
@@ -1917,7 +1926,10 @@ class MainWindow:
 
     def _call_watcher_loop(self):
         import requests
-        url     = self.settings.get_setting("cw_url","").strip()
+        url     = self._normalize_pbx_url(self.settings.get_setting("cw_url", ""))
+        if not url:
+            log_message("CallWatcher: URL не задан, выходим из цикла")
+            return
         cookie  = self.settings.get_setting("cw_cookie","").strip()
         if cookie and "=" not in cookie:
             log_message("CallWatcher: Cookie выглядит как голый ID. Нужна полная строка: 'PHPSESSID=...; fpbx_admin=...'.")
@@ -2134,20 +2146,12 @@ class UserButton(ttk.Frame):
         if not pc or pc.lower() == self.user.get("pc_name", "").lower():
             return
         old_pc = self.user.get("pc_name", "")
-        self.user["pc_name"] = pc
-        self.user["pc_options"] = self.app._merge_pc_options(pc, self.user.get("pc_options", []), [old_pc])
-        self.app.users.update_user(old_pc, self.user)
-        self.app.populate_buttons()
-        log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
+        new_user = dict(self.user)
+        new_user["pc_name"] = pc
+        new_user["pc_options"] = self.app._merge_pc_options(pc, self.user.get("pc_options", []), [old_pc])
 
-
-    def _switch_pc(self, pc):
-        if not pc or pc.lower() == self.user.get("pc_name", "").lower():
-            return
-        old_pc = self.user.get("pc_name", "")
-        self.user["pc_name"] = pc
-        self.user["pc_options"] = self.app._merge_pc_options(pc, self.user.get("pc_options", []), [old_pc])
-        self.app.users.update_user(old_pc, self.user)
+        self.app.users.update_user(old_pc, new_user)
+        self.user.update(new_user)
         self.app.populate_buttons()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
 
