@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -475,6 +475,146 @@ class SettingsManager:
         return self.secret_storage.available
     def save_config(self): save_json(self.path, self.config)
 
+class LogViewer(tk.Toplevel):
+    def __init__(self, master, settings, log_path: str = "app.log"):
+        super().__init__(master)
+        self.settings = settings
+        self.log_path = log_path
+        self.title("Просмотр логов")
+        geom = self.settings.get_setting("log_window_geometry")
+        if geom: self.geometry(geom)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.level_var = tk.StringVar(value="Все")
+        self.date_from_var = tk.StringVar()
+        self.date_to_var = tk.StringVar()
+        self.autoscroll_var = tk.BooleanVar(value=True)
+
+        top = ttk.Frame(self, padding=10); top.pack(fill="x")
+        ttk.Label(top, text="Уровень:").grid(row=0, column=0, sticky="w", padx=(0,6))
+        levels = ["Все", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        ttk.Combobox(top, values=levels, textvariable=self.level_var, state="readonly", width=10).grid(row=0, column=1, padx=(0,8))
+
+        ttk.Label(top, text="С даты (ГГГГ-ММ-ДД):").grid(row=0, column=2, sticky="w")
+        ttk.Entry(top, textvariable=self.date_from_var, width=12).grid(row=0, column=3, padx=(6,8))
+        ttk.Label(top, text="По дату:").grid(row=0, column=4, sticky="w")
+        ttk.Entry(top, textvariable=self.date_to_var, width=12).grid(row=0, column=5, padx=(6,8))
+
+        ttk.Checkbutton(top, text="Автопрокрутка", variable=self.autoscroll_var).grid(row=0, column=6, padx=(0,8))
+        ttk.Button(top, text="Обновить", command=self.reload_logs).grid(row=0, column=7)
+        top.grid_columnconfigure(8, weight=1)
+
+        frame = ttk.Frame(self, padding=(10,0)); frame.pack(fill="both", expand=True)
+        self.text = tk.Text(frame, wrap="none", height=30)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=yscroll.set)
+        yscroll.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
+        self.text.configure(state="disabled")
+
+        bottom = ttk.Frame(self, padding=10); bottom.pack(fill="x")
+        ttk.Button(bottom, text="Скопировать в буфер", command=self.copy_to_clipboard).pack(side="left", padx=(0,6))
+        ttk.Button(bottom, text="Сохранить…", command=self.save_to_file).pack(side="left")
+
+        self.reload_logs()
+
+    def on_close(self):
+        self.settings.set_setting("log_window_geometry", self.geometry())
+        self.destroy()
+
+    def reload_logs(self):
+        date_from, ok_from = self._parse_date_value(self.date_from_var.get().strip(), "С даты")
+        if not ok_from:
+            return
+        date_to, ok_to = self._parse_date_value(self.date_to_var.get().strip(), "По дату")
+        if not ok_to:
+            return
+
+        level = self.level_var.get().upper()
+        entries = self._read_logs()
+        filtered = []
+        for dt, lvl, raw in entries:
+            if level != "ВСЕ" and lvl.upper() != level:
+                continue
+            if date_from and dt.date() < date_from:
+                continue
+            if date_to and dt.date() > date_to:
+                continue
+            filtered.append(raw)
+
+        self._render_text("\n".join(filtered))
+
+    def _parse_date_value(self, value: str, label: str):
+        if not value:
+            return None, True
+        try:
+            return datetime.datetime.strptime(value, "%Y-%m-%d").date(), True
+        except ValueError:
+            messagebox.showerror("Фильтр по дате", f"Некорректная дата в поле «{label}». Используйте формат ГГГГ-ММ-ДД.")
+            return None, False
+
+    def _read_logs(self):
+        entries = []
+        for path in sorted(glob.glob(f"{self.log_path}*"), key=os.path.getmtime):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        parsed = self._parse_line(line.rstrip("\n"))
+                        if parsed:
+                            entries.append(parsed)
+            except Exception as e:
+                log_message(f"Не удалось прочитать лог {path}: {e}")
+        return entries
+
+    def _parse_line(self, line: str):
+        m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (\w+): (.*)", line)
+        if not m:
+            return None
+        try:
+            ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S,%f")
+        except ValueError:
+            return None
+        return (ts, m.group(2), line)
+
+    def _render_text(self, content: str):
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        if content:
+            self.text.insert("1.0", content)
+        self.text.configure(state="disabled")
+        if self.autoscroll_var.get():
+            self.text.see("end")
+
+    def copy_to_clipboard(self):
+        try:
+            data = self.text.get("sel.first", "sel.last")
+        except tk.TclError:
+            data = self.text.get("1.0", "end-1c")
+        if not data:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(data)
+        messagebox.showinfo("Буфер обмена", "Выдержка из логов скопирована.")
+
+    def save_to_file(self):
+        data = self.text.get("1.0", "end-1c")
+        if not data:
+            return messagebox.showinfo("Сохранение", "Нет данных для сохранения.")
+        path = filedialog.asksaveasfilename(
+            title="Сохранить логи",
+            defaultextension=".txt",
+            filetypes=[("Текстовый файл", "*.txt"), ("Все файлы", "*.*")],
+            initialfile="app.log.txt",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(data)
+            messagebox.showinfo("Сохранение", f"Логи сохранены в {path}")
+        except Exception as e:
+            messagebox.showerror("Сохранение", f"Не удалось сохранить файл: {e}")
+
 class MainWindow:
     def __init__(self, master):
         self.master = master
@@ -533,6 +673,7 @@ class MainWindow:
 
         toolsm = tk.Menu(menubar, tearoff=0)
         toolsm.add_command(label="Проверка окружения", command=self.show_env_check)
+        toolsm.add_command(label="Просмотр логов", command=self.open_log_viewer)
         menubar.add_cascade(label="Инструменты", menu=toolsm)
         self.master.config(menu=menubar)
 
@@ -560,6 +701,12 @@ class MainWindow:
         ttk.Button(bottom, text="Добавить", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(bottom, text="AD Sync", command=self.ad_sync).pack(side="left", padx=5)
         self.count_lbl = ttk.Label(bottom, text="Найдено аккаунтов: 0"); self.count_lbl.pack(side="right")
+
+    def open_log_viewer(self):
+        if getattr(self, "log_window", None) and self.log_window.winfo_exists():
+            self.log_window.lift(); self.log_window.focus_force()
+            return
+        self.log_window = LogViewer(self.master, self.settings)
 
     def _bind_mousewheel(self):
         # включаем прокрутку только когда курсор над канвой, чтобы не мешать другим окнам
