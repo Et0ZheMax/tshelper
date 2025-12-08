@@ -87,6 +87,14 @@ def _import_requests_optional():
     except ImportError:
         return None, "requests не установлен"
 
+
+def _import_requests_optional():
+    try:
+        import requests
+        return requests, None
+    except ImportError:
+        return None, "requests не установлен"
+
 def dpapi_encrypt(s: str) -> str:
     if not DPAPI_AVAILABLE: return s
     blob = win32crypt.CryptProtectData(s.encode('utf-8'), None, None, None, None, 0)
@@ -506,6 +514,164 @@ class GLPIClient:
             "source": self.prefix_field
         }
 
+
+class GLPIClient:
+    def __init__(self, api_url: str, app_token: str, user_token: str, prefix_field: str = "name"):
+        self.api_url = (api_url or "").rstrip("/")
+        self.app_token = app_token or ""
+        self.user_token = user_token or ""
+        self.prefix_field = prefix_field or "name"
+        self.session_token = None
+        self.session = None
+
+    def _headers(self, with_auth: bool = True):
+        hdrs = {"App-Token": self.app_token}
+        if with_auth and self.session_token:
+            hdrs["Session-Token"] = self.session_token
+        elif with_auth and self.user_token:
+            hdrs["Authorization"] = f"user_token {self.user_token}"
+        return hdrs
+
+    def _ensure_session(self):
+        if self.session:
+            return True
+        requests, err = _import_requests_optional()
+        if not requests:
+            log_message(err or "requests не установлен")
+            messagebox.showerror("GLPI", err or "requests не установлен")
+            return False
+        self.session = requests.Session()
+        return True
+
+    def _init_session(self) -> bool:
+        if self.session_token:
+            return True
+        if not self.api_url or not self.app_token or not self.user_token:
+            messagebox.showerror("GLPI", "Не заданы API URL/токены")
+            return False
+        if not self._ensure_session():
+            return False
+        try:
+            resp = self.session.post(f"{self.api_url}/initSession", headers=self._headers())
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            self.session_token = data.get("session_token") or data.get("sessiontoken")
+            if not self.session_token:
+                raise ValueError("session_token отсутствует в ответе")
+            return True
+        except Exception as e:
+            log_message(f"GLPI initSession error: {e}")
+            messagebox.showerror("GLPI", f"Не удалось открыть сессию: {e}")
+            return False
+
+    def _search(self, itemtype: str, query: str):
+        if not self._init_session():
+            return []
+        try:
+            resp = self.session.get(
+                f"{self.api_url}/search/{itemtype}",
+                headers=self._headers(),
+                params={"searchText": query}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("data") if isinstance(data, dict) else None
+            return rows if isinstance(rows, list) else []
+        except Exception as e:
+            log_message(f"GLPI search error ({itemtype}): {e}")
+            return []
+
+    def _first_user_id(self, login: str, full_name: str = ""):
+        for q in (login, full_name):
+            q = (q or "").strip()
+            if not q:
+                continue
+            rows = self._search("User", q)
+            for row in rows:
+                if isinstance(row, dict):
+                    uid = row.get("id") or row.get("2")
+                    if uid:
+                        return uid
+                elif isinstance(row, list) and row:
+                    possible = row[0].get("id") if isinstance(row[0], dict) else None
+                    if possible:
+                        return possible
+        return None
+
+    def _fetch_user_computers(self, user_id):
+        if not self._init_session():
+            return []
+        try:
+            resp = self.session.get(
+                f"{self.api_url}/User/{user_id}/Computer",
+                headers=self._headers()
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return data.get("data") or []
+        except Exception as e:
+            log_message(f"GLPI get computers error: {e}")
+        return []
+
+    def _extract_name(self, item, key: str):
+        if isinstance(item, dict):
+            if key in item:
+                return item.get(key)
+            for v in item.values():
+                if isinstance(v, dict) and key in v:
+                    return v.get(key)
+        return None
+
+    def _to_pc_candidates(self, computers, login: str):
+        names = []
+        login = (login or "").strip()
+        for c in computers:
+            if isinstance(c, dict):
+                for k in ("name", "1", "2", "computer_name"):
+                    nm = self._extract_name(c, k) or c.get(k)
+                    if nm:
+                        names.append(str(nm))
+                pref = self._extract_name(c, self.prefix_field) or c.get(self.prefix_field)
+                if pref and login:
+                    pref = str(pref).strip()
+                    if pref and not pref.endswith("-"):
+                        pref = pref + "-"
+                    names.append(f"{pref}{login}")
+            elif isinstance(c, list):
+                for it in c:
+                    if isinstance(it, dict) and "name" in it:
+                        names.append(str(it.get("name")))
+        uniq = []
+        seen = set()
+        for nm in names:
+            key = nm.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            uniq.append(nm.strip())
+        return uniq
+
+    def find_user_computers(self, login: str, full_name: str = ""):
+        uid = self._first_user_id(login, full_name)
+        computers = self._fetch_user_computers(uid) if uid else []
+        if not computers:
+            # fallback по текстовому поиску, если привязки не нашли
+            fallback_query = login or full_name
+            computers = self._search("Computer", fallback_query) if fallback_query else []
+        candidates = self._to_pc_candidates(computers, login)
+        filtered = [c for c in candidates if not c.lower().startswith(("wr-", "lr-"))]
+        if not filtered:
+            return {"main": None, "options": [], "source": self.prefix_field}
+        main = filtered[0]
+        return {
+            "main": main,
+            "options": [c for c in filtered[1:] if c.lower() != main.lower()],
+            "source": self.prefix_field
+        }
+
 # --------------- Call Watcher (HTTP-парсер FreePBX) ---------------
 def html_unwrap(html: str) -> str:
     from html import unescape
@@ -580,6 +746,27 @@ class UserManager:
                 self.users[i] = self._normalize_user(new_user); self.save(); return
     def delete_user(self, pc_name):
         self.users = [u for u in self.users if u["pc_name"] != pc_name]; self.save()
+
+    def _normalize_user(self, u: dict):
+        if not isinstance(u, dict):
+            return {"name":"", "pc_name":""}
+        main = str(u.get("pc_name", "") or "")
+        opts = u.get("pc_options") or []
+        if not isinstance(opts, list):
+            opts = []
+        filtered = []
+        seen = {main.lower(): main} if main else {}
+        for opt in opts:
+            if not opt:
+                continue
+            low = str(opt).lower()
+            if low == main.lower() or low in seen:
+                continue
+            seen[low] = str(opt)
+            filtered.append(str(opt))
+        u["pc_name"] = main
+        u["pc_options"] = filtered
+        return u
 
     def _normalize_user(self, u: dict):
         if not isinstance(u, dict):
@@ -866,6 +1053,27 @@ class MainWindow:
         # Запуск колл-вотчера
         if self.settings.get_setting("cw_enabled", True):
             self.start_call_watcher()
+
+    # --------- Работа с именами ПК ----------
+    def get_allowed_prefixes(self) -> list:
+        prefixes = self.settings.get_setting("pc_prefixes", ["w-", "l-"])
+        if isinstance(prefixes, str):
+            prefixes = [p.strip() for p in re.split(r"[;,]", prefixes) if p.strip()]
+        elif isinstance(prefixes, (list, tuple, set)):
+            prefixes = [str(p).strip() for p in prefixes if str(p).strip()]
+        else:
+            prefixes = []
+        return prefixes
+
+    def normalize_pc_name(self, pc_name: str) -> tuple[str, str]:
+        for pref in self.get_allowed_prefixes():
+            if pc_name.lower().startswith(pref.lower()):
+                return pc_name[len(pref):], pref
+        return pc_name, ""
+
+    def get_display_pc_name(self, pc_name: str) -> str:
+        clean, pref = self.normalize_pc_name(pc_name)
+        return clean if pref else pc_name
 
     # --------- UI ----------
     def build_ui(self):
@@ -1278,6 +1486,19 @@ class MainWindow:
         else:
             messagebox.showinfo("GLPI", "Изменений нет")
 
+    def glpi_prefix_sync(self):
+        glpi_client = self._make_glpi_client()
+        if not glpi_client:
+            return
+        updated, changed = self._apply_glpi_prefixes(self.users.get_users(), glpi_client, "GLPI Sync")
+        if changed:
+            self.users.users = updated
+            self.users.save()
+            self.populate_buttons()
+            messagebox.showinfo("GLPI", "Префиксы и ПК обновлены по данным GLPI")
+        else:
+            messagebox.showinfo("GLPI", "Изменений нет")
+
     # --------- Settings ----------
     def open_settings(self):
         win = tk.Toplevel(self.master); win.title("Настройки")
@@ -1287,6 +1508,12 @@ class MainWindow:
         nb = ttk.Notebook(win); nb.pack(fill="both", expand=True, padx=10, pady=10)
 
         can_show_secrets = self.settings.can_show_secrets()
+
+        # Общие настройки
+        tab_common = ttk.Frame(nb); nb.add(tab_common, text="Общее")
+        ttk.Label(tab_common, text="Допустимые префиксы ПК (через запятую):").pack(pady=4, anchor="w")
+        prefixes_var = tk.StringVar(value=", ".join(self.get_allowed_prefixes()))
+        ttk.Entry(tab_common, textvariable=prefixes_var).pack(fill="x")
 
         def add_storage_warning(tab):
             if can_show_secrets:
@@ -1417,6 +1644,8 @@ class MainWindow:
 
         # Save
         def save_all():
+            prefixes = [p.strip() for p in re.split(r"[;,]", prefixes_var.get()) if p.strip()]
+            self.settings.set_setting("pc_prefixes", prefixes)
             self.settings.set_setting("ad_username", e_user.get().strip())
             self.settings.set_setting("ad_password", e_pass.get().strip())
             self.settings.set_setting("reset_password", e_rst.get().strip())
@@ -1884,7 +2113,7 @@ class UserButton(ttk.Frame):
         # создаём tk.Button, чтобы гарантированно красить
         self.btn = tk.Button(
             self,
-            text=f"{user['name']}\n({user['pc_name']})",
+            text=f"{user['name']}\n({self.app.get_display_pc_name(user['pc_name'])})",
             bg=self.app.user_bg, fg=self.app.user_fg,
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg,
             relief="groove", bd=2, justify="center", wraplength=180,
@@ -1901,8 +2130,9 @@ class UserButton(ttk.Frame):
 
     def set_availability(self, ok, searching=False):
         self.avail = ok
+        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         prefix = "🟢 " if (searching and ok) else ("🔴 " if (searching and not ok) else "")
-        self.btn.config(text=f"{prefix}{self.user['name']}\n({self.user['pc_name']})")
+        self.btn.config(text=f"{prefix}{self.user['name']}\n({pc_label})")
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
@@ -1947,9 +2177,21 @@ class UserButton(ttk.Frame):
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
 
 
+    def _switch_pc(self, pc):
+        if not pc or pc.lower() == self.user.get("pc_name", "").lower():
+            return
+        old_pc = self.user.get("pc_name", "")
+        self.user["pc_name"] = pc
+        self.user["pc_options"] = self.app._merge_pc_options(pc, self.user.get("pc_options", []), [old_pc])
+        self.app.users.update_user(old_pc, self.user)
+        self.app.populate_buttons()
+        log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
+
+
     # --- Actions ---
     def _log_action(self, action: str):
-        log_action(f"{self.user.get('name', '?')} ({self.user.get('pc_name', '?')}): {action}")
+        pc_label = self.app.get_display_pc_name(self.user.get("pc_name", "?"))
+        log_action(f"{self.user.get('name', '?')} ({pc_label}): {action}")
 
     def rdp_connect(self):
         try:
@@ -2003,8 +2245,7 @@ class UserButton(ttk.Frame):
 
     def reset_password_ps(self, which):
         new_pw = self.app.settings.get_setting("reset_password","12340987")
-        sam = self.user["pc_name"]
-        if sam.lower().startswith("w-"): sam = sam[2:]
+        sam, _ = self.app.normalize_pc_name(self.user["pc_name"])
         script = f"""
 Import-Module ActiveDirectory;
 $user = Get-ADUser -Filter "SamAccountName -eq '{sam}'";
@@ -2028,8 +2269,7 @@ Write-Output "OK";
         ssh_password = self.app.settings.get_setting("ssh_password","")
         if not ssh_login:
             return messagebox.showerror("SSH", "Не задан SSH Login в настройках")
-        pc = self.user["pc_name"]
-        if pc.lower().startswith("w-"): pc = pc[2:]
+        pc, _ = self.app.normalize_pc_name(self.user["pc_name"])
         term = self.app.settings.get_setting("ssh_terminal","Windows Terminal")
         auto = self.app.settings.get_setting("ssh_pass_enabled", False)
 
