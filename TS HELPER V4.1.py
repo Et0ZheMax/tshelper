@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -78,6 +78,75 @@ def dpapi_decrypt(s: str) -> str:
     raw = base64.b64decode(s[len("dpapi:"):])
     data = win32crypt.CryptUnprotectData(raw, None, None, None, 0)[1]
     return data.decode('utf-8')
+
+# --- Keyring для безопасного хранения ---
+KEYRING_AVAILABLE = importlib.util.find_spec("keyring") is not None
+if KEYRING_AVAILABLE:
+    import keyring
+    from keyring.errors import KeyringError, NoKeyringError
+else:
+    keyring = None
+    class KeyringError(Exception):
+        pass
+    class NoKeyringError(Exception):
+        pass
+
+
+class SecretStorage:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.available = self._check_available()
+        self._ephemeral = {}
+
+    def _check_available(self) -> bool:
+        if not KEYRING_AVAILABLE:
+            return False
+        try:
+            keyring.get_keyring().get_password(self.service_name, "__tshelper_probe__")
+            return True
+        except NoKeyringError:
+            return False
+        except Exception as e:
+            log_message(f"Keyring недоступен: {e}")
+            return False
+
+    def _is_ref(self, ref: str) -> bool:
+        return isinstance(ref, str) and ref.startswith("kr:")
+
+    def _generate_ref(self, key_name: str) -> str:
+        return f"kr:{key_name}:{uuid.uuid4().hex}"
+
+    def store_secret(self, key_name: str, secret: str, current_ref: str = "") -> str:
+        if not secret:
+            return ""
+        if not self.available:
+            self._ephemeral[key_name] = secret
+            return ""
+        ref = current_ref if self._is_ref(current_ref) else self._generate_ref(key_name)
+        try:
+            keyring.set_password(self.service_name, ref, secret)
+            if key_name in self._ephemeral:
+                self._ephemeral.pop(key_name, None)
+            return ref
+        except KeyringError as e:
+            log_message(f"Не удалось сохранить секрет {key_name}: {e}")
+            return ""
+
+    def get_secret(self, key_name: str, ref: str):
+        if self.available and self._is_ref(ref):
+            try:
+                return keyring.get_password(self.service_name, ref)
+            except KeyringError as e:
+                log_message(f"Не удалось прочитать секрет {key_name}: {e}")
+        return self._ephemeral.get(key_name)
+
+    def delete_secret(self, key_name: str, ref: str):
+        if self.available and self._is_ref(ref):
+            try:
+                keyring.delete_password(self.service_name, ref)
+            except Exception:
+                pass
+        self._ephemeral.pop(key_name, None)
 
 # --- Debug dumps for PBX page ---
 PBX_DEBUG_DUMP = True
@@ -277,7 +346,7 @@ class SettingsManager:
             # AD creds
             "ad_username":"", "ad_password":"",
             # Reset password
-            "reset_password":"dpapi:"+"" if DPAPI_AVAILABLE else "12340987",
+            "reset_password":"",
             # SSH
             "ssh_login":"", "ssh_password":"", "ssh_terminal":"Windows Terminal", "ssh_pass_enabled": False,
             "plink_hostkeys": {},
@@ -296,18 +365,69 @@ class SettingsManager:
             "ui_user_bg": "#ffffff", "ui_user_fg": "#000000",
             "ui_caller_bg": "#fff3cd", "ui_caller_fg": "#111111"  # жёлтый soft
         })
+        self.secret_storage = SecretStorage(APP_NAME)
+        self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password"}
+
+    def _migrate_plain_secret(self, key):
+        current = self.config.get(key, "")
+        if not current or (isinstance(current, str) and current.startswith("kr:")):
+            return
+        if not self.secret_storage.available:
+            return
+        if isinstance(current, str):
+            try:
+                current = dpapi_decrypt(current)
+            except Exception:
+                pass
+        ref = self.secret_storage.store_secret(key, str(current), "")
+        if ref:
+            self.config[key] = ref
+            self.save_config()
+
     def get_setting(self, k, default=None):
-        v = self.config.get(k, default)
-        if k in ("ad_password","ssh_password","reset_password","cw_password") and isinstance(v,str):
-            try: v = dpapi_decrypt(v)
-            except: pass
-        return v
+        if k in self._secret_keys:
+            ref = self.config.get(k, "")
+            secret = self.secret_storage.get_secret(k, ref)
+            if secret:
+                return secret
+            self._migrate_plain_secret(k)
+            ref = self.config.get(k, "")
+            secret = self.secret_storage.get_secret(k, ref)
+            if secret:
+                return secret
+            raw = self.config.get(k, default)
+            if isinstance(raw, str):
+                try:
+                    raw = dpapi_decrypt(raw)
+                except Exception:
+                    pass
+            return raw
+        return self.config.get(k, default)
+
     def set_setting(self, k, v):
-        if k in ("ad_password","ssh_password","reset_password","cw_password") and isinstance(v,str):
-            try: v = dpapi_encrypt(v)
-            except: pass
+        if k in self._secret_keys:
+            if not self.secret_storage.available:
+                try:
+                    self.config[k] = dpapi_encrypt(v)
+                except Exception:
+                    self.config[k] = v
+                if v:
+                    self.secret_storage._ephemeral[k] = v
+                else:
+                    self.secret_storage.delete_secret(k, self.config.get(k, ""))
+                self.save_config()
+                return
+            ref = self.secret_storage.store_secret(k, v, self.config.get(k, ""))
+            if not v:
+                self.secret_storage.delete_secret(k, self.config.get(k, ""))
+            self.config[k] = ref
+            self.save_config()
+            return
         self.config[k] = v
         self.save_config()
+
+    def can_show_secrets(self) -> bool:
+        return self.secret_storage.available
     def save_config(self): save_json(self.path, self.config)
 
 class MainWindow:
@@ -677,17 +797,37 @@ class MainWindow:
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"settings_window_geometry"))
         nb = ttk.Notebook(win); nb.pack(fill="both", expand=True, padx=10, pady=10)
 
+        can_show_secrets = self.settings.can_show_secrets()
+
+        def add_storage_warning(tab):
+            if can_show_secrets:
+                return
+            ttk.Label(
+                tab,
+                text="Безопасное хранилище недоступно. Пароли не будут показываться в явном виде.",
+                foreground="red",
+                wraplength=520
+            ).pack(fill="x", pady=4)
+
+        def insert_secret(entry: ttk.Entry, key: str, default: str = ""):
+            if can_show_secrets:
+                entry.insert(0, self.settings.get_setting(key, default) or "")
+            else:
+                entry.insert(0, "")
+
         # AD creds
         tab_ad = ttk.Frame(nb); nb.add(tab_ad, text="Учетные данные AD")
+        add_storage_warning(tab_ad)
         ttk.Label(tab_ad, text="Логин:").pack(pady=4, anchor="w")
         e_user = ttk.Entry(tab_ad); e_user.insert(0, self.settings.get_setting("ad_username","")); e_user.pack(fill="x")
         ttk.Label(tab_ad, text="Пароль:").pack(pady=4, anchor="w")
-        e_pass = ttk.Entry(tab_ad, show="*"); e_pass.insert(0, self.settings.get_setting("ad_password","")); e_pass.pack(fill="x")
+        e_pass = ttk.Entry(tab_ad, show="*"); insert_secret(e_pass, "ad_password", ""); e_pass.pack(fill="x")
 
         # Reset password
         tab_rst = ttk.Frame(nb); nb.add(tab_rst, text="Пароль для сброса")
+        add_storage_warning(tab_rst)
         ttk.Label(tab_rst, text="Новый пароль:").pack(pady=4, anchor="w")
-        e_rst = ttk.Entry(tab_rst, show="*"); e_rst.insert(0, self.settings.get_setting("reset_password","12340987")); e_rst.pack(fill="x")
+        e_rst = ttk.Entry(tab_rst, show="*"); insert_secret(e_rst, "reset_password", "12340987"); e_rst.pack(fill="x")
         btn_toggle = ttk.Button(tab_rst, text="Показать")
         def toggle_pw():
             if e_rst.cget("show")=="*": e_rst.config(show=""); btn_toggle.config(text="Скрыть")
@@ -696,10 +836,11 @@ class MainWindow:
 
         # SSH
         tab_ssh = ttk.Frame(nb); nb.add(tab_ssh, text="SSH")
+        add_storage_warning(tab_ssh)
         ttk.Label(tab_ssh, text="SSH Login:").pack(pady=4, anchor="w")
         e_ssh_login = ttk.Entry(tab_ssh); e_ssh_login.insert(0, self.settings.get_setting("ssh_login","")); e_ssh_login.pack(fill="x")
         ttk.Label(tab_ssh, text="SSH Password:").pack(pady=4, anchor="w")
-        e_ssh_pass = ttk.Entry(tab_ssh, show="*"); e_ssh_pass.insert(0, self.settings.get_setting("ssh_password","")); e_ssh_pass.pack(fill="x")
+        e_ssh_pass = ttk.Entry(tab_ssh, show="*"); insert_secret(e_ssh_pass, "ssh_password", ""); e_ssh_pass.pack(fill="x")
         ttk.Label(tab_ssh, text="Терминал:").pack(pady=4, anchor="w")
         ssh_term = tk.StringVar(value=self.settings.get_setting("ssh_terminal","Windows Terminal"))
         cmb = ttk.Combobox(tab_ssh, textvariable=ssh_term, values=("Windows Terminal","CMD","PowerShell"), state="readonly")
@@ -713,6 +854,7 @@ class MainWindow:
 
         # Телефония (CallWatcher)
         tab_cw = ttk.Frame(nb); nb.add(tab_cw, text="Телефония")
+        add_storage_warning(tab_cw)
         cw_enabled = tk.BooleanVar(value=self.settings.get_setting("cw_enabled", True))
         ttk.Checkbutton(tab_cw, text="Включить отслеживание звонков", variable=cw_enabled).pack(anchor="w", pady=4)
         ttk.Label(tab_cw, text="Номера EXT (через запятую):").pack(anchor="w");
@@ -721,7 +863,7 @@ class MainWindow:
         e_url = ttk.Entry(tab_cw); e_url.insert(0, self.settings.get_setting("cw_url","")); e_url.pack(fill="x")
         ttk.Label(tab_cw, text="Логин/пароль для FreePBX (используются для автоподхвата cookie):").pack(anchor="w")
         e_pbx_login = ttk.Entry(tab_cw); e_pbx_login.insert(0, self.settings.get_setting("cw_login","")); e_pbx_login.pack(fill="x")
-        e_pbx_pass = ttk.Entry(tab_cw, show="*"); e_pbx_pass.insert(0, self.settings.get_setting("cw_password","")); e_pbx_pass.pack(fill="x")
+        e_pbx_pass = ttk.Entry(tab_cw, show="*"); insert_secret(e_pbx_pass, "cw_password", ""); e_pbx_pass.pack(fill="x")
 
         ttk.Label(tab_cw, text="Cookie (из DevTools или автоподхвата, всё после 'Cookie:'):").pack(anchor="w")
         cookie_row = ttk.Frame(tab_cw); cookie_row.pack(fill="x")

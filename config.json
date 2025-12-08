@@ -6,11 +6,11 @@
     "ad_sync_select_geometry": "591x442+1610+587",
     "edit_window_geometry": "347x166+1806+485",
     "ad_username": "login",
-    "ad_password": "pass$",
+    "ad_password": "",
     "settings_window_geometry": "739x358+691+446",
-    "reset_password": "!QAZ",
+    "reset_password": "",
     "ssh_login": "111",
-    "ssh_password": "0111",
+    "ssh_password": "",
     "ssh_terminal": "Windows Terminal",
     "ssh_pass_enabled": false
 }
