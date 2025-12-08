@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -50,7 +50,19 @@ logger.setLevel(logging.INFO)
 handler = RotatingFileHandler("app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
 logger.addHandler(handler)
-def log_message(msg): logger.info(msg)
+ACTION_LEVEL = logging.INFO + 1
+CALL_LEVEL = logging.INFO + 2
+logging.addLevelName(ACTION_LEVEL, "ACTION")
+logging.addLevelName(CALL_LEVEL, "CALL")
+
+def log_message(msg):
+    logger.info(msg)
+
+def log_action(msg):
+    logger.log(ACTION_LEVEL, msg)
+
+def log_call(msg):
+    logger.log(CALL_LEVEL, msg)
 
 # --- Локаль для сортировки ФИО ---
 try:
@@ -475,6 +487,146 @@ class SettingsManager:
         return self.secret_storage.available
     def save_config(self): save_json(self.path, self.config)
 
+class LogViewer(tk.Toplevel):
+    def __init__(self, master, settings, log_path: str = "app.log"):
+        super().__init__(master)
+        self.settings = settings
+        self.log_path = log_path
+        self.title("Просмотр логов")
+        geom = self.settings.get_setting("log_window_geometry")
+        if geom: self.geometry(geom)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.level_var = tk.StringVar(value="Все")
+        self.date_from_var = tk.StringVar()
+        self.date_to_var = tk.StringVar()
+        self.autoscroll_var = tk.BooleanVar(value=True)
+
+        top = ttk.Frame(self, padding=10); top.pack(fill="x")
+        ttk.Label(top, text="Уровень:").grid(row=0, column=0, sticky="w", padx=(0,6))
+        levels = ["Все", "DEBUG", "INFO", "ACTION", "CALL", "WARNING", "ERROR", "CRITICAL"]
+        ttk.Combobox(top, values=levels, textvariable=self.level_var, state="readonly", width=10).grid(row=0, column=1, padx=(0,8))
+
+        ttk.Label(top, text="С даты (ГГГГ-ММ-ДД):").grid(row=0, column=2, sticky="w")
+        ttk.Entry(top, textvariable=self.date_from_var, width=12).grid(row=0, column=3, padx=(6,8))
+        ttk.Label(top, text="По дату:").grid(row=0, column=4, sticky="w")
+        ttk.Entry(top, textvariable=self.date_to_var, width=12).grid(row=0, column=5, padx=(6,8))
+
+        ttk.Checkbutton(top, text="Автопрокрутка", variable=self.autoscroll_var).grid(row=0, column=6, padx=(0,8))
+        ttk.Button(top, text="Обновить", command=self.reload_logs).grid(row=0, column=7)
+        top.grid_columnconfigure(8, weight=1)
+
+        frame = ttk.Frame(self, padding=(10,0)); frame.pack(fill="both", expand=True)
+        self.text = tk.Text(frame, wrap="none", height=30)
+        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=yscroll.set)
+        yscroll.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
+        self.text.configure(state="disabled")
+
+        bottom = ttk.Frame(self, padding=10); bottom.pack(fill="x")
+        ttk.Button(bottom, text="Скопировать в буфер", command=self.copy_to_clipboard).pack(side="left", padx=(0,6))
+        ttk.Button(bottom, text="Сохранить…", command=self.save_to_file).pack(side="left")
+
+        self.reload_logs()
+
+    def on_close(self):
+        self.settings.set_setting("log_window_geometry", self.geometry())
+        self.destroy()
+
+    def reload_logs(self):
+        date_from, ok_from = self._parse_date_value(self.date_from_var.get().strip(), "С даты")
+        if not ok_from:
+            return
+        date_to, ok_to = self._parse_date_value(self.date_to_var.get().strip(), "По дату")
+        if not ok_to:
+            return
+
+        level = self.level_var.get().upper()
+        entries = self._read_logs()
+        filtered = []
+        for dt, lvl, raw in entries:
+            if level != "ВСЕ" and lvl.upper() != level:
+                continue
+            if date_from and dt.date() < date_from:
+                continue
+            if date_to and dt.date() > date_to:
+                continue
+            filtered.append(raw)
+
+        self._render_text("\n".join(filtered))
+
+    def _parse_date_value(self, value: str, label: str):
+        if not value:
+            return None, True
+        try:
+            return datetime.datetime.strptime(value, "%Y-%m-%d").date(), True
+        except ValueError:
+            messagebox.showerror("Фильтр по дате", f"Некорректная дата в поле «{label}». Используйте формат ГГГГ-ММ-ДД.")
+            return None, False
+
+    def _read_logs(self):
+        entries = []
+        for path in sorted(glob.glob(f"{self.log_path}*"), key=os.path.getmtime):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        parsed = self._parse_line(line.rstrip("\n"))
+                        if parsed:
+                            entries.append(parsed)
+            except Exception as e:
+                log_message(f"Не удалось прочитать лог {path}: {e}")
+        return entries
+
+    def _parse_line(self, line: str):
+        m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) (\w+): (.*)", line)
+        if not m:
+            return None
+        try:
+            ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S,%f")
+        except ValueError:
+            return None
+        return (ts, m.group(2), line)
+
+    def _render_text(self, content: str):
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        if content:
+            self.text.insert("1.0", content)
+        self.text.configure(state="disabled")
+        if self.autoscroll_var.get():
+            self.text.see("end")
+
+    def copy_to_clipboard(self):
+        try:
+            data = self.text.get("sel.first", "sel.last")
+        except tk.TclError:
+            data = self.text.get("1.0", "end-1c")
+        if not data:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(data)
+        messagebox.showinfo("Буфер обмена", "Выдержка из логов скопирована.")
+
+    def save_to_file(self):
+        data = self.text.get("1.0", "end-1c")
+        if not data:
+            return messagebox.showinfo("Сохранение", "Нет данных для сохранения.")
+        path = filedialog.asksaveasfilename(
+            title="Сохранить логи",
+            defaultextension=".txt",
+            filetypes=[("Текстовый файл", "*.txt"), ("Все файлы", "*.*")],
+            initialfile="app.log.txt",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(data)
+            messagebox.showinfo("Сохранение", f"Логи сохранены в {path}")
+        except Exception as e:
+            messagebox.showerror("Сохранение", f"Не удалось сохранить файл: {e}")
+
 class MainWindow:
     def __init__(self, master):
         self.master = master
@@ -533,6 +685,7 @@ class MainWindow:
 
         toolsm = tk.Menu(menubar, tearoff=0)
         toolsm.add_command(label="Проверка окружения", command=self.show_env_check)
+        toolsm.add_command(label="Просмотр логов", command=self.open_log_viewer)
         menubar.add_cascade(label="Инструменты", menu=toolsm)
         self.master.config(menu=menubar)
 
@@ -560,6 +713,12 @@ class MainWindow:
         ttk.Button(bottom, text="Добавить", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(bottom, text="AD Sync", command=self.ad_sync).pack(side="left", padx=5)
         self.count_lbl = ttk.Label(bottom, text="Найдено аккаунтов: 0"); self.count_lbl.pack(side="right")
+
+    def open_log_viewer(self):
+        if getattr(self, "log_window", None) and self.log_window.winfo_exists():
+            self.log_window.lift(); self.log_window.focus_force()
+            return
+        self.log_window = LogViewer(self.master, self.settings)
 
     def _bind_mousewheel(self):
         # включаем прокрутку только когда курсор над канвой, чтобы не мешать другим окнам
@@ -1357,7 +1516,7 @@ class MainWindow:
                         active_now.add(ext)
                         if key not in seen:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
-                            log_message(f"CALL {ext}: {who}")
+                            log_call(f"Звонок на {ext} от {who}")
 
                             # 1) показать сверху
                             with self.calls_lock:
@@ -1371,11 +1530,17 @@ class MainWindow:
 
                 with self.calls_lock:
                     now_ts = time.time()
+                    original_calls = list(self.active_calls)
                     filtered_calls = [c for c in self.active_calls if c["ext"] in active_now and now_ts - c["ts"] < self.calls_ttl]
-                    removed = len(filtered_calls) != len(self.active_calls)
+                    ended_calls = [c for c in original_calls if c not in filtered_calls]
                     self.active_calls = filtered_calls
 
-                if removed:
+                for c in ended_calls:
+                    duration = int(now_ts - c.get("ts", now_ts))
+                    who = (c.get("num") or "unknown") + (f" ({c.get('name')})" if c.get("name") else "")
+                    log_call(f"Звонок завершён на {c.get('ext')}: {who}, длительность ~{duration} c")
+
+                if ended_calls:
                     self.master.after(0, self.populate_buttons)
 
             except Exception as e:
@@ -1456,8 +1621,12 @@ class UserButton(ttk.Frame):
 
 
     # --- Actions ---
+    def _log_action(self, action: str):
+        log_action(f"{self.user.get('name', '?')} ({self.user.get('pc_name', '?')}): {action}")
+
     def rdp_connect(self):
         try:
+            self._log_action("Открыт RDP")
             if is_windows():
                 subprocess.Popen(["mstsc","/v", self.user["pc_name"]], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
@@ -1465,6 +1634,7 @@ class UserButton(ttk.Frame):
 
     def remote_assistance(self):
         try:
+            self._log_action("Открыт удалённый помощник")
             if is_windows():
                 run_as_admin("msra.exe", "/offerRA "+self.user["pc_name"])
         except Exception as e:
@@ -1472,6 +1642,7 @@ class UserButton(ttk.Frame):
 
     def open_explorer(self):
         try:
+            self._log_action("Открыт проводник C$")
             os.startfile(f"\\\\{self.user['pc_name']}\\c$")
         except Exception as e:
             messagebox.showerror("Проводник", str(e))
@@ -1484,6 +1655,7 @@ class UserButton(ttk.Frame):
         if not last_name:
             return messagebox.showerror("GLPI", "Не удалось определить фамилию пользователя")
         url = f"https://inv.pak-cspmz.ru/front/search.php?globalsearch={urllib.parse.quote(last_name)}"
+        self._log_action("Открыт профиль в GLPI")
         webbrowser.open(url)
 
     def get_ip(self):
@@ -1499,6 +1671,7 @@ class UserButton(ttk.Frame):
             except Exception as e:
                 ip = f"Ошибка: {e}"
             self.app.master.after(0, lambda: self.app.show_ip_window(ip))
+            self._log_action(f"Запрошен IP: {ip}")
         threading.Thread(target=task, daemon=True).start()
 
     def reset_password_ps(self, which):
@@ -1519,6 +1692,7 @@ Write-Output "OK";
         try:
             run_as_admin("powershell.exe", f"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
             messagebox.showinfo("Сброс пароля", f"Запущено для {self.user['name']} ({which.upper()}).")
+            self._log_action(f"Сброшен пароль ({which})")
         except Exception as e:
             messagebox.showerror("Сброс пароля", str(e))
 
@@ -1553,6 +1727,7 @@ Write-Output "OK";
                     else:           subprocess.Popen(["powershell","-NoExit","-Command", ssh_cmd])
             else:
                 messagebox.showerror("SSH","Неизвестный терминал")
+            self._log_action(f"Открыт SSH через {term}")
         except Exception as e:
             messagebox.showerror("SSH", str(e))
 
