@@ -608,8 +608,7 @@ class SettingsManager:
             # SSH
             "ssh_login":"", "ssh_password":"", "ssh_terminal":"Windows Terminal", "ssh_pass_enabled": False,
             "plink_hostkeys": {},
-            # GLPI
-            "glpi_api_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_prefix_field": "name",
+            "pc_prefixes": ["w-", "l-"],
             # OMG defaults
             "omg_domain":"omg.cspfmba.ru", "omg_base_dn":"DC=omg,DC=cspfmba,DC=ru",
             # --- CallWatcher settings ---
@@ -859,6 +858,27 @@ class MainWindow:
         # Запуск колл-вотчера
         if self.settings.get_setting("cw_enabled", True):
             self.start_call_watcher()
+
+    # --------- Работа с именами ПК ----------
+    def get_allowed_prefixes(self) -> list:
+        prefixes = self.settings.get_setting("pc_prefixes", ["w-", "l-"])
+        if isinstance(prefixes, str):
+            prefixes = [p.strip() for p in re.split(r"[;,]", prefixes) if p.strip()]
+        elif isinstance(prefixes, (list, tuple, set)):
+            prefixes = [str(p).strip() for p in prefixes if str(p).strip()]
+        else:
+            prefixes = []
+        return prefixes
+
+    def normalize_pc_name(self, pc_name: str) -> tuple[str, str]:
+        for pref in self.get_allowed_prefixes():
+            if pc_name.lower().startswith(pref.lower()):
+                return pc_name[len(pref):], pref
+        return pc_name, ""
+
+    def get_display_pc_name(self, pc_name: str) -> str:
+        clean, pref = self.normalize_pc_name(pc_name)
+        return clean if pref else pc_name
 
     # --------- UI ----------
     def build_ui(self):
@@ -1278,6 +1298,12 @@ class MainWindow:
 
         can_show_secrets = self.settings.can_show_secrets()
 
+        # Общие настройки
+        tab_common = ttk.Frame(nb); nb.add(tab_common, text="Общее")
+        ttk.Label(tab_common, text="Допустимые префиксы ПК (через запятую):").pack(pady=4, anchor="w")
+        prefixes_var = tk.StringVar(value=", ".join(self.get_allowed_prefixes()))
+        ttk.Entry(tab_common, textvariable=prefixes_var).pack(fill="x")
+
         def add_storage_warning(tab):
             if can_show_secrets:
                 return
@@ -1405,6 +1431,8 @@ class MainWindow:
 
         # Save
         def save_all():
+            prefixes = [p.strip() for p in re.split(r"[;,]", prefixes_var.get()) if p.strip()]
+            self.settings.set_setting("pc_prefixes", prefixes)
             self.settings.set_setting("ad_username", e_user.get().strip())
             self.settings.set_setting("ad_password", e_pass.get().strip())
             self.settings.set_setting("reset_password", e_rst.get().strip())
@@ -1871,7 +1899,7 @@ class UserButton(ttk.Frame):
         # создаём tk.Button, чтобы гарантированно красить
         self.btn = tk.Button(
             self,
-            text=f"{user['name']}\n({user['pc_name']})",
+            text=f"{user['name']}\n({self.app.get_display_pc_name(user['pc_name'])})",
             bg=self.app.user_bg, fg=self.app.user_fg,
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg,
             relief="groove", bd=2, justify="center", wraplength=180,
@@ -1888,8 +1916,9 @@ class UserButton(ttk.Frame):
 
     def set_availability(self, ok, searching=False):
         self.avail = ok
+        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         prefix = "🟢 " if (searching and ok) else ("🔴 " if (searching and not ok) else "")
-        self.btn.config(text=f"{prefix}{self.user['name']}\n({self.user['pc_name']})")
+        self.btn.config(text=f"{prefix}{self.user['name']}\n({pc_label})")
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
@@ -1936,7 +1965,8 @@ class UserButton(ttk.Frame):
 
     # --- Actions ---
     def _log_action(self, action: str):
-        log_action(f"{self.user.get('name', '?')} ({self.user.get('pc_name', '?')}): {action}")
+        pc_label = self.app.get_display_pc_name(self.user.get("pc_name", "?"))
+        log_action(f"{self.user.get('name', '?')} ({pc_label}): {action}")
 
     def rdp_connect(self):
         try:
@@ -1990,8 +2020,7 @@ class UserButton(ttk.Frame):
 
     def reset_password_ps(self, which):
         new_pw = self.app.settings.get_setting("reset_password","12340987")
-        sam = self.user["pc_name"]
-        if sam.lower().startswith("w-"): sam = sam[2:]
+        sam, _ = self.app.normalize_pc_name(self.user["pc_name"])
         script = f"""
 Import-Module ActiveDirectory;
 $user = Get-ADUser -Filter "SamAccountName -eq '{sam}'";
@@ -2015,8 +2044,7 @@ Write-Output "OK";
         ssh_password = self.app.settings.get_setting("ssh_password","")
         if not ssh_login:
             return messagebox.showerror("SSH", "Не задан SSH Login в настройках")
-        pc = self.user["pc_name"]
-        if pc.lower().startswith("w-"): pc = pc[2:]
+        pc, _ = self.app.normalize_pc_name(self.user["pc_name"])
         term = self.app.settings.get_setting("ssh_terminal","Windows Terminal")
         auto = self.app.settings.get_setting("ssh_pass_enabled", False)
 
