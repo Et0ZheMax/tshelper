@@ -17,5 +17,6 @@
     "glpi_app_token": "",
     "glpi_user_token": "",
     "glpi_prefix_field": "name",
-    "glpi_verify_ssl": true
+    "glpi_verify_ssl": true,
+    "glpi_use_in_ad_sync": true
 }
