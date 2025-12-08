@@ -28,6 +28,7 @@ python "TS HELPER V4.1.py"
 Основные параметры задаются в `config.json`:
 - `ad_username` / `ad_password` — учётные данные для подключения к AD.
 - `cw_url`, `cw_cookie`, `cw_exts` — доступ к странице статистики FreePBX и отслеживаемые внутренние номера.
+- `cw_login`, `cw_password` — учётные данные FreePBX для автоподхвата cookie через кнопку в настройках.
 - `ssh_login`, `ssh_password`, `ssh_terminal` — запуск удалённых сессий.
 - Геометрия окон (`window_geometry` и др.) сохраняется автоматически при закрытии.
 

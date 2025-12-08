@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -290,18 +290,20 @@ class SettingsManager:
             "cw_cookie": "mp1oomc5u57gpj1okil7hca2ue",     # строка Cookie: 'PHPSESSID=...; fpbx_admin=...'
             "cw_interval": 2,
             "cw_popup": True,
+            "cw_login": "",
+            "cw_password": "",
             # Цвета
             "ui_user_bg": "#ffffff", "ui_user_fg": "#000000",
             "ui_caller_bg": "#fff3cd", "ui_caller_fg": "#111111"  # жёлтый soft
         })
     def get_setting(self, k, default=None):
         v = self.config.get(k, default)
-        if k in ("ad_password","ssh_password","reset_password") and isinstance(v,str):
+        if k in ("ad_password","ssh_password","reset_password","cw_password") and isinstance(v,str):
             try: v = dpapi_decrypt(v)
             except: pass
         return v
     def set_setting(self, k, v):
-        if k in ("ad_password","ssh_password","reset_password") and isinstance(v,str):
+        if k in ("ad_password","ssh_password","reset_password","cw_password") and isinstance(v,str):
             try: v = dpapi_encrypt(v)
             except: pass
         self.config[k] = v
@@ -717,7 +719,11 @@ class MainWindow:
         e_exts = ttk.Entry(tab_cw); e_exts.insert(0, self.settings.get_setting("cw_exts","4444")); e_exts.pack(fill="x")
         ttk.Label(tab_cw, text="URL Peers-страницы FreePBX:").pack(anchor="w");
         e_url = ttk.Entry(tab_cw); e_url.insert(0, self.settings.get_setting("cw_url","")); e_url.pack(fill="x")
-        ttk.Label(tab_cw, text="Cookie (из DevTools, всё после 'Cookie:'):").pack(anchor="w")
+        ttk.Label(tab_cw, text="Логин/пароль для FreePBX (используются для автоподхвата cookie):").pack(anchor="w")
+        e_pbx_login = ttk.Entry(tab_cw); e_pbx_login.insert(0, self.settings.get_setting("cw_login","")); e_pbx_login.pack(fill="x")
+        e_pbx_pass = ttk.Entry(tab_cw, show="*"); e_pbx_pass.insert(0, self.settings.get_setting("cw_password","")); e_pbx_pass.pack(fill="x")
+
+        ttk.Label(tab_cw, text="Cookie (из DevTools или автоподхвата, всё после 'Cookie:'):").pack(anchor="w")
         cookie_row = ttk.Frame(tab_cw); cookie_row.pack(fill="x")
         e_cookie = ttk.Entry(cookie_row); e_cookie.insert(0, self.settings.get_setting("cw_cookie",""))
         e_cookie.pack(side="left", fill="x", expand=True)
@@ -727,6 +733,14 @@ class MainWindow:
             command=lambda: self._run_pbx_test(e_url.get(), e_cookie.get(), btn_test_cookie)
         )
         btn_test_cookie.pack(side="left", padx=6)
+        btn_fetch_cookie = ttk.Button(
+            cookie_row,
+            text="Получить cookie",
+            command=lambda: self._auto_fetch_pbx_cookie(
+                e_url.get(), e_pbx_login.get(), e_pbx_pass.get(), e_cookie, btn_fetch_cookie
+            )
+        )
+        btn_fetch_cookie.pack(side="left")
         ttk.Label(tab_cw, text="Интервал опроса, сек:").pack(anchor="w");
         e_interval = ttk.Entry(tab_cw); e_interval.insert(0, str(self.settings.get_setting("cw_interval",2))); e_interval.pack(fill="x")
         cw_popup = tk.BooleanVar(value=self.settings.get_setting("cw_popup", True))
@@ -781,6 +795,8 @@ class MainWindow:
             self.settings.set_setting("cw_exts", e_exts.get().strip())
             self.settings.set_setting("cw_url", e_url.get().strip())
             self.settings.set_setting("cw_cookie", e_cookie.get().strip())
+            self.settings.set_setting("cw_login", e_pbx_login.get().strip())
+            self.settings.set_setting("cw_password", e_pbx_pass.get().strip())
             try:
                 self.settings.set_setting("cw_interval", int(e_interval.get().strip()))
             except:
@@ -937,6 +953,41 @@ class MainWindow:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _auto_fetch_pbx_cookie(self, url: str, username: str, password: str,
+                               entry_cookie: ttk.Entry, btn: ttk.Button):
+        url = (url or "").strip()
+        username = (username or "").strip()
+        password = password or ""
+
+        def finalize(ok: bool, msg: str, new_cookie: str = ""):
+            try:
+                btn.config(state="normal", text="Получить cookie")
+            except Exception:
+                pass
+            if ok and new_cookie:
+                entry_cookie.delete(0, "end")
+                entry_cookie.insert(0, new_cookie)
+                self.settings.set_setting("cw_cookie", new_cookie)
+                self.settings.set_setting("cw_login", username)
+                self.settings.set_setting("cw_password", password)
+                try:
+                    self.restart_call_watcher_if_needed()
+                except Exception:
+                    pass
+                messagebox.showinfo("Cookie PBX", msg)
+            else:
+                messagebox.showerror("Cookie PBX", msg)
+
+        def worker():
+            try:
+                btn.config(state="disabled", text="Получение…")
+            except Exception:
+                pass
+            ok, msg, new_cookie = self._login_and_get_cookie(url, username, password)
+            self.master.after(0, lambda: finalize(ok, msg, new_cookie or ""))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _check_pbx_cookie(self, url: str, cookie: str):
         if not url:
             return False, "Укажите URL Peers-страницы FreePBX"
@@ -969,6 +1020,61 @@ class MainWindow:
             return True, "Страница PBX открывается, cookie принят"
         except Exception as e:
             return False, f"Ошибка запроса: {e}"
+
+    def _build_pbx_login_url(self, peers_url: str) -> str:
+        parsed = urllib.parse.urlsplit(peers_url)
+        base_path = parsed.path.rsplit("/", 1)[0] if parsed.path else "/admin"
+        if not base_path:
+            base_path = "/admin"
+        login_path = base_path.rstrip("/") + "/config.php"
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, login_path, "", ""))
+
+    def _extract_pbx_token(self, html: str):
+        m = re.search(r'name\s*=\s*"(?P<name>[\w:-]*token[\w:-]*)"[^>]*value\s*=\s*"(?P<val>[^"]+)"', html, flags=re.I)
+        if m:
+            return m.group("name"), m.group("val")
+        m2 = re.search(r'name\s*=\s*"__csrf_magic"[^>]*value\s*=\s*"(?P<val>[^"]+)"', html, flags=re.I)
+        if m2:
+            return "__csrf_magic", m2.group("val")
+        return None, None
+
+    def _login_and_get_cookie(self, url: str, username: str, password: str):
+        if not url:
+            return False, "Укажите URL Peers-страницы FreePBX", None
+        if not username or not password:
+            return False, "Укажите логин и пароль FreePBX", None
+        try:
+            import requests
+        except Exception:
+            return False, "requests не установлен — автоподхват недоступен", None
+
+        login_url = self._build_pbx_login_url(url)
+        session = requests.Session()
+        headers = {"User-Agent": "TSHelper/PbxLogin"}
+        try:
+            page = session.get(login_url, headers=headers, timeout=10)
+        except Exception as e:
+            return False, f"Ошибка открытия страницы логина: {e}", None
+
+        token_name, token_val = self._extract_pbx_token(page.text)
+        payload = {"username": username, "password": password, "submit": "Login"}
+        if token_name and token_val:
+            payload[token_name] = token_val
+
+        try:
+            resp = session.post(login_url, headers=headers, data=payload, timeout=10, allow_redirects=True)
+        except Exception as e:
+            return False, f"Ошибка авторизации: {e}", None
+
+        if looks_like_login(resp.text):
+            return False, "Не удалось авторизоваться в PBX — проверьте логин/пароль", None
+
+        cookie_str = "; ".join([f"{c.name}={c.value}" for c in session.cookies if c.value])
+        if not cookie_str:
+            return False, "PBX не вернул cookie", None
+
+        log_message("CallWatcher: cookie обновлена автоматически")
+        return True, "Cookie получена и сохранена", cookie_str
 
 
     def _call_watcher_loop(self):
