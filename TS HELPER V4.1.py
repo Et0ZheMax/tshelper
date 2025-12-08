@@ -2062,7 +2062,7 @@ class UserButton(ttk.Frame):
             text=f"{user['name']}\n({self.app.get_display_pc_name(user['pc_name'])})",
             bg=self.app.user_bg, fg=self.app.user_fg,
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg,
-            relief="groove", bd=2, justify="center", wraplength=180,
+            relief="groove", bd=2, justify="left", wraplength=180, anchor="nw",
             command=self._show_menu
         )
         self.btn.pack(fill="both", expand=True)
@@ -2079,10 +2079,10 @@ class UserButton(ttk.Frame):
         self.status_key = status_key
         icon = self.app.status_icons.get(status_key)
         if icon:
-            self.btn.config(image=icon, compound="left", padx=6)
+            self.btn.config(image=icon, compound="left", padx=8, pady=6, anchor="nw")
             self.btn.image = icon
         else:
-            self.btn.config(image="", compound="center")
+            self.btn.config(image="", compound="center", anchor="center", pady=0)
             self.btn.image = None
 
     def set_availability(self, ok, searching=False):
