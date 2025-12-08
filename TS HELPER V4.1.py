@@ -1374,9 +1374,12 @@ class MainWindow:
             return self.open_settings()
         ad_list = get_ad_users(AD_SERVER, ad_user, ad_pass, AD_BASE_DN, AD_DOMAIN)
         if not ad_list: return
-        glpi_client = self._make_glpi_client(silent=True)
+        glpi_enabled = self.settings.get_setting("glpi_use_in_ad_sync", True)
+        glpi_client = self._make_glpi_client(silent=True) if glpi_enabled else None
         if glpi_client:
             ad_list, _ = self._apply_glpi_prefixes(ad_list, glpi_client, "AD Sync")
+        elif not glpi_enabled:
+            log_message("AD Sync: проверка с GLPI отключена в настройках")
         by_norm = {norm_name(u["name"]): self.users._normalize_user(u) for u in self.users.get_users()}
         new_candidates = []
         for adu in ad_list:
@@ -1497,6 +1500,8 @@ class MainWindow:
         e_glpi_prefix = ttk.Entry(tab_glpi); e_glpi_prefix.insert(0, self.settings.get_setting("glpi_prefix_field", "name")); e_glpi_prefix.pack(fill="x")
         glpi_verify_ssl = tk.BooleanVar(value=self.settings.get_setting("glpi_verify_ssl", True))
         ttk.Checkbutton(tab_glpi, text="Проверять SSL-сертификат (снимите галочку для self-signed)", variable=glpi_verify_ssl).pack(pady=4, anchor="w")
+        glpi_use_in_ad_sync = tk.BooleanVar(value=self.settings.get_setting("glpi_use_in_ad_sync", True))
+        ttk.Checkbutton(tab_glpi, text="Использовать сверку с GLPI во время AD Sync", variable=glpi_use_in_ad_sync).pack(pady=4, anchor="w")
 
         # Reset password
         tab_rst = ttk.Frame(nb); nb.add(tab_rst, text="Пароль для сброса")
@@ -1636,6 +1641,7 @@ class MainWindow:
             self.settings.set_setting("glpi_user_token", e_glpi_user.get().strip())
             self.settings.set_setting("glpi_prefix_field", e_glpi_prefix.get().strip() or "name")
             self.settings.set_setting("glpi_verify_ssl", glpi_verify_ssl.get())
+            self.settings.set_setting("glpi_use_in_ad_sync", glpi_use_in_ad_sync.get())
 
             self._close_save_geo(win,"settings_window_geometry")
             # перезапуск колл-вотчера с новыми настройками
