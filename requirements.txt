@@ -1,0 +1,5 @@
+requests
+ldap3
+pandas
+ttkbootstrap
+pywin32
