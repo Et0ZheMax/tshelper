@@ -894,6 +894,9 @@ class MainWindow:
         self.style = ttk.Style(self.master)
         self._apply_button_styles()
 
+        # иконки статусов
+        self.status_icons = self._build_status_icons()
+
         self.users = UserManager(USERS_FILE)
         self.executor = ThreadPoolExecutor(max_workers=24)
         self.buttons = {}
@@ -919,6 +922,23 @@ class MainWindow:
         # Запуск колл-вотчера
         if self.settings.get_setting("cw_enabled", True):
             self.start_call_watcher()
+
+    def _build_status_icons(self) -> dict:
+        icons = {}
+        for key, color in STATUS_COLORS.items():
+            icons[key] = self._make_status_icon(color)
+        return icons
+
+    def _make_status_icon(self, color: str, size: int = 12) -> tk.PhotoImage:
+        img = tk.PhotoImage(width=size, height=size)
+        r = (size - 2) / 2
+        cx = cy = (size - 1) / 2
+        for x in range(size):
+            for y in range(size):
+                dx, dy = x - cx, y - cy
+                if dx*dx + dy*dy <= r*r:
+                    img.put(color, (x, y))
+        return img
 
     # --------- Работа с именами ПК ----------
     def get_allowed_prefixes(self) -> list:
@@ -1215,6 +1235,9 @@ class MainWindow:
             self.ping_generation += 1
             gen = self.ping_generation
             for u in filtered:
+                btn = self.buttons.get(u["pc_name"])
+                if btn:
+                    btn.set_status("checking")
                 self.executor.submit(self._ping_task, u["pc_name"], gen)
 
     def _ping_task(self, pc, gen):
@@ -2031,6 +2054,7 @@ class UserButton(ttk.Frame):
         self.user = user
         self.app  = app
         self.avail = None
+        self.status_key = "offline"
 
         # создаём tk.Button, чтобы гарантированно красить
         self.btn = tk.Button(
@@ -2042,6 +2066,7 @@ class UserButton(ttk.Frame):
             command=self._show_menu
         )
         self.btn.pack(fill="both", expand=True)
+        self.set_status(self.status_key)
         self.btn.bind("<Button-3>", self._rclick)
 
     def refresh_colors(self):
@@ -2050,11 +2075,22 @@ class UserButton(ttk.Frame):
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg
         )
 
+    def set_status(self, status_key: str):
+        self.status_key = status_key
+        icon = self.app.status_icons.get(status_key)
+        if icon:
+            self.btn.config(image=icon, compound="left", padx=6)
+            self.btn.image = icon
+        else:
+            self.btn.config(image="", compound="center")
+            self.btn.image = None
+
     def set_availability(self, ok, searching=False):
         self.avail = ok
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
-        prefix = "🟢 " if (searching and ok) else ("🔴 " if (searching and not ok) else "")
-        self.btn.config(text=f"{prefix}{self.user['name']}\n({pc_label})")
+        status_key = "online" if ok else "offline"
+        self.set_status(status_key if searching else self.status_key)
+        self.btn.config(text=f"{self.user['name']}\n({pc_label})")
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
