@@ -1130,7 +1130,12 @@ class MainWindow:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _normalize_pbx_url(self, url: str) -> str:
+        """Удаляет пробелы из URL PBX, чтобы не ломать парсинг."""
+        return re.sub(r"\s+", "", url or "")
+
     def _check_pbx_cookie(self, url: str, cookie: str):
+        url = self._normalize_pbx_url(url)
         if not url:
             return False, "Укажите URL Peers-страницы FreePBX"
         try:
@@ -1146,12 +1151,12 @@ class MainWindow:
 
         session = requests.Session()
         try:
-            resp = session.get(url, headers=headers, timeout=10, allow_redirects=False)
+            resp = session.get(url, headers=headers, timeout=20, allow_redirects=False)
             if resp.status_code in (301,302,303,307,308):
                 loc = resp.headers.get("Location", "")
                 if "login" in loc.lower():
                     return False, "Редирект на страницу логина — cookie не подошёл"
-                resp = session.get(url, headers=headers, timeout=10)
+                resp = session.get(url, headers=headers, timeout=20)
 
             if resp.status_code != 200:
                 return False, f"HTTP {resp.status_code} при обращении к PBX"
@@ -1164,7 +1169,7 @@ class MainWindow:
             return False, f"Ошибка запроса: {e}"
 
     def _build_pbx_login_url(self, peers_url: str) -> str:
-        parsed = urllib.parse.urlsplit(peers_url)
+        parsed = urllib.parse.urlsplit(self._normalize_pbx_url(peers_url))
         base_path = parsed.path.rsplit("/", 1)[0] if parsed.path else "/admin"
         if not base_path:
             base_path = "/admin"
@@ -1181,6 +1186,7 @@ class MainWindow:
         return None, None
 
     def _login_and_get_cookie(self, url: str, username: str, password: str):
+        url = self._normalize_pbx_url(url)
         if not url:
             return False, "Укажите URL Peers-страницы FreePBX", None
         if not username or not password:
@@ -1189,12 +1195,12 @@ class MainWindow:
             import requests
         except Exception:
             return False, "requests не установлен — автоподхват недоступен", None
-
         login_url = self._build_pbx_login_url(url)
+        timeout = 20
         session = requests.Session()
         headers = {"User-Agent": "TSHelper/PbxLogin"}
         try:
-            page = session.get(login_url, headers=headers, timeout=10)
+            page = session.get(login_url, headers=headers, timeout=timeout)
         except Exception as e:
             return False, f"Ошибка открытия страницы логина: {e}", None
 
@@ -1204,7 +1210,7 @@ class MainWindow:
             payload[token_name] = token_val
 
         try:
-            resp = session.post(login_url, headers=headers, data=payload, timeout=10, allow_redirects=True)
+            resp = session.post(login_url, headers=headers, data=payload, timeout=timeout, allow_redirects=True)
         except Exception as e:
             return False, f"Ошибка авторизации: {e}", None
 
