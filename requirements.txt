@@ -3,3 +3,4 @@ ldap3
 pandas
 ttkbootstrap
 pywin32
+keyring
