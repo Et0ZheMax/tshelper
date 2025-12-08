@@ -12,5 +12,9 @@
     "ssh_login": "111",
     "ssh_password": "",
     "ssh_terminal": "Windows Terminal",
-    "ssh_pass_enabled": false
+    "ssh_pass_enabled": false,
+    "glpi_api_url": "",
+    "glpi_app_token": "",
+    "glpi_user_token": "",
+    "glpi_prefix_field": "name"
 }
