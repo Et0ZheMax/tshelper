@@ -50,7 +50,19 @@ logger.setLevel(logging.INFO)
 handler = RotatingFileHandler("app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
 logger.addHandler(handler)
-def log_message(msg): logger.info(msg)
+ACTION_LEVEL = logging.INFO + 1
+CALL_LEVEL = logging.INFO + 2
+logging.addLevelName(ACTION_LEVEL, "ACTION")
+logging.addLevelName(CALL_LEVEL, "CALL")
+
+def log_message(msg):
+    logger.info(msg)
+
+def log_action(msg):
+    logger.log(ACTION_LEVEL, msg)
+
+def log_call(msg):
+    logger.log(CALL_LEVEL, msg)
 
 # --- Локаль для сортировки ФИО ---
 try:
@@ -492,7 +504,7 @@ class LogViewer(tk.Toplevel):
 
         top = ttk.Frame(self, padding=10); top.pack(fill="x")
         ttk.Label(top, text="Уровень:").grid(row=0, column=0, sticky="w", padx=(0,6))
-        levels = ["Все", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        levels = ["Все", "DEBUG", "INFO", "ACTION", "CALL", "WARNING", "ERROR", "CRITICAL"]
         ttk.Combobox(top, values=levels, textvariable=self.level_var, state="readonly", width=10).grid(row=0, column=1, padx=(0,8))
 
         ttk.Label(top, text="С даты (ГГГГ-ММ-ДД):").grid(row=0, column=2, sticky="w")
@@ -557,7 +569,7 @@ class LogViewer(tk.Toplevel):
         entries = []
         for path in sorted(glob.glob(f"{self.log_path}*"), key=os.path.getmtime):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
                     for line in f:
                         parsed = self._parse_line(line.rstrip("\n"))
                         if parsed:
@@ -1504,7 +1516,7 @@ class MainWindow:
                         active_now.add(ext)
                         if key not in seen:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
-                            log_message(f"CALL {ext}: {who}")
+                            log_call(f"Звонок на {ext} от {who}")
 
                             # 1) показать сверху
                             with self.calls_lock:
@@ -1518,11 +1530,17 @@ class MainWindow:
 
                 with self.calls_lock:
                     now_ts = time.time()
+                    original_calls = list(self.active_calls)
                     filtered_calls = [c for c in self.active_calls if c["ext"] in active_now and now_ts - c["ts"] < self.calls_ttl]
-                    removed = len(filtered_calls) != len(self.active_calls)
+                    ended_calls = [c for c in original_calls if c not in filtered_calls]
                     self.active_calls = filtered_calls
 
-                if removed:
+                for c in ended_calls:
+                    duration = int(now_ts - c.get("ts", now_ts))
+                    who = (c.get("num") or "unknown") + (f" ({c.get('name')})" if c.get("name") else "")
+                    log_call(f"Звонок завершён на {c.get('ext')}: {who}, длительность ~{duration} c")
+
+                if ended_calls:
                     self.master.after(0, self.populate_buttons)
 
             except Exception as e:
@@ -1603,8 +1621,12 @@ class UserButton(ttk.Frame):
 
 
     # --- Actions ---
+    def _log_action(self, action: str):
+        log_action(f"{self.user.get('name', '?')} ({self.user.get('pc_name', '?')}): {action}")
+
     def rdp_connect(self):
         try:
+            self._log_action("Открыт RDP")
             if is_windows():
                 subprocess.Popen(["mstsc","/v", self.user["pc_name"]], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
@@ -1612,6 +1634,7 @@ class UserButton(ttk.Frame):
 
     def remote_assistance(self):
         try:
+            self._log_action("Открыт удалённый помощник")
             if is_windows():
                 run_as_admin("msra.exe", "/offerRA "+self.user["pc_name"])
         except Exception as e:
@@ -1619,6 +1642,7 @@ class UserButton(ttk.Frame):
 
     def open_explorer(self):
         try:
+            self._log_action("Открыт проводник C$")
             os.startfile(f"\\\\{self.user['pc_name']}\\c$")
         except Exception as e:
             messagebox.showerror("Проводник", str(e))
@@ -1631,6 +1655,7 @@ class UserButton(ttk.Frame):
         if not last_name:
             return messagebox.showerror("GLPI", "Не удалось определить фамилию пользователя")
         url = f"https://inv.pak-cspmz.ru/front/search.php?globalsearch={urllib.parse.quote(last_name)}"
+        self._log_action("Открыт профиль в GLPI")
         webbrowser.open(url)
 
     def get_ip(self):
@@ -1646,6 +1671,7 @@ class UserButton(ttk.Frame):
             except Exception as e:
                 ip = f"Ошибка: {e}"
             self.app.master.after(0, lambda: self.app.show_ip_window(ip))
+            self._log_action(f"Запрошен IP: {ip}")
         threading.Thread(target=task, daemon=True).start()
 
     def reset_password_ps(self, which):
@@ -1666,6 +1692,7 @@ Write-Output "OK";
         try:
             run_as_admin("powershell.exe", f"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
             messagebox.showinfo("Сброс пароля", f"Запущено для {self.user['name']} ({which.upper()}).")
+            self._log_action(f"Сброшен пароль ({which})")
         except Exception as e:
             messagebox.showerror("Сброс пароля", str(e))
 
@@ -1700,6 +1727,7 @@ Write-Output "OK";
                     else:           subprocess.Popen(["powershell","-NoExit","-Command", ssh_cmd])
             else:
                 messagebox.showerror("SSH","Неизвестный терминал")
+            self._log_action(f"Открыт SSH через {term}")
         except Exception as e:
             messagebox.showerror("SSH", str(e))
 
