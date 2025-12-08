@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -727,6 +727,8 @@ class LogViewer(tk.Toplevel):
         self.date_from_var = tk.StringVar()
         self.date_to_var = tk.StringVar()
         self.autoscroll_var = tk.BooleanVar(value=True)
+        self._auto_job = None
+        self._auto_interval_ms = 1000
 
         top = ttk.Frame(self, padding=10); top.pack(fill="x")
         ttk.Label(top, text="Уровень:").grid(row=0, column=0, sticky="w", padx=(0,6))
@@ -755,16 +757,34 @@ class LogViewer(tk.Toplevel):
         ttk.Button(bottom, text="Сохранить…", command=self.save_to_file).pack(side="left")
 
         self.reload_logs()
+        self._schedule_auto_reload()
 
     def on_close(self):
         self.settings.set_setting("log_window_geometry", self.geometry())
+        if self._auto_job:
+            try:
+                self.after_cancel(self._auto_job)
+            except Exception:
+                pass
         self.destroy()
 
-    def reload_logs(self):
-        date_from, ok_from = self._parse_date_value(self.date_from_var.get().strip(), "С даты")
+    def _schedule_auto_reload(self):
+        try:
+            self._auto_job = self.after(self._auto_interval_ms, self._auto_reload_logs)
+        except Exception:
+            self._auto_job = None
+
+    def _auto_reload_logs(self):
+        if not self.winfo_exists():
+            return
+        self.reload_logs(silent=True)
+        self._schedule_auto_reload()
+
+    def reload_logs(self, silent: bool = False):
+        date_from, ok_from = self._parse_date_value(self.date_from_var.get().strip(), "С даты", silent=silent)
         if not ok_from:
             return
-        date_to, ok_to = self._parse_date_value(self.date_to_var.get().strip(), "По дату")
+        date_to, ok_to = self._parse_date_value(self.date_to_var.get().strip(), "По дату", silent=silent)
         if not ok_to:
             return
 
@@ -782,13 +802,16 @@ class LogViewer(tk.Toplevel):
 
         self._render_text("\n".join(filtered))
 
-    def _parse_date_value(self, value: str, label: str):
+    def _parse_date_value(self, value: str, label: str, silent: bool = False):
         if not value:
             return None, True
         try:
             return datetime.datetime.strptime(value, "%Y-%m-%d").date(), True
         except ValueError:
-            messagebox.showerror("Фильтр по дате", f"Некорректная дата в поле «{label}». Используйте формат ГГГГ-ММ-ДД.")
+            if not silent:
+                messagebox.showerror("Фильтр по дате", f"Некорректная дата в поле «{label}». Используйте формат ГГГГ-ММ-ДД.")
+            else:
+                log_message(f"Фильтр по дате: некорректное значение в поле {label}")
             return None, False
 
     def _read_logs(self):
@@ -907,6 +930,62 @@ class MainWindow:
         else:
             prefixes = []
         return prefixes
+
+    def build_host_candidates(self, user: dict) -> list[str]:
+        def add_variant(val: str):
+            if not val:
+                return
+            low = val.lower()
+            if low not in seen:
+                seen.add(low)
+                variants.append(val)
+
+        prefixes = self.get_allowed_prefixes()
+        default_prefix = prefixes[0] if prefixes else ""
+        names = [user.get("pc_name", "")] + list(user.get("pc_options", []))
+        variants = []
+        seen = set()
+
+        for name in names:
+            clean, _ = self.normalize_pc_name(name)
+            if clean:
+                if default_prefix:
+                    add_variant(f"{default_prefix}{clean}")
+                for pref in prefixes:
+                    if pref == default_prefix:
+                        continue
+                    add_variant(f"{pref}{clean}")
+            add_variant(name)
+
+        return variants
+
+    def resolve_ip(self, host: str) -> str:
+        try:
+            return socket.gethostbyname(host)
+        except Exception:
+            return ""
+
+    def ping_host_with_ip(self, host: str, timeout_ms: int = 1200) -> tuple[bool, str]:
+        try:
+            if platform.system() == "Windows":
+                cp = subprocess.run(
+                    ["ping", "-n", "1", "-w", str(timeout_ms), host],
+                    capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    timeout=max(1, timeout_ms / 1000)
+                )
+            else:
+                cp = subprocess.run(
+                    ["ping", "-c", "1", "-W", str(max(1, timeout_ms // 1000)), host],
+                    capture_output=True, text=True, timeout=max(1, timeout_ms / 1000)
+                )
+            output = (cp.stdout or "") + (cp.stderr or "")
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", output)
+            ip = m.group(1) if m else ""
+            return cp.returncode == 0, ip
+        except Exception as e:
+            log_message(f"Пинг {host} завершился ошибкой: {e}")
+            return False, ""
 
     def normalize_pc_name(self, pc_name: str) -> tuple[str, str]:
         for pref in self.get_allowed_prefixes():
@@ -2072,18 +2151,40 @@ class UserButton(ttk.Frame):
 
     def get_ip(self):
         def task():
-            try:
-                if is_windows():
-                    p = subprocess.run(["ping","-n","1",self.user["pc_name"]], capture_output=True, text=True,
-                                       creationflags=subprocess.CREATE_NO_WINDOW, timeout=2)
-                else:
-                    p = subprocess.run(["ping","-c","1",self.user["pc_name"]], capture_output=True, text=True, timeout=2)
-                m = re.search(r"\[(\d+\.\d+\.\d+\.\d+)\]", p.stdout)
-                ip = m.group(1) if m else "Не найден"
-            except Exception as e:
-                ip = f"Ошибка: {e}"
-            self.app.master.after(0, lambda: self.app.show_ip_window(ip))
-            self._log_action(f"Запрошен IP: {ip}")
+            candidates = self.app.build_host_candidates(self.user) or [self.user.get("pc_name", "")]
+            default_host = candidates[0] if candidates else self.user.get("pc_name", "")
+            found_host = ""
+            found_ip = ""
+
+            log_message(f"Получение IP для {self.user.get('name','?')}: кандидаты {', '.join(candidates)}")
+            for host in candidates:
+                ok, ip = self.app.ping_host_with_ip(host)
+                log_message(f"Проверка {host}: {'онлайн' if ok else 'недоступен'}, IP: {ip or 'не определён'}")
+                if ok:
+                    found_host, found_ip = host, ip
+                    break
+                if not found_ip and ip:
+                    found_ip = ip
+
+            ip_value = found_ip or "Не найден"
+
+            def finalize():
+                self.app.show_ip_window(ip_value)
+                source = found_host or default_host or "?"
+                self._log_action(f"Запрошен IP: {source} -> {ip_value}")
+
+                current_pc = self.user.get("pc_name", "")
+                if found_host and found_host.lower() != current_pc.lower():
+                    msg = (
+                        f"По основному имени {current_pc or 'не задано'} ответ не получен. "
+                        f"Доступен хост {found_host}. Переключить пользователя на него?"
+                    )
+                    if messagebox.askyesno("Обновить имя ПК", msg):
+                        old_pc = self.user.get("pc_name", "")
+                        self._switch_pc(found_host)
+                        log_action(f"Обновлён основной ПК для {self.user.get('name','?')}: {old_pc} -> {found_host}")
+
+            self.app.master.after(0, finalize)
         threading.Thread(target=task, daemon=True).start()
 
     def reset_password_ps(self, which):
@@ -2112,32 +2213,52 @@ Write-Output "OK";
         ssh_password = self.app.settings.get_setting("ssh_password","")
         if not ssh_login:
             return messagebox.showerror("SSH", "Не задан SSH Login в настройках")
-        pc, _ = self.app.normalize_pc_name(self.user["pc_name"])
+        candidates = self.app.build_host_candidates(self.user)
+        if not candidates:
+            return messagebox.showerror("SSH", "Не удалось определить имя хоста")
+        preferred = candidates[0]
+        resolved_host = ""
+        resolved_ip = ""
+        for host in candidates:
+            ip = self.app.resolve_ip(host)
+            if ip:
+                resolved_host, resolved_ip = host, ip
+                break
+
+        target_host = resolved_host or preferred
+        ssh_target = target_host
+        if resolved_host and resolved_host.lower() != preferred.lower() and resolved_ip:
+            ssh_target = resolved_ip
+            log_message(f"SSH: имя {preferred} не разрешилось, используем IP {resolved_ip} от {resolved_host}")
+        elif not resolved_host and resolved_ip:
+            ssh_target = resolved_ip
+        elif not resolved_host:
+            log_message(f"SSH: ни одно из имён ({', '.join(candidates)}) не разрешилось, пробуем {ssh_target}")
         term = self.app.settings.get_setting("ssh_terminal","Windows Terminal")
         auto = self.app.settings.get_setting("ssh_pass_enabled", False)
 
         try:
             if term == "Windows Terminal":
-                if auto: cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{pc}'
-                else:    cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{pc}'
+                if auto: cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{ssh_target}'
+                else:    cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{ssh_target}'
                 subprocess.Popen(["wt.exe","-p","Ubuntu","ubuntu.exe","-c",cmd])
             elif term in ("CMD","PowerShell"):
                 if auto:
                     hostkeys = self.app.settings.config.get("plink_hostkeys", {})
-                    hk = hostkeys.get(pc.lower())
+                    hk = hostkeys.get(target_host.lower())
                     if hk:
-                        plink_cmd = f'plink.exe -ssh -batch -hostkey "{hk}" -pw "{ssh_password}" {ssh_login}@{pc}'
+                        plink_cmd = f'plink.exe -ssh -batch -hostkey "{hk}" -pw "{ssh_password}" {ssh_login}@{ssh_target}'
                     else:
-                        plink_cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{pc}'
+                        plink_cmd = f'plink.exe -ssh -batch -pw "{ssh_password}" {ssh_login}@{ssh_target}'
                     if term=="CMD": subprocess.Popen(["cmd.exe","/k", plink_cmd])
                     else:           subprocess.Popen(["powershell","-NoExit","-Command", plink_cmd])
                 else:
-                    ssh_cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{pc}'
+                    ssh_cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{ssh_target}'
                     if term=="CMD": subprocess.Popen(["cmd.exe","/k", ssh_cmd])
                     else:           subprocess.Popen(["powershell","-NoExit","-Command", ssh_cmd])
             else:
                 messagebox.showerror("SSH","Неизвестный терминал")
-            self._log_action(f"Открыт SSH через {term}")
+            self._log_action(f"Открыт SSH через {term} ({ssh_target})")
         except Exception as e:
             messagebox.showerror("SSH", str(e))
 
