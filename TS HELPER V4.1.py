@@ -385,13 +385,8 @@ class MainWindow:
         self.inner = tk.Frame(self.canvas, bg=self.board_bg)
         self.canvas_window = self.canvas.create_window((0,0), window=self.inner, anchor="nw")
 
-        def _upd_scrollregion(_=None):
-            if getattr(self, "_sr_job", None):
-                self.master.after_cancel(self._sr_job)
-            self._sr_job = self.master.after(80, lambda: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-
-        self.inner.bind("<Configure>", _upd_scrollregion)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.inner.bind("<Configure>", self._update_scrollregion)
+        self._bind_mousewheel()
 
         # bottom
         bottom = ttk.Frame(self.master, padding=10); bottom.pack(side="bottom", fill="x")
@@ -399,8 +394,56 @@ class MainWindow:
         ttk.Button(bottom, text="AD Sync", command=self.ad_sync).pack(side="left", padx=5)
         self.count_lbl = ttk.Label(bottom, text="Найдено аккаунтов: 0"); self.count_lbl.pack(side="right")
 
-    def _on_mousewheel(self, e):
-        self.canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+    def _bind_mousewheel(self):
+        # включаем прокрутку только когда курсор над канвой, чтобы не мешать другим окнам
+        self.canvas.bind("<Enter>", lambda _e: self._toggle_mousewheel(True))
+        self.canvas.bind("<Leave>", lambda _e: self._toggle_mousewheel(False))
+
+    def _toggle_mousewheel(self, enable: bool):
+        seqs = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+        for seq in seqs:
+            if enable:
+                self.canvas.bind_all(seq, self._on_mousewheel, add="+")
+            else:
+                try:
+                    self.canvas.unbind_all(seq)
+                except Exception:
+                    pass
+
+    def _mousewheel_delta(self, event) -> float:
+        if getattr(event, "num", None) == 4:
+            return 1
+        if getattr(event, "num", None) == 5:
+            return -1
+        if getattr(event, "delta", 0):
+            return event.delta / 120
+        return 0
+
+    def _on_mousewheel(self, event):
+        delta = self._mousewheel_delta(event)
+        if delta == 0:
+            return "break"
+
+        view = self.canvas.yview()
+        if not view:
+            return "break"
+
+        start, end = view
+        visible = end - start
+        if visible >= 1:
+            return "break"
+
+        step = max(visible * 0.25, 0.02)
+        target = start - delta * step
+        max_start = max(0.0, 1.0 - visible)
+        target = min(max(target, 0.0), max_start)
+        self.canvas.yview_moveto(target)
+        return "break"
+
+    def _update_scrollregion(self, _=None):
+        if getattr(self, "_sr_job", None):
+            self.master.after_cancel(self._sr_job)
+        self._sr_job = self.master.after(80, lambda: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
 
     # --------- Кнопки/раскладка ----------
     def _compute_cols(self):
@@ -501,6 +544,8 @@ class MainWindow:
         # растянуть колонки – кнопки займут всю ширину, «зазора» не останется
         for i in range(cols):
             self.inner.grid_columnconfigure(i, weight=1)
+
+        self._update_scrollregion()
 
 
     # --------- Поиск ----------
@@ -668,13 +713,21 @@ class MainWindow:
         tab_cw = ttk.Frame(nb); nb.add(tab_cw, text="Телефония")
         cw_enabled = tk.BooleanVar(value=self.settings.get_setting("cw_enabled", True))
         ttk.Checkbutton(tab_cw, text="Включить отслеживание звонков", variable=cw_enabled).pack(anchor="w", pady=4)
-        ttk.Label(tab_cw, text="Номера EXT (через запятую):").pack(anchor="w"); 
+        ttk.Label(tab_cw, text="Номера EXT (через запятую):").pack(anchor="w");
         e_exts = ttk.Entry(tab_cw); e_exts.insert(0, self.settings.get_setting("cw_exts","4444")); e_exts.pack(fill="x")
-        ttk.Label(tab_cw, text="URL Peers-страницы FreePBX:").pack(anchor="w"); 
+        ttk.Label(tab_cw, text="URL Peers-страницы FreePBX:").pack(anchor="w");
         e_url = ttk.Entry(tab_cw); e_url.insert(0, self.settings.get_setting("cw_url","")); e_url.pack(fill="x")
         ttk.Label(tab_cw, text="Cookie (из DevTools, всё после 'Cookie:'):").pack(anchor="w")
-        e_cookie = ttk.Entry(tab_cw); e_cookie.insert(0, self.settings.get_setting("cw_cookie","")); e_cookie.pack(fill="x")
-        ttk.Label(tab_cw, text="Интервал опроса, сек:").pack(anchor="w"); 
+        cookie_row = ttk.Frame(tab_cw); cookie_row.pack(fill="x")
+        e_cookie = ttk.Entry(cookie_row); e_cookie.insert(0, self.settings.get_setting("cw_cookie",""))
+        e_cookie.pack(side="left", fill="x", expand=True)
+        btn_test_cookie = ttk.Button(
+            cookie_row,
+            text="Тест",
+            command=lambda: self._run_pbx_test(e_url.get(), e_cookie.get(), btn_test_cookie)
+        )
+        btn_test_cookie.pack(side="left", padx=6)
+        ttk.Label(tab_cw, text="Интервал опроса, сек:").pack(anchor="w");
         e_interval = ttk.Entry(tab_cw); e_interval.insert(0, str(self.settings.get_setting("cw_interval",2))); e_interval.pack(fill="x")
         cw_popup = tk.BooleanVar(value=self.settings.get_setting("cw_popup", True))
         ttk.Checkbutton(tab_cw, text="Показывать всплывающее окно при звонке", variable=cw_popup).pack(anchor="w", pady=4)
@@ -859,6 +912,63 @@ class MainWindow:
         except:
             pass
         self.start_call_watcher()
+
+    def _run_pbx_test(self, url: str, cookie: str, btn: ttk.Button):
+        url = (url or "").strip()
+        cookie = (cookie or "").strip()
+
+        def finalize(ok: bool, msg: str):
+            try:
+                btn.config(state="normal", text="Тест")
+            except Exception:
+                pass
+            if ok:
+                messagebox.showinfo("Проверка PBX", msg)
+            else:
+                messagebox.showerror("Проверка PBX", msg)
+
+        def worker():
+            try:
+                btn.config(state="disabled", text="Тест…")
+            except Exception:
+                pass
+            ok, msg = self._check_pbx_cookie(url, cookie)
+            self.master.after(0, lambda: finalize(ok, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_pbx_cookie(self, url: str, cookie: str):
+        if not url:
+            return False, "Укажите URL Peers-страницы FreePBX"
+        try:
+            import requests
+        except Exception:
+            return False, "requests не установлен — тест недоступен"
+
+        headers = {"User-Agent": "TSHelper/PbxTest"}
+        if cookie:
+            headers["Cookie"] = cookie
+            if "=" not in cookie:
+                return False, "Cookie должен содержать пары вида PHPSESSID=...; fpbx_admin=..."
+
+        session = requests.Session()
+        try:
+            resp = session.get(url, headers=headers, timeout=10, allow_redirects=False)
+            if resp.status_code in (301,302,303,307,308):
+                loc = resp.headers.get("Location", "")
+                if "login" in loc.lower():
+                    return False, "Редирект на страницу логина — cookie не подошёл"
+                resp = session.get(url, headers=headers, timeout=10)
+
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code} при обращении к PBX"
+
+            if looks_like_login(resp.text):
+                return False, "Похоже на форму логина — проверьте cookie"
+
+            return True, "Страница PBX открывается, cookie принят"
+        except Exception as e:
+            return False, f"Ошибка запроса: {e}"
 
 
     def _call_watcher_loop(self):
