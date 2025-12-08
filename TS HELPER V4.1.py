@@ -95,20 +95,51 @@ else:
 class SecretStorage:
     def __init__(self, service_name: str):
         self.service_name = service_name
+        # На Windows храним зашифрованный DPAPI-файл как запасной вариант к keyring.
+        self.secret_file = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), 
+                                        f".{self.service_name.replace(' ','_').lower()}_secrets.json")
+        self._dpapi_cache = {}
+        self.use_keyring = False
+        self.use_dpapi_file = False
         self.available = self._check_available()
         self._ephemeral = {}
 
     def _check_available(self) -> bool:
-        if not KEYRING_AVAILABLE:
-            return False
-        try:
-            keyring.get_keyring().get_password(self.service_name, "__tshelper_probe__")
+        # Скрипт рассчитан на Windows, поэтому здесь же выбираем подходящее защищённое хранилище.
+        if KEYRING_AVAILABLE and platform.system() == "Windows":
+            try:
+                keyring.get_keyring().get_password(self.service_name, "__tshelper_probe__")
+                self.use_keyring = True
+                return True
+            except NoKeyringError:
+                pass
+            except Exception as e:
+                log_message(f"Keyring недоступен: {e}")
+
+        if DPAPI_AVAILABLE and platform.system() == "Windows":
+            self._load_dpapi_file()
+            self.use_dpapi_file = True
             return True
-        except NoKeyringError:
-            return False
+
+        return False
+
+    def _load_dpapi_file(self):
+        try:
+            if os.path.exists(self.secret_file):
+                with open(self.secret_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self._dpapi_cache = data
         except Exception as e:
-            log_message(f"Keyring недоступен: {e}")
-            return False
+            log_message(f"Ошибка загрузки хранилища секретов: {e}")
+            self._dpapi_cache = {}
+
+    def _save_dpapi_file(self):
+        try:
+            with open(self.secret_file, "w", encoding="utf-8") as f:
+                json.dump(self._dpapi_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_message(f"Ошибка сохранения хранилища секретов: {e}")
 
     def _is_ref(self, ref: str) -> bool:
         return isinstance(ref, str) and ref.startswith("kr:")
@@ -118,34 +149,62 @@ class SecretStorage:
 
     def store_secret(self, key_name: str, secret: str, current_ref: str = "") -> str:
         if not secret:
+            self.delete_secret(key_name, current_ref)
             return ""
+
         if not self.available:
             self._ephemeral[key_name] = secret
             return ""
+
         ref = current_ref if self._is_ref(current_ref) else self._generate_ref(key_name)
-        try:
-            keyring.set_password(self.service_name, ref, secret)
-            if key_name in self._ephemeral:
+
+        if self.use_keyring:
+            try:
+                keyring.set_password(self.service_name, ref, secret)
                 self._ephemeral.pop(key_name, None)
-            return ref
-        except KeyringError as e:
-            log_message(f"Не удалось сохранить секрет {key_name}: {e}")
-            return ""
+                return ref
+            except KeyringError as e:
+                log_message(f"Не удалось сохранить секрет {key_name}: {e}")
+                return ""
+
+        if self.use_dpapi_file:
+            try:
+                self._dpapi_cache[ref] = dpapi_encrypt(secret)
+                self._save_dpapi_file()
+                self._ephemeral.pop(key_name, None)
+                return ref
+            except Exception as e:
+                log_message(f"DPAPI сохранение секрета {key_name} не удалось: {e}")
+                return ""
+
+        return ""
 
     def get_secret(self, key_name: str, ref: str):
         if self.available and self._is_ref(ref):
-            try:
-                return keyring.get_password(self.service_name, ref)
-            except KeyringError as e:
-                log_message(f"Не удалось прочитать секрет {key_name}: {e}")
+            if self.use_keyring:
+                try:
+                    return keyring.get_password(self.service_name, ref)
+                except KeyringError as e:
+                    log_message(f"Не удалось прочитать секрет {key_name}: {e}")
+            elif self.use_dpapi_file:
+                enc = self._dpapi_cache.get(ref)
+                if enc:
+                    try:
+                        return dpapi_decrypt(enc)
+                    except Exception as e:
+                        log_message(f"DPAPI дешифрование секрета {key_name} не удалось: {e}")
         return self._ephemeral.get(key_name)
 
     def delete_secret(self, key_name: str, ref: str):
         if self.available and self._is_ref(ref):
-            try:
-                keyring.delete_password(self.service_name, ref)
-            except Exception:
-                pass
+            if self.use_keyring:
+                try:
+                    keyring.delete_password(self.service_name, ref)
+                except Exception:
+                    pass
+            elif self.use_dpapi_file and ref in self._dpapi_cache:
+                self._dpapi_cache.pop(ref, None)
+                self._save_dpapi_file()
         self._ephemeral.pop(key_name, None)
 
 # --- Debug dumps for PBX page ---
@@ -395,32 +454,18 @@ class SettingsManager:
             secret = self.secret_storage.get_secret(k, ref)
             if secret:
                 return secret
-            raw = self.config.get(k, default)
-            if isinstance(raw, str):
-                try:
-                    raw = dpapi_decrypt(raw)
-                except Exception:
-                    pass
-            return raw
+            return self.config.get(k, default)
         return self.config.get(k, default)
 
     def set_setting(self, k, v):
         if k in self._secret_keys:
-            if not self.secret_storage.available:
-                try:
-                    self.config[k] = dpapi_encrypt(v)
-                except Exception:
-                    self.config[k] = v
-                if v:
-                    self.secret_storage._ephemeral[k] = v
-                else:
-                    self.secret_storage.delete_secret(k, self.config.get(k, ""))
-                self.save_config()
-                return
             ref = self.secret_storage.store_secret(k, v, self.config.get(k, ""))
             if not v:
                 self.secret_storage.delete_secret(k, self.config.get(k, ""))
             self.config[k] = ref
+            if not self.secret_storage.available:
+                # без защищённого хранилища не показываем и не держим пароли в конфиге
+                self.config[k] = ""
             self.save_config()
             return
         self.config[k] = v
