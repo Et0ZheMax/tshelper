@@ -288,6 +288,12 @@ def norm_name(n: str) -> str:
     p = n.strip().lower().split()
     return " ".join(p[:2]) if len(p) >= 2 else " ".join(p)
 
+def clean_internal_number(num: str) -> str:
+    """Минималистично очищаем внутренний номер, оставляя цифры и '+'."""
+    if not num:
+        return ""
+    return re.sub(r"[^\d+]", "", str(num))
+
 def which(name): return shutil.which(name)
 def is_windows(): return platform.system().lower().startswith("win")
 
@@ -334,14 +340,18 @@ def get_ad_users(server, username, password, base_dn, domain):
         ldap_server = ldap3.Server(server, get_info=ldap3.ALL)
         conn = ldap3.Connection(ldap_server, user=f"{username}@{domain}", password=password, auto_bind=True)
         search_filter = "(&(objectCategory=person)(objectClass=user))"
-        attrs = ["cn", "sAMAccountName"]
+        attrs = ["cn", "sAMAccountName", "ipPhone", "telephoneNumber"]
         conn.search(search_base=base_dn, search_filter=search_filter, attributes=attrs)
         users = []
         for entry in conn.entries:
             cn = entry.cn.value if entry.cn else ""
             sam= entry.sAMAccountName.value if entry.sAMAccountName else ""
+            ext = clean_internal_number(
+                (entry.ipPhone.value if hasattr(entry, "ipPhone") else "")
+                or (entry.telephoneNumber.value if hasattr(entry, "telephoneNumber") else "")
+            )
             if cn and sam:
-                users.append({"name": cn, "pc_name": f"w-{sam}"})
+                users.append({"name": cn, "pc_name": f"w-{sam}", "ext": ext})
         conn.unbind()
         return users
     except Exception as e:
@@ -603,7 +613,7 @@ class UserManager:
 
     def _normalize_user(self, u: dict):
         if not isinstance(u, dict):
-            return {"name":"", "pc_name":""}
+            return {"name":"", "pc_name":"", "ext": ""}
         main = str(u.get("pc_name", "") or "")
         opts = u.get("pc_options") or []
         if not isinstance(opts, list):
@@ -620,27 +630,7 @@ class UserManager:
             filtered.append(str(opt))
         u["pc_name"] = main
         u["pc_options"] = filtered
-        return u
-
-    def _normalize_user(self, u: dict):
-        if not isinstance(u, dict):
-            return {"name":"", "pc_name":""}
-        main = str(u.get("pc_name", "") or "")
-        opts = u.get("pc_options") or []
-        if not isinstance(opts, list):
-            opts = []
-        filtered = []
-        seen = {main.lower(): main} if main else {}
-        for opt in opts:
-            if not opt:
-                continue
-            low = str(opt).lower()
-            if low == main.lower() or low in seen:
-                continue
-            seen[low] = str(opt)
-            filtered.append(str(opt))
-        u["pc_name"] = main
-        u["pc_options"] = filtered
+        u["ext"] = clean_internal_number(u.get("ext", ""))
         return u
 
 class SettingsManager:
@@ -1264,7 +1254,12 @@ class MainWindow:
     def _do_search(self):
         text = self.search_entry.get().lower()
         allu = self.users.get_users()
-        filtered = [u for u in allu if text in u["name"].lower() or text in u["pc_name"].lower()]
+        filtered = [
+            u for u in allu
+            if text in u["name"].lower()
+            or text in u["pc_name"].lower()
+            or text in str(u.get("ext", "")).lower()
+        ]
         self.populate_buttons(filtered)
         if len(text) >= 3:
             self.ping_generation += 1
@@ -1300,28 +1295,30 @@ class MainWindow:
     # --------- Users CRUD ----------
     def add_user(self):
         win = tk.Toplevel(self.master); win.title("Добавить пользователя")
-        geom = self.settings.get_setting("edit_window_geometry"); 
+        geom = self.settings.get_setting("edit_window_geometry");
         if geom: win.geometry(geom)
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"edit_window_geometry"))
         ttk.Label(win, text="ФИО:").pack(pady=4, anchor="w"); e_name = ttk.Entry(win); e_name.pack(fill="x", padx=4)
         ttk.Label(win, text="Имя ПК:").pack(pady=4, anchor="w"); e_pc = ttk.Entry(win); e_pc.pack(fill="x", padx=4)
+        ttk.Label(win, text="Внутренний номер:").pack(pady=4, anchor="w"); e_ext = ttk.Entry(win); e_ext.pack(fill="x", padx=4)
         def save():
-            n=e_name.get().strip(); p=e_pc.get().strip()
+            n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.add_user({"name":n,"pc_name":p}); self.populate_buttons(); self._close_save_geo(win,"edit_window_geometry")
+            self.users.add_user({"name":n,"pc_name":p,"ext":ext}); self.populate_buttons(); self._close_save_geo(win,"edit_window_geometry")
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def open_edit_window(self, user):
         win = tk.Toplevel(self.master); win.title("Редактировать пользователя")
-        geom = self.settings.get_setting("edit_window_geometry"); 
+        geom = self.settings.get_setting("edit_window_geometry");
         if geom: win.geometry(geom)
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"edit_window_geometry"))
         ttk.Label(win, text="ФИО:").pack(pady=4, anchor="w"); e_name = ttk.Entry(win); e_name.insert(0,user["name"]); e_name.pack(fill="x", padx=4)
         ttk.Label(win, text="Имя ПК:").pack(pady=4, anchor="w"); e_pc = ttk.Entry(win); e_pc.insert(0,user["pc_name"]); e_pc.pack(fill="x", padx=4)
+        ttk.Label(win, text="Внутренний номер:").pack(pady=4, anchor="w"); e_ext = ttk.Entry(win); e_ext.insert(0,user.get("ext","")); e_ext.pack(fill="x", padx=4)
         def save():
-            n=e_name.get().strip(); p=e_pc.get().strip()
+            n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.update_user(user["pc_name"], {"name":n,"pc_name":p}); self.populate_buttons(); self._close_save_geo(win,"edit_window_geometry")
+            self.users.update_user(user["pc_name"], {"name":n,"pc_name":p,"ext":ext}); self.populate_buttons(); self._close_save_geo(win,"edit_window_geometry")
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def delete_user_from_button(self, user):
@@ -1357,6 +1354,7 @@ class MainWindow:
         main_pc = incoming.get("pc_name") or existing.get("pc_name") or ""
         merged["name"] = incoming.get("name") or existing.get("name")
         merged["pc_name"] = main_pc
+        merged["ext"] = incoming.get("ext") or existing.get("ext") or ""
         options = self._merge_pc_options(main_pc, existing.get("pc_options", []), incoming.get("pc_options", []))
         if existing.get("pc_name") and existing.get("pc_name").lower() != main_pc.lower():
             options = self._merge_pc_options(main_pc, options, [existing.get("pc_name")])
@@ -1728,8 +1726,9 @@ class MainWindow:
                     for row in csv.DictReader(f):
                         name = row.get("name") or row.get("ФИО") or ""
                         pc   = row.get("pc_name") or row.get("ПК") or ""
+                        ext  = row.get("ext") or row.get("internal_number") or row.get("Внутренний номер") or ""
                         if name and pc:
-                            users.append({"name":name.strip(),"pc_name":pc.strip()}); added+=1
+                            users.append({"name":name.strip(),"pc_name":pc.strip(),"ext":str(ext).strip()}); added+=1
             else:
                 try:
                     import pandas as pd
@@ -1739,8 +1738,9 @@ class MainWindow:
                 for _,r in df.iterrows():
                     name = str(r.get("name") or r.get("ФИО") or "").strip()
                     pc   = str(r.get("pc_name") or r.get("ПК") or "").strip()
+                    ext  = str(r.get("ext") or r.get("internal_number") or r.get("Внутренний номер") or "").strip()
                     if name and pc:
-                        users.append({"name":name,"pc_name":pc}); added+=1
+                        users.append({"name":name,"pc_name":pc,"ext":ext}); added+=1
             self.users.users = users; self.users.save(); self.populate_buttons()
             messagebox.showinfo("Импорт", f"Импортировано: {added}")
         except Exception as e:
@@ -1752,8 +1752,8 @@ class MainWindow:
         try:
             import csv
             with open(path, "w", encoding="utf-8", newline="") as f:
-                w=csv.DictWriter(f, fieldnames=["name","pc_name"]); w.writeheader()
-                for u in self.users.get_users(): w.writerow(u)
+                w=csv.DictWriter(f, fieldnames=["name","pc_name","ext"]); w.writeheader()
+                for u in self.users.get_users(): w.writerow({"name":u.get("name",""),"pc_name":u.get("pc_name",""),"ext":u.get("ext","")})
             messagebox.showinfo("Экспорт", "Готово")
         except Exception as e:
             messagebox.showerror("Экспорт", str(e))
@@ -2133,10 +2133,11 @@ class UserButton(ttk.Frame):
         self.avail = None
         self.status_key = "offline"
 
+        pc_label = self.app.get_display_pc_name(user['pc_name'])
         # создаём tk.Button, чтобы гарантированно красить
         self.btn = tk.Button(
             self,
-            text=f"{user['name']}\n({self.app.get_display_pc_name(user['pc_name'])})",
+            text=self._compose_text(pc_label),
             bg=self.app.user_bg, fg=self.app.user_fg,
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg,
             relief="groove", bd=2, justify="left", wraplength=180, anchor="nw",
@@ -2167,7 +2168,12 @@ class UserButton(ttk.Frame):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         status_key = "online" if ok else "offline"
         self.set_status(status_key if searching else self.status_key)
-        self.btn.config(text=f"{self.user['name']}\n({pc_label})")
+        self.btn.config(text=self._compose_text(pc_label))
+
+    def _compose_text(self, pc_label: str) -> str:
+        ext = (self.user.get("ext") or "").strip()
+        ext_line = f"☎ {ext}\n" if ext else ""
+        return f"{ext_line}{self.user['name']}\n({pc_label})"
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
