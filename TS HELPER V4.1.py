@@ -558,8 +558,19 @@ def parse_caller_from_block(block: str, ext: str):
         re.search(rf"\bExten:\s*{re.escape(ext)}\b", block)
     )
     if not in_block_for_ext: return None
-    ringy = any(x in block for x in ["Ringing", "Ring+Inuse", " Dial Ring ", " Dial Up "])
-    if not ringy: return None
+    active = any(
+        re.search(pat, block, flags=re.I)
+        for pat in [
+            r"Ringing",
+            r"Ring\+Inuse",
+            r"\bDial\s+(Ring|Up)\b",
+            r"Channel:.*\bUp\b",
+        ]
+    )
+    if not active:
+        m_inuse = re.search(r"In use\s+(\d+)", block, flags=re.I)
+        active = bool(m_inuse and int(m_inuse.group(1)) > 0)
+    if not active: return None
     m = re.search(r'CLCID:\s*"?(?P<name>[^"]*)"?\s*<(?P<num>[^>]+)>', block)
     if m:
         name = (m.group("name") or "").strip()
