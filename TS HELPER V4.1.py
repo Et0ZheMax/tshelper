@@ -904,7 +904,7 @@ class MainWindow:
         self.ping_generation = 0
 
         # активные звонки (список словарей)
-        self.active_calls = []   # [{ext, num, name, ts}]
+        self.active_calls = []   # [{ext, num, name, ts, user, who_key}]
         self.calls_lock = threading.Lock()
         self.calls_ttl = 90      # сек держим вверху
 
@@ -1016,6 +1016,16 @@ class MainWindow:
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
         return clean if pref else pc_name
+
+    def _match_user_by_caller(self, name: str, num: str):
+        """Подбираем пользователя по ФИО, игнорируя пометку unknown в номере."""
+        key = norm_name(name) if name else ""
+        if not key:
+            return None
+        for u in self.users.get_users():
+            if norm_name(u.get("name", "")) == key:
+                return u
+        return None
 
     # --------- UI ----------
     def build_ui(self):
@@ -1176,6 +1186,13 @@ class MainWindow:
             return ("🟢 " if ok else "🔴 ") + base
         return base
 
+    def _open_user_menu(self, user: dict):
+        btn = self.buttons.get(user.get("pc_name", ""))
+        if btn:
+            btn._show_menu()
+        else:
+            messagebox.showinfo("Пользователь", "Пользователь не найден в списке")
+
     def populate_buttons(self, items=None):
         for w in self.inner.winfo_children(): w.destroy()
         all_users = self.users.get_users() if items is None else items
@@ -1192,9 +1209,16 @@ class MainWindow:
 
         # Вставим «панель активных звонков»
         for call in callers:
+            user = call.get("user")
+            pc_hint = ""
+            cmd = None
+            if user:
+                pc_hint = f"\nПК: {self.get_display_pc_name(user.get('pc_name',''))}"
+                cmd = lambda u=user: self._open_user_menu(u)
             b = tk.Button(
                 self.inner,
-                text=f"📞 {call['num'] or 'unknown'}\n{('(' + call['name'] + ')') if call['name'] else ''}\n→ {call['ext']}",
+                text=f"📞 {call['num'] or 'unknown'}\n{('(' + call['name'] + ')') if call['name'] else ''}\n→ {call['ext']}{pc_hint}",
+                command=cmd,
                 bg=self.caller_bg, fg=self.caller_fg, activebackground=self.caller_bg, activeforeground=self.caller_fg,
                 relief="ridge", bd=2, justify="center", wraplength=180
             )
@@ -1936,7 +1960,7 @@ class MainWindow:
         interval= max(1, int(self.settings.get_setting("cw_interval", 2)))
         popup_on= bool(self.settings.get_setting("cw_popup", True))
         exts_raw= self.settings.get_setting("cw_exts","4444")
-        watch_exts = [x.strip() for x in exts_raw.split(",") if x.strip()]
+        watch_exts = list(dict.fromkeys([x.strip() for x in exts_raw.split(",") if x.strip()]))
 
         headers = {"User-Agent":"TSHelper/CallWatch"}
         if cookie: headers["Cookie"] = cookie
@@ -1948,6 +1972,14 @@ class MainWindow:
             for k, t in list(seen_ttl.items()):
                 if t < now:
                     seen.discard(k); seen_ttl.pop(k, None)
+
+        def normalize_caller(num: str, name: str):
+            num_clean = (num or "").strip()
+            if num_clean.lower() == "unknown":
+                num_clean = ""
+            name_clean = (name or "").strip()
+            who_key = norm_name(name_clean) if name_clean else (num_clean or "unknown")
+            return num_clean, name_clean, who_key
 
         def split_lines_context(text, ext, radius=8):
             """Возвращает окно строк вокруг первой строки с Exten:<ext>."""
@@ -2008,18 +2040,31 @@ class MainWindow:
                                     caller = ((mnum.group(1).strip() if mnum else ""), (mname.group(1).strip() if mname else ""))
 
                     if caller:
-                        num, name = caller
+                        raw_num, raw_name = caller
+                        num, name, who_key = normalize_caller(raw_num, raw_name)
                         who = (num or "unknown") + (f" ({name})" if name else "")
-                        key = f"{ext}|{who}|{int(time.time()/dup_ttl)}"
-                        active_now.add(ext)
+                        key = f"{ext}|{who_key}|{int(time.time()/dup_ttl)}"
+                        active_now.add((ext, who_key))
                         if key not in seen:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
                             log_call(f"Звонок на {ext} от {who}")
 
+                            matched_user = self._match_user_by_caller(name, num)
+
                             # 1) показать сверху
                             with self.calls_lock:
-                                self.active_calls = [c for c in self.active_calls if c["ext"] != ext]
-                                self.active_calls.insert(0, {"ext":ext, "num":num or "", "name":name or "", "ts":time.time()})
+                                self.active_calls = [
+                                    c for c in self.active_calls
+                                    if not (c.get("ext") == ext and c.get("who_key") == who_key)
+                                ]
+                                self.active_calls.insert(0, {
+                                    "ext": ext,
+                                    "num": num or "",
+                                    "name": name or "",
+                                    "ts": time.time(),
+                                    "user": matched_user,
+                                    "who_key": who_key,
+                                })
                             self.master.after(0, self.populate_buttons)
 
                             # 2) всплывашка
@@ -2029,7 +2074,10 @@ class MainWindow:
                 with self.calls_lock:
                     now_ts = time.time()
                     original_calls = list(self.active_calls)
-                    filtered_calls = [c for c in self.active_calls if c["ext"] in active_now and now_ts - c["ts"] < self.calls_ttl]
+                    filtered_calls = [
+                        c for c in self.active_calls
+                        if (c.get("ext"), c.get("who_key")) in active_now and now_ts - c["ts"] < self.calls_ttl
+                    ]
                     ended_calls = [c for c in original_calls if c not in filtered_calls]
                     self.active_calls = filtered_calls
 
