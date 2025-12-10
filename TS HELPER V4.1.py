@@ -2240,18 +2240,10 @@ class UserButton(ttk.Frame):
         )
 
     def set_status(self, status_key: str):
+        """Запоминаем статус и перерисовываем текст/стиль без иконок."""
         self.status_key = status_key
-        icon = self.app.status_icons.get(status_key)
-        if self.caller_info:
-            # в режиме звонка статус показываем текстовым маркером
-            self.btn.config(image="", compound="center", pady=6)
-            self.btn.image = None
-        elif icon:
-            self.btn.config(image=icon, compound="left", padx=8, pady=4, anchor="nw")
-            self.btn.image = icon
-        else:
-            self.btn.config(image="", compound="center", anchor="center", pady=0)
-            self.btn.image = None
+        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
+        self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
 
     def set_availability(self, ok, searching=False):
@@ -2263,16 +2255,29 @@ class UserButton(ttk.Frame):
         self._apply_caller_style()
 
     def _status_marker(self) -> str:
+        # цветные кружки-эмоджи вместо картинок
         return {"online": "🟢", "offline": "⚫", "checking": "🟡"}.get(self.status_key, "")
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
+        marker = self._status_marker()
+        marker_prefix = f"{marker} " if marker else ""
+
         if ext:
-            header = f"📞 {ext}"
-            indent = " " * (len(ext) + 3)  # отступ под заголовок с телефоном
+            # первая строка: [кружок] 📞 4588
+            header = f"{marker_prefix}📞 {ext}"
+            # считаем отступ под первую строку
+            indent_len = len(ext) + len("📞 ")
+            if marker:
+                indent_len += 2  # кружок + пробел
+            indent = " " * indent_len
             base = f"{header}\n{indent}{self.user['name']}\n{indent}({pc_label})"
         else:
-            base = f"{self.user['name']}\n({pc_label})"
+            # без телефона — кружок перед ФИО
+            header = f"{marker_prefix}{self.user['name']}"
+            indent_len = 2 if marker else 0
+            indent = " " * indent_len
+            base = f"{header}\n{indent}({pc_label})"
 
         if not self.caller_info:
             return base
@@ -2281,9 +2286,8 @@ class UserButton(ttk.Frame):
         name = self.caller_info.get("name") or ""
         ext_target = self.caller_info.get("ext") or "?"
         who = f"\nЗвонит: {name}" if name else ""
-        marker = self._status_marker()
-        marker_prefix = f"{marker} " if marker else ""
-        return f"📞 {num} → {ext_target}{who}\n{marker_prefix}{base}"
+        # сверху инфа о звонке, ниже тот же блок с телефоном и статусом
+        return f"📞 {num} → {ext_target}{who}\n{base}"
 
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
@@ -2304,10 +2308,12 @@ class UserButton(ttk.Frame):
                 compound="center",
                 wraplength=200,
                 justify="center",
-                text=self._compose_text(pc_label)
+                text=self._compose_text(pc_label),
             )
             self.btn.gradient = gradient
+            self.btn.image = gradient
         else:
+            # обычный режим — БЕЗ image, только текст с эмоджи-кружком
             self.btn.config(
                 bg=self.app.user_bg,
                 fg=self.app.user_fg,
@@ -2317,16 +2323,17 @@ class UserButton(ttk.Frame):
                 relief="groove",
                 bd=2,
                 font=("Segoe UI", 10),
-                image=self.app.status_icons.get(self.status_key),
+                image="",
                 compound="left",
                 anchor="nw",
                 padx=8,
                 pady=4,
                 wraplength=190,
                 justify="left",
-                text=self._compose_text(pc_label)
+                text=self._compose_text(pc_label),
             )
             self.btn.gradient = None
+            self.btn.image = None
 
     def _make_gradient_image(self, width: int, height: int, start_color: str, end_color: str):
         img = tk.PhotoImage(width=width, height=height)
