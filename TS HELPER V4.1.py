@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 VERSION = "v4.1"
 
 # Цвета статусов (иконка в тексте)
-STATUS_COLORS = {
+STATUS_COLORS_DEFAULT = {
     "checking": "#f59e0b",
     "online":   "#16a34a",
     "offline":  "#9ca3af",
@@ -661,7 +661,8 @@ class SettingsManager:
             "cw_password": "",
             # Цвета
             "ui_user_bg": "#ffffff", "ui_user_fg": "#000000",
-            "ui_caller_bg": "#fff3cd", "ui_caller_fg": "#111111"  # жёлтый soft
+            "ui_caller_bg": "#fff3cd", "ui_caller_fg": "#111111",  # жёлтый soft
+            "ui_status_colors": STATUS_COLORS_DEFAULT,
         })
         self.secret_storage = SecretStorage(APP_NAME)
         self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password", "glpi_app_token", "glpi_user_token"}
@@ -926,11 +927,12 @@ class MainWindow:
 
     def _build_status_icons(self) -> dict:
         icons = {}
-        for key, color in STATUS_COLORS.items():
+        colors = getattr(self, "status_colors", STATUS_COLORS_DEFAULT)
+        for key, color in colors.items():
             icons[key] = self._make_status_icon(color)
         return icons
 
-    def _make_status_icon(self, color: str, size: int = 12) -> tk.PhotoImage:
+    def _make_status_icon(self, color: str, size: int = 14) -> tk.PhotoImage:
         img = tk.PhotoImage(width=size, height=size)
         r = (size - 2) / 2
         cx = cy = (size - 1) / 2
@@ -1171,7 +1173,7 @@ class MainWindow:
     def _apply_button_styles(self):
         # читаем цвета из конфига (если там случайно был "#", подставляем дефолт)
         import re
-        def norm(v, d): 
+        def norm(v, d):
             v = (v or "").strip()
             return v if re.fullmatch(r"#([0-9a-fA-F]{6})", v) else d
 
@@ -1179,6 +1181,14 @@ class MainWindow:
         self.user_fg   = norm(self.settings.get_setting("ui_user_fg", "#ffffff"), "#ffffff")
         self.caller_bg = norm(self.settings.get_setting("ui_caller_bg", "#fff3cd"), "#fff3cd")
         self.caller_fg = norm(self.settings.get_setting("ui_caller_fg", "#111111"), "#111111")
+
+        cfg_status = self.settings.get_setting("ui_status_colors", STATUS_COLORS_DEFAULT)
+        if not isinstance(cfg_status, dict):
+            cfg_status = {}
+        self.status_colors = {
+            key: norm(cfg_status.get(key, default), default)
+            for key, default in STATUS_COLORS_DEFAULT.items()
+        }
 
         # общий фон «доски» (чтобы вокруг кнопок не было «чужого» цвета)
         self.board_bg  = norm(self.settings.get_setting("ui_board_bg", "#f5e7d8"), "#f5e7d8")  # задай что хочешь
@@ -1644,11 +1654,20 @@ class MainWindow:
         user_fg = tk.StringVar(value=self.settings.get_setting("ui_user_fg","#000000"))
         caller_bg = tk.StringVar(value=self.settings.get_setting("ui_caller_bg","#fff3cd"))
         caller_fg = tk.StringVar(value=self.settings.get_setting("ui_caller_fg","#111111"))
+        status_checking = tk.StringVar(value=self.status_colors.get("checking", STATUS_COLORS_DEFAULT["checking"]))
+        status_online = tk.StringVar(value=self.status_colors.get("online", STATUS_COLORS_DEFAULT["online"]))
+        status_offline = tk.StringVar(value=self.status_colors.get("offline", STATUS_COLORS_DEFAULT["offline"]))
         for lbl, var in (("Фон кнопок пользователей", user_bg), ("Текст кнопок пользователей", user_fg),
                          ("Фон кнопок звонков", caller_bg), ("Текст кнопок звонков", caller_fg)):
             row = ttk.Frame(tab_colors); row.pack(fill="x", pady=4)
             ttk.Label(row, text=lbl).pack(side="left")
             ent = ttk.Entry(row, textvariable=var, width=12); ent.pack(side="left", padx=6)
+            ttk.Button(row, text="Выбрать…", command=lambda v=var: v.set(pick_color(v.get()))).pack(side="left")
+
+        for lbl, var in (("Статус: проверка", status_checking), ("Статус: в сети", status_online), ("Статус: недоступен", status_offline)):
+            row = ttk.Frame(tab_colors); row.pack(fill="x", pady=4)
+            ttk.Label(row, text=lbl).pack(side="left")
+            ttk.Entry(row, textvariable=var, width=12).pack(side="left", padx=6)
             ttk.Button(row, text="Выбрать…", command=lambda v=var: v.set(pick_color(v.get()))).pack(side="left")
 
         board_bg = tk.StringVar(value=self.settings.get_setting("ui_board_bg","#f5e7d8"))
@@ -1699,7 +1718,13 @@ class MainWindow:
             self.settings.set_setting("ui_user_fg", user_fg.get())
             self.settings.set_setting("ui_caller_bg", caller_bg.get())
             self.settings.set_setting("ui_caller_fg", caller_fg.get())
+            self.settings.set_setting("ui_status_colors", {
+                "checking": status_checking.get(),
+                "online": status_online.get(),
+                "offline": status_offline.get(),
+            })
             self._apply_button_styles()
+            self.status_icons = self._build_status_icons()
             self.populate_buttons()
 
             # GLPI
@@ -2197,7 +2222,7 @@ class UserButton(ttk.Frame):
             self.btn.config(image="", compound="center", pady=6)
             self.btn.image = None
         elif icon:
-            self.btn.config(image=icon, compound="left", padx=8, pady=6, anchor="nw")
+            self.btn.config(image=icon, compound="left", padx=8, pady=4, anchor="nw")
             self.btn.image = icon
         else:
             self.btn.config(image="", compound="center", anchor="center", pady=0)
@@ -2217,19 +2242,23 @@ class UserButton(ttk.Frame):
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
-        ext_line = f"☎ {ext}\n" if ext else ""
-        base = f"{ext_line}{self.user['name']}\n({pc_label})"
+        if ext:
+            header = f"📞 {ext}"
+            indent = " " * (len(ext) + 3)  # отступ под заголовок с телефоном
+            base = f"{header}\n{indent}{self.user['name']}\n{indent}({pc_label})"
+        else:
+            base = f"{self.user['name']}\n({pc_label})"
 
         if not self.caller_info:
-            marker = self._status_marker()
-            return f"{marker} {base}" if marker else base
+            return base
 
         num = self.caller_info.get("num") or "unknown"
         name = self.caller_info.get("name") or ""
         ext_target = self.caller_info.get("ext") or "?"
         who = f"\nЗвонит: {name}" if name else ""
         marker = self._status_marker()
-        return f"📞 {num} → {ext_target}{who}\n{marker} {base}"
+        marker_prefix = f"{marker} " if marker else ""
+        return f"📞 {num} → {ext_target}{who}\n{marker_prefix}{base}"
 
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
@@ -2265,7 +2294,10 @@ class UserButton(ttk.Frame):
                 font=("Segoe UI", 10),
                 image=self.app.status_icons.get(self.status_key),
                 compound="left",
-                wraplength=180,
+                anchor="w",
+                padx=8,
+                pady=4,
+                wraplength=190,
                 justify="left",
                 text=self._compose_text(pc_label)
             )
