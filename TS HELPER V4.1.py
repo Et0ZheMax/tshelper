@@ -2319,7 +2319,7 @@ class UserButton(ttk.Frame):
                 font=("Segoe UI", 10),
                 image=self.app.status_icons.get(self.status_key),
                 compound="left",
-                anchor="w",
+                anchor="nw",
                 padx=8,
                 pady=4,
                 wraplength=190,
