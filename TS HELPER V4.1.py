@@ -944,7 +944,7 @@ class MainWindow:
             icons[key] = self._make_status_icon(color)
         return icons
 
-    def _make_status_icon(self, color: str, size: int = 12) -> tk.PhotoImage:
+    def _make_status_icon(self, color: str, size: int = 14) -> tk.PhotoImage:
         img = tk.PhotoImage(width=size, height=size)
         r = (size - 2) / 2
         cx = cy = (size - 1) / 2
@@ -2247,7 +2247,7 @@ class UserButton(ttk.Frame):
             self.btn.config(image="", compound="center", pady=6)
             self.btn.image = None
         elif icon:
-            self.btn.config(image=icon, compound="left", padx=8, pady=6, anchor="nw")
+            self.btn.config(image=icon, compound="left", padx=8, pady=4, anchor="nw")
             self.btn.image = icon
         else:
             self.btn.config(image="", compound="center", anchor="center", pady=0)
@@ -2267,7 +2267,7 @@ class UserButton(ttk.Frame):
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
-        ext_line = f"☎ {ext}\n" if ext else ""
+        ext_line = f"📞 {ext}\n" if ext else ""
         base = f"{ext_line}{self.user['name']}\n({pc_label})"
 
         if not self.caller_info:
@@ -2315,6 +2315,9 @@ class UserButton(ttk.Frame):
                 font=("Segoe UI", 10),
                 image=self.app.status_icons.get(self.status_key),
                 compound="left",
+                anchor="nw",
+                padx=8,
+                pady=4,
                 wraplength=180,
                 justify="left",
                 text=self._compose_text(pc_label)
