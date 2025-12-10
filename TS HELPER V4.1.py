@@ -1019,7 +1019,18 @@ class MainWindow:
         return clean if pref else pc_name
 
     def _match_user_by_caller(self, name: str, num: str):
-        """Подбираем пользователя по ФИО, игнорируя пометку unknown в номере."""
+        """Подбираем пользователя по номеру (приоритетно) или по ФИО."""
+
+        def clean_digits(value: str) -> str:
+            return re.sub(r"\D", "", value or "")
+
+        num_digits = clean_digits(num)
+        if num_digits:
+            for u in self.users.get_users():
+                ext_digits = clean_digits(u.get("ext", ""))
+                if ext_digits and (num_digits.endswith(ext_digits) or ext_digits.endswith(num_digits)):
+                    return u
+
         key = norm_name(name) if name else ""
         if not key:
             return None
@@ -1204,35 +1215,58 @@ class MainWindow:
             self.active_calls = [c for c in self.active_calls if now - c["ts"] < self.calls_ttl]
             callers = sorted(self.active_calls, key=lambda c: c["ts"], reverse=True)
 
+        caller_by_pc = {}
+        orphan_calls = []
+        for call in callers:
+            user = call.get("user")
+            pc_name = user.get("pc_name") if user else None
+            if pc_name:
+                caller_by_pc[pc_name] = call
+            else:
+                orphan_calls.append(call)
+
         self.buttons = {}
         cols = self._compute_cols()
         r=c=0
 
-        # Вставим «панель активных звонков»
+        # 2) Пользователи (отсортированы по ФИО)
+        items_sorted = sorted(all_users, key=lambda u: locale.strxfrm(u["name"]))
+
+        # приоритет звонящих пользователей — сначала по порядку звонков, потом остальные
+        prioritized = []
+        seen_pcs = set()
         for call in callers:
             user = call.get("user")
-            pc_hint = ""
-            cmd = None
-            if user:
-                pc_hint = f"\nПК: {self.get_display_pc_name(user.get('pc_name',''))}"
-                cmd = lambda u=user: self._open_user_menu(u)
+            pc = user.get("pc_name") if user else None
+            if pc and pc not in seen_pcs:
+                seen_pcs.add(pc)
+                prioritized.append(pc)
+        ordered_users = []
+        for pc in prioritized:
+            u = next((item for item in items_sorted if item.get("pc_name") == pc), None)
+            if u:
+                ordered_users.append(u)
+        for u in items_sorted:
+            if u.get("pc_name") not in seen_pcs:
+                ordered_users.append(u)
+
+        for u in ordered_users:
+            caller = caller_by_pc.get(u.get("pc_name"))
+            btn = UserButton(self.inner, u, app=self, style_name="User.TButton", caller=caller)
+            btn.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
+            self.buttons[u["pc_name"]] = btn
+            c += 1
+            if c >= cols: c = 0; r += 1
+
+        # если звонок не удалось сопоставить с пользователем — показываем отдельной карточкой
+        for call in orphan_calls:
             b = tk.Button(
                 self.inner,
-                text=f"📞 {call['num'] or 'unknown'}\n{('(' + call['name'] + ')') if call['name'] else ''}\n→ {call['ext']}{pc_hint}",
-                command=cmd,
+                text=f"📞 {call['num'] or 'unknown'}\n{('(' + call['name'] + ')') if call['name'] else ''}\n→ {call['ext']}",
                 bg=self.caller_bg, fg=self.caller_fg, activebackground=self.caller_bg, activeforeground=self.caller_fg,
                 relief="ridge", bd=2, justify="center", wraplength=180
             )
             b.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
-            c += 1
-            if c >= cols: c = 0; r += 1
-
-        # 2) Пользователи (отсортированы по ФИО)
-        items_sorted = sorted(all_users, key=lambda u: locale.strxfrm(u["name"]))
-        for u in items_sorted:
-            btn = UserButton(self.inner, u, app=self, style_name="User.TButton")
-            btn.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
-            self.buttons[u["pc_name"]] = btn
             c += 1
             if c >= cols: c = 0; r += 1
 
@@ -2126,12 +2160,13 @@ class MainWindow:
 
 # --- Кнопка пользователя ---
 class UserButton(ttk.Frame):
-    def __init__(self, master, user, app: MainWindow, style_name=None):
+    def __init__(self, master, user, app: MainWindow, style_name=None, caller=None):
         super().__init__(master)
         self.user = user
         self.app  = app
         self.avail = None
         self.status_key = "offline"
+        self.caller_info = caller
 
         pc_label = self.app.get_display_pc_name(user['pc_name'])
         # создаём tk.Button, чтобы гарантированно красить
@@ -2145,6 +2180,7 @@ class UserButton(ttk.Frame):
         )
         self.btn.pack(fill="both", expand=True)
         self.set_status(self.status_key)
+        self._apply_caller_style()
         self.btn.bind("<Button-3>", self._rclick)
 
     def refresh_colors(self):
@@ -2156,12 +2192,17 @@ class UserButton(ttk.Frame):
     def set_status(self, status_key: str):
         self.status_key = status_key
         icon = self.app.status_icons.get(status_key)
-        if icon:
+        if self.caller_info:
+            # в режиме звонка статус показываем текстовым маркером
+            self.btn.config(image="", compound="center", pady=6)
+            self.btn.image = None
+        elif icon:
             self.btn.config(image=icon, compound="left", padx=8, pady=6, anchor="nw")
             self.btn.image = icon
         else:
             self.btn.config(image="", compound="center", anchor="center", pady=0)
             self.btn.image = None
+        self._apply_caller_style()
 
     def set_availability(self, ok, searching=False):
         self.avail = ok
@@ -2169,11 +2210,85 @@ class UserButton(ttk.Frame):
         status_key = "online" if ok else "offline"
         self.set_status(status_key if searching else self.status_key)
         self.btn.config(text=self._compose_text(pc_label))
+        self._apply_caller_style()
+
+    def _status_marker(self) -> str:
+        return {"online": "🟢", "offline": "⚫", "checking": "🟡"}.get(self.status_key, "")
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
         ext_line = f"☎ {ext}\n" if ext else ""
-        return f"{ext_line}{self.user['name']}\n({pc_label})"
+        base = f"{ext_line}{self.user['name']}\n({pc_label})"
+
+        if not self.caller_info:
+            marker = self._status_marker()
+            return f"{marker} {base}" if marker else base
+
+        num = self.caller_info.get("num") or "unknown"
+        name = self.caller_info.get("name") or ""
+        ext_target = self.caller_info.get("ext") or "?"
+        who = f"\nЗвонит: {name}" if name else ""
+        marker = self._status_marker()
+        return f"📞 {num} → {ext_target}{who}\n{marker} {base}"
+
+    def _apply_caller_style(self):
+        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
+        if self.caller_info:
+            gradient = self._make_gradient_image(220, 90, self.app.caller_bg, "#f97316")
+            self.btn.config(
+                bg=self.app.caller_bg,
+                fg=self.app.caller_fg,
+                activebackground=self.app.caller_bg,
+                activeforeground=self.app.caller_fg,
+                highlightthickness=2,
+                highlightbackground="#fb923c",
+                highlightcolor="#fb923c",
+                relief="solid",
+                bd=2,
+                font=("Segoe UI", 10, "bold"),
+                image=gradient,
+                compound="center",
+                wraplength=200,
+                justify="center",
+                text=self._compose_text(pc_label)
+            )
+            self.btn.gradient = gradient
+        else:
+            self.btn.config(
+                bg=self.app.user_bg,
+                fg=self.app.user_fg,
+                activebackground=self.app.user_bg,
+                activeforeground=self.app.user_fg,
+                highlightthickness=0,
+                relief="groove",
+                bd=2,
+                font=("Segoe UI", 10),
+                image=self.app.status_icons.get(self.status_key),
+                compound="left",
+                wraplength=180,
+                justify="left",
+                text=self._compose_text(pc_label)
+            )
+            self.btn.gradient = None
+
+    def _make_gradient_image(self, width: int, height: int, start_color: str, end_color: str):
+        img = tk.PhotoImage(width=width, height=height)
+
+        def hex_to_rgb(h: str):
+            h = h.lstrip('#')
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+        def rgb_to_hex(rgb):
+            return "#%02x%02x%02x" % rgb
+
+        start_rgb = hex_to_rgb(start_color)
+        end_rgb = hex_to_rgb(end_color)
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            line_rgb = tuple(int(start_rgb[i] + (end_rgb[i] - start_rgb[i]) * ratio) for i in range(3))
+            line_hex = rgb_to_hex(line_rgb)
+            img.put(line_hex, to=(0, y, width, y+1))
+        return img
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
