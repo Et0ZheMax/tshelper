@@ -568,19 +568,8 @@ def parse_caller_from_block(block: str, ext: str):
         re.search(rf"\bExten:\s*{re.escape(ext)}\b", block)
     )
     if not in_block_for_ext: return None
-    active = any(
-        re.search(pat, block, flags=re.I)
-        for pat in [
-            r"Ringing",
-            r"Ring\+Inuse",
-            r"\bDial\s+(Ring|Up)\b",
-            r"Channel:.*\bUp\b",
-        ]
-    )
-    if not active:
-        m_inuse = re.search(r"In use\s+(\d+)", block, flags=re.I)
-        active = bool(m_inuse and int(m_inuse.group(1)) > 0)
-    if not active: return None
+    if not is_block_active(block, ext):
+        return None
     m = re.search(r'CLCID:\s*"?(?P<name>[^"]*)"?\s*<(?P<num>[^>]+)>', block)
     if m:
         name = (m.group("name") or "").strip()
@@ -594,6 +583,29 @@ def parse_caller_from_block(block: str, ext: str):
     m2 = re.search(r'CLCID:\s*"?(?P<name>[^"]*?)"?\s*(?P<num>\+?\d{5,15})', block)
     if m2: return (m2.group("num").strip(), m2.group("name").strip())
     return None
+
+def is_block_active(block: str, ext: str) -> bool:
+    if not block:
+        return False
+    in_block_for_ext = (
+        re.search(rf"Endpoint:\s*{re.escape(ext)}\s*/\s*{re.escape(ext)}", block, flags=re.I) or
+        re.search(rf"\bExten:\s*{re.escape(ext)}\b", block)
+    )
+    if not in_block_for_ext:
+        return False
+    active = any(
+        re.search(pat, block, flags=re.I)
+        for pat in [
+            r"Ringing",
+            r"Ring\+Inuse",
+            r"\bDial\s+(Ring|Up)\b",
+            r"Channel:.*\bUp\b",
+        ]
+    )
+    if not active:
+        m_inuse = re.search(r"In use\s+(\d+)", block, flags=re.I)
+        active = bool(m_inuse and int(m_inuse.group(1)) > 0)
+    return active
 
 # --------- Главный класс окна ----------
 class UserManager:
@@ -2093,9 +2105,14 @@ class MainWindow:
                     block = extract_block_for_ext(text, ext)
                     if block:
                         _pbx_dump(f"endpoint_block_{ext}.txt", block)
-                    caller = parse_caller_from_block(block, ext) if block else None
 
-                    if not caller:
+                    with self.calls_lock:
+                        prev_call = next((c for c in self.active_calls if c.get("ext") == ext), None)
+
+                    block_active = is_block_active(block, ext)
+                    caller = parse_caller_from_block(block, ext) if block_active and block else None
+
+                    if not caller and block_active:
                         # строгий построчный резервный поиск ВОКРУГ Exten:<ext>
                         window = split_lines_context(text, ext, radius=10)
                         if window:
@@ -2109,9 +2126,16 @@ class MainWindow:
                                 if mname or mnum:
                                     caller = ((mnum.group(1).strip() if mnum else ""), (mname.group(1).strip() if mname else ""))
 
-                    if caller:
+                    if block_active and not caller and prev_call:
+                        caller = (prev_call.get("num", ""), prev_call.get("name", ""))
+                        prev_who_key = prev_call.get("who_key") or ""
+                    else:
+                        prev_who_key = prev_call.get("who_key") if prev_call else ""
+
+                    if block_active and caller:
                         raw_num, raw_name = caller
                         num, name, who_key = normalize_caller(raw_num, raw_name)
+                        who_key = who_key or prev_who_key or f"ext-{ext}"
                         who = (num or "unknown") + (f" ({name})" if name else "")
                         key = f"{ext}|{who_key}|{int(time.time()/dup_ttl)}"
                         active_now.add((ext, who_key))
@@ -2127,11 +2151,12 @@ class MainWindow:
                                     c for c in self.active_calls
                                     if not (c.get("ext") == ext and c.get("who_key") == who_key)
                                 ]
+                                started_ts = prev_call.get("ts") if prev_call else time.time()
                                 self.active_calls.insert(0, {
                                     "ext": ext,
                                     "num": num or "",
                                     "name": name or "",
-                                    "ts": time.time(),
+                                    "ts": started_ts,
                                     "user": matched_user,
                                     "who_key": who_key,
                                 })
