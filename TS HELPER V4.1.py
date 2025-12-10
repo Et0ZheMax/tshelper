@@ -2249,10 +2249,17 @@ class UserButton(ttk.Frame):
     def set_availability(self, ok, searching=False):
         self.avail = ok
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
-        status_key = "online" if ok else "offline"
-        self.set_status(status_key if searching else self.status_key)
+
+        if searching:
+            # пока идёт проверка доступности
+            self.set_status("checking")
+        else:
+            # результат проверки: онлайн или оффлайн
+            self.set_status("online" if ok else "offline")
+
         self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
+
 
     def _status_marker(self) -> str:
         # цветные кружки-эмоджи вместо картинок
@@ -2260,34 +2267,32 @@ class UserButton(ttk.Frame):
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
+
+        # статусный кружок-эмоджи
         marker = self._status_marker()
         marker_prefix = f"{marker} " if marker else ""
 
         if ext:
-            # первая строка: [кружок] 📞 4588
+            # первая строка: 🟢 📞 4588
             header = f"{marker_prefix}📞 {ext}"
-            # считаем отступ под первую строку
-            indent_len = len(ext) + len("📞 ")
-            if marker:
-                indent_len += 2  # кружок + пробел
-            indent = " " * indent_len
-            base = f"{header}\n{indent}{self.user['name']}\n{indent}({pc_label})"
+            base = f"{header}\n{self.user['name']}\n({pc_label})"
         else:
-            # без телефона — кружок перед ФИО
+            # без телефона — 🟢 ФИО
             header = f"{marker_prefix}{self.user['name']}"
-            indent_len = 2 if marker else 0
-            indent = " " * indent_len
-            base = f"{header}\n{indent}({pc_label})"
+            base = f"{header}\n({pc_label})"
 
+        # если нет активного звонка — возвращаем обычный текст карточки
         if not self.caller_info:
             return base
 
+        # режим звонка: сверху инфа о звонке, снизу та же карточка со статусом
         num = self.caller_info.get("num") or "unknown"
         name = self.caller_info.get("name") or ""
         ext_target = self.caller_info.get("ext") or "?"
         who = f"\nЗвонит: {name}" if name else ""
-        # сверху инфа о звонке, ниже тот же блок с телефоном и статусом
         return f"📞 {num} → {ext_target}{who}\n{base}"
+
+
 
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
