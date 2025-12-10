@@ -2267,8 +2267,12 @@ class UserButton(ttk.Frame):
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
-        ext_line = f"📞 {ext}\n" if ext else ""
-        base = f"{ext_line}{self.user['name']}\n({pc_label})"
+        if ext:
+            header = f"📞 {ext}"
+            indent = " " * (len(ext) + 3)  # отступ под заголовок с телефоном
+            base = f"{header}\n{indent}{self.user['name']}\n{indent}({pc_label})"
+        else:
+            base = f"{self.user['name']}\n({pc_label})"
 
         if not self.caller_info:
             return base
@@ -2315,10 +2319,10 @@ class UserButton(ttk.Frame):
                 font=("Segoe UI", 10),
                 image=self.app.status_icons.get(self.status_key),
                 compound="left",
-                anchor="nw",
+                anchor="w",
                 padx=8,
                 pady=4,
-                wraplength=180,
+                wraplength=190,
                 justify="left",
                 text=self._compose_text(pc_label)
             )
