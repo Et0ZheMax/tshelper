@@ -675,6 +675,11 @@ class SettingsManager:
             "ui_user_bg": "#ffffff", "ui_user_fg": "#000000",
             "ui_caller_bg": "#fff3cd", "ui_caller_fg": "#111111",  # жёлтый soft
             "ui_status_colors": STATUS_COLORS_DEFAULT,
+            # Док-панель
+            "dock_enabled": False,
+            "dock_side": "left",
+            "dock_items": [],
+            "dock_settings_geometry": "",
         })
         self.secret_storage = SecretStorage(APP_NAME)
         self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password", "glpi_app_token", "glpi_user_token"}
@@ -911,6 +916,11 @@ class MainWindow:
         # иконки статусов
         self.status_icons = self._build_status_icons()
 
+        # док-панель
+        self.dock_items = self._normalize_dock_items(self.settings.get_setting("dock_items", []))
+        self.dock_enabled_var = tk.BooleanVar(master=self.master, value=bool(self.settings.get_setting("dock_enabled", False)))
+        self.dock_side_var = tk.StringVar(master=self.master, value=self._normalize_dock_side(self.settings.get_setting("dock_side", "left")))
+
         self.users = UserManager(USERS_FILE)
         self.executor = ThreadPoolExecutor(max_workers=24)
         self.buttons = {}
@@ -1065,6 +1075,16 @@ class MainWindow:
         filem.add_command(label="Выход", command=self.on_closing)
         menubar.add_cascade(label="Файл", menu=filem)
 
+        dockm = tk.Menu(menubar, tearoff=0)
+        dockm.add_checkbutton(label="Активировать", variable=self.dock_enabled_var, command=self.toggle_dock_panel)
+        pos_menu = tk.Menu(dockm, tearoff=0)
+        pos_menu.add_radiobutton(label="Слева", value="left", variable=self.dock_side_var, command=self.change_dock_side)
+        pos_menu.add_radiobutton(label="Справа", value="right", variable=self.dock_side_var, command=self.change_dock_side)
+        dockm.add_cascade(label="Расположение", menu=pos_menu)
+        dockm.add_separator()
+        dockm.add_command(label="Настройки…", command=self.open_dock_settings)
+        menubar.add_cascade(label="Док-панель", menu=dockm)
+
         toolsm = tk.Menu(menubar, tearoff=0)
         toolsm.add_command(label="Проверка окружения", command=self.show_env_check)
         toolsm.add_command(label="Просмотр логов", command=self.open_log_viewer)
@@ -1077,10 +1097,25 @@ class MainWindow:
         self.search_entry = ttk.Entry(top); self.search_entry.pack(side="left", fill="x", expand=True)
         self.search_entry.bind("<KeyRelease>", self.update_search)
 
-        # center scrollable
-        mid = ttk.Frame(self.master, padding=(10,0)); mid.pack(side="top", fill="both", expand=True)
-        self.canvas = tk.Canvas(mid, highlightthickness=0)
-        vs = ttk.Scrollbar(mid, orient="vertical", command=self.canvas.yview)
+        # center area: док-панель + основное окно
+        self.content = ttk.Frame(self.master, padding=(10,0))
+        self.content.pack(side="top", fill="both", expand=True)
+        self.content.grid_rowconfigure(0, weight=1)
+
+        self.dock_container = ttk.Frame(self.content, padding=(0,0,10,0))
+        self.dock_container.bind("<Configure>", self._on_dock_resize)
+        dock_header = ttk.Frame(self.dock_container)
+        dock_header.pack(fill="x", pady=(0,6))
+        ttk.Label(dock_header, text="Док-панель", font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Button(dock_header, text="Настроить", command=self.open_dock_settings).pack(side="right")
+        self.dock_buttons_frame = ttk.Frame(self.dock_container)
+        self.dock_buttons_frame.pack(fill="both", expand=True)
+
+        self.dock_divider = tk.Frame(self.content, bg="#b1b1b1", width=2)
+
+        self.board_container = ttk.Frame(self.content)
+        self.canvas = tk.Canvas(self.board_container, highlightthickness=0, bg=self.board_bg)
+        vs = ttk.Scrollbar(self.board_container, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vs.set)
         vs.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
@@ -1089,6 +1124,8 @@ class MainWindow:
 
         self.inner.bind("<Configure>", self._update_scrollregion)
         self._bind_mousewheel()
+        self._update_dock_layout()
+        self._render_dock_buttons()
 
         # bottom
         bottom = ttk.Frame(self.master, padding=10); bottom.pack(side="bottom", fill="x")
@@ -1153,6 +1190,267 @@ class MainWindow:
         if getattr(self, "_sr_job", None):
             self.master.after_cancel(self._sr_job)
         self._sr_job = self.master.after(80, lambda: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+
+    # --------- Док-панель ----------
+    def _normalize_dock_side(self, side: str) -> str:
+        return "right" if str(side).lower().strip() == "right" else "left"
+
+    def _normalize_dock_items(self, items) -> list[dict]:
+        normalized = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("title") or "").strip()
+            resource = str(item.get("resource") or item.get("target") or "").strip()
+            if not name and not resource:
+                continue
+            normalized.append({"name": name or "Кнопка", "resource": resource})
+        return normalized
+
+    def _update_dock_layout(self):
+        if not getattr(self, "content", None):
+            return
+
+        for widget in (self.dock_container, self.dock_divider, self.board_container):
+            try:
+                widget.grid_forget()
+            except Exception:
+                pass
+
+        for col in range(3):
+            try:
+                self.content.grid_columnconfigure(col, weight=0, minsize=0)
+            except Exception:
+                pass
+
+        if self.dock_enabled_var.get():
+            side = self._normalize_dock_side(self.dock_side_var.get())
+            self.dock_side_var.set(side)
+            if side == "left":
+                dock_col, divider_col, board_col = 0, 1, 2
+                dock_pad = (0, 8)
+            else:
+                dock_col, divider_col, board_col = 2, 1, 0
+                dock_pad = (8, 0)
+
+            self.content.grid_columnconfigure(dock_col, weight=1, minsize=220)
+            self.content.grid_columnconfigure(board_col, weight=3)
+            self.dock_container.grid(row=0, column=dock_col, sticky="nsew", padx=dock_pad)
+            self.dock_divider.grid(row=0, column=divider_col, sticky="ns", padx=4, pady=6)
+            self.board_container.grid(row=0, column=board_col, sticky="nsew")
+        else:
+            self.content.grid_columnconfigure(0, weight=1)
+            self.board_container.grid(row=0, column=0, columnspan=3, sticky="nsew")
+
+        self.content.grid_rowconfigure(0, weight=1)
+        self.master.after(50, self._relayout_after_resize)
+
+    def _compute_dock_cols(self) -> int:
+        width = max(self.dock_container.winfo_width(), 260)
+        btn_w, pad = 140, 12
+        cols = (width + pad) // (btn_w + pad)
+        return min(3, max(2, cols))
+
+    def _render_dock_buttons(self):
+        if not getattr(self, "dock_buttons_frame", None):
+            return
+        for w in self.dock_buttons_frame.winfo_children():
+            w.destroy()
+
+        cols = self._compute_dock_cols()
+        if not self.dock_items:
+            ttk.Label(self.dock_buttons_frame, text="Нет кнопок. Добавьте их в настройках.").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+            self.dock_buttons_frame.grid_columnconfigure(0, weight=1)
+            return
+
+        r = c = 0
+        for item in self.dock_items:
+            name = item.get("name") or "Кнопка"
+            res = item.get("resource", "")
+            btn = ttk.Button(self.dock_buttons_frame, text=name, command=lambda v=res: self._open_dock_resource(v))
+            btn.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
+            c += 1
+            if c >= cols:
+                c = 0
+                r += 1
+
+        for i in range(cols):
+            self.dock_buttons_frame.grid_columnconfigure(i, weight=1)
+
+    def _on_dock_resize(self, _=None):
+        if getattr(self, "_dock_resize_job", None):
+            try:
+                self.master.after_cancel(self._dock_resize_job)
+            except Exception:
+                pass
+        self._dock_resize_job = self.master.after(150, self._render_dock_buttons)
+
+    def toggle_dock_panel(self):
+        self.settings.set_setting("dock_enabled", self.dock_enabled_var.get())
+        self._update_dock_layout()
+
+    def change_dock_side(self):
+        side = self._normalize_dock_side(self.dock_side_var.get())
+        self.dock_side_var.set(side)
+        self.settings.set_setting("dock_side", side)
+        self._update_dock_layout()
+
+    def _save_dock_items(self):
+        self.dock_items = self._normalize_dock_items(self.dock_items)
+        self.settings.set_setting("dock_items", self.dock_items)
+        self._render_dock_buttons()
+
+    def _open_dock_resource(self, resource: str):
+        res = (resource or "").strip()
+        if not res:
+            return messagebox.showerror("Док-панель", "Не указан ресурс для этой кнопки.")
+        try:
+            if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", res):
+                webbrowser.open(res)
+                return
+            if os.path.isdir(res):
+                if is_windows():
+                    os.startfile(res)
+                else:
+                    subprocess.Popen(["xdg-open", res])
+                return
+            if os.path.isfile(res):
+                ext = os.path.splitext(res)[1].lower()
+                if ext == ".ps1":
+                    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", res] if is_windows() else ["pwsh", "-File", res]
+                    subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                elif ext in {".bat", ".cmd"}:
+                    subprocess.Popen(res, shell=True)
+                elif ext == ".py":
+                    subprocess.Popen([sys.executable, res])
+                else:
+                    if is_windows():
+                        os.startfile(res)
+                    else:
+                        subprocess.Popen([res], shell=True)
+                return
+            if is_windows():
+                os.startfile(res)
+            else:
+                subprocess.Popen(res, shell=True)
+        except Exception as e:
+            messagebox.showerror("Док-панель", f"Не удалось открыть ресурс: {e}")
+
+    def open_dock_settings(self):
+        if getattr(self, "dock_settings_window", None) and self.dock_settings_window.winfo_exists():
+            self.dock_settings_window.lift(); self.dock_settings_window.focus_force()
+            return
+
+        win = tk.Toplevel(self.master); win.title("Настройка док-панели")
+        geom = self.settings.get_setting("dock_settings_geometry", "")
+        if geom:
+            win.geometry(geom)
+        win.transient(self.master)
+        win.grab_set()
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"dock_settings_geometry"))
+        self.dock_settings_window = win
+
+        temp_items = [dict(item) for item in self.dock_items]
+
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.grid_columnconfigure(0, weight=1)
+        frm.grid_columnconfigure(1, weight=1)
+        frm.grid_rowconfigure(0, weight=1)
+
+        list_frame = ttk.Frame(frm)
+        list_frame.grid(row=0, column=0, rowspan=6, sticky="nsew", padx=(0,10))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+        lst = tk.Listbox(list_frame, height=14)
+        lst.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(list_frame, orient="vertical", command=lst.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        lst.configure(yscrollcommand=sb.set)
+
+        name_var = tk.StringVar()
+        res_var = tk.StringVar()
+
+        def refresh_list(selected_index=None):
+            lst.delete(0, "end")
+            for idx, item in enumerate(temp_items):
+                title = item.get("name") or f"Кнопка {idx+1}"
+                res = item.get("resource") or "—"
+                lst.insert("end", f"{idx+1}. {title} — {res}")
+            if selected_index is not None and 0 <= selected_index < len(temp_items):
+                lst.selection_set(selected_index)
+                lst.see(selected_index)
+
+        def on_select(_=None):
+            sel = lst.curselection()
+            if not sel:
+                name_var.set("")
+                res_var.set("")
+                return
+            item = temp_items[sel[0]]
+            name_var.set(item.get("name", ""))
+            res_var.set(item.get("resource", ""))
+
+        def add_or_update():
+            title = name_var.get().strip()
+            resource = res_var.get().strip()
+            if not title or not resource:
+                return messagebox.showerror("Док-панель", "Заполните имя кнопки и ресурс.")
+            new_item = {"name": title, "resource": resource}
+            sel = lst.curselection()
+            if sel:
+                temp_items[sel[0]] = new_item
+                idx = sel[0]
+            else:
+                temp_items.append(new_item)
+                idx = len(temp_items) - 1
+            refresh_list(idx)
+
+        def delete_selected():
+            sel = lst.curselection()
+            if not sel:
+                return
+            temp_items.pop(sel[0])
+            refresh_list()
+            name_var.set("")
+            res_var.set("")
+
+        def move_item(delta: int):
+            sel = lst.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            new_idx = idx + delta
+            if new_idx < 0 or new_idx >= len(temp_items):
+                return
+            temp_items[idx], temp_items[new_idx] = temp_items[new_idx], temp_items[idx]
+            refresh_list(new_idx)
+
+        def save_and_close():
+            self.dock_items = self._normalize_dock_items(temp_items)
+            self._save_dock_items()
+            self._update_dock_layout()
+            self._close_save_geo(win,"dock_settings_geometry")
+
+        ttk.Label(frm, text="Имя кнопки:").grid(row=0, column=1, sticky="w")
+        ttk.Entry(frm, textvariable=name_var).grid(row=1, column=1, sticky="ew", pady=(0,6))
+        ttk.Label(frm, text="Ресурс (путь или URL):").grid(row=2, column=1, sticky="w")
+        ttk.Entry(frm, textvariable=res_var).grid(row=3, column=1, sticky="ew", pady=(0,6))
+
+        btn_row = ttk.Frame(frm)
+        btn_row.grid(row=4, column=1, sticky="ew", pady=4)
+        ttk.Button(btn_row, text="Добавить/обновить", command=add_or_update).pack(side="left")
+        ttk.Button(btn_row, text="Удалить", command=delete_selected).pack(side="left", padx=6)
+
+        order_row = ttk.Frame(frm)
+        order_row.grid(row=5, column=1, sticky="ew", pady=4)
+        ttk.Button(order_row, text="Вверх", command=lambda: move_item(-1)).pack(side="left")
+        ttk.Button(order_row, text="Вниз", command=lambda: move_item(1)).pack(side="left", padx=6)
+
+        ttk.Button(frm, text="Сохранить", command=save_and_close).grid(row=6, column=0, columnspan=2, pady=(10,0))
+
+        lst.bind("<<ListboxSelect>>", on_select)
+        refresh_list()
 
     # --------- Кнопки/раскладка ----------
     def _compute_cols(self):
