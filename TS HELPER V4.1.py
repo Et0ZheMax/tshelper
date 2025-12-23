@@ -79,6 +79,14 @@ try:
 except:
     pass
 
+# --- Системный трей (Windows) ---
+TRAY_AVAILABLE = False
+try:
+    import win32con, win32gui, win32gui_struct, win32api
+    TRAY_AVAILABLE = True
+except ImportError:
+    pass
+
 
 def _import_requests_optional():
     try:
@@ -680,6 +688,10 @@ class SettingsManager:
             "dock_side": "left",
             "dock_items": [],
             "dock_settings_geometry": "",
+            # Минимизация
+            "minimize_to_tray": False,
+            "minimize_to_widget": False,
+            "mini_widget_geometry": "",
         })
         self.secret_storage = SecretStorage(APP_NAME)
         self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password", "glpi_app_token", "glpi_user_token"}
@@ -731,6 +743,135 @@ class SettingsManager:
     def can_show_secrets(self) -> bool:
         return self.secret_storage.available
     def save_config(self): save_json(self.path, self.config)
+
+if TRAY_AVAILABLE:
+    class SimpleSystemTray:
+        """Простейшая иконка в трее на базе pywin32 с пунктами «Развернуть» и «Выход»."""
+        def __init__(self, icon_path: str, tooltip: str, on_restore, on_exit):
+            self.icon_path = icon_path
+            self.tooltip = tooltip
+            self.on_restore = on_restore
+            self.on_exit = on_exit
+            self.hwnd = None
+            self.hicon = None
+            self._notify_msg = win32con.WM_USER + 20
+            self._class_name = "TSHELPAD_TRAY"
+            self._thread = None
+            self._menu_actions = {1: self._safe_restore, 2: self._safe_exit}
+
+        def _safe_restore(self, *_):
+            try:
+                if callable(self.on_restore):
+                    self.on_restore()
+            except Exception as e:
+                log_message(f"Tray restore error: {e}")
+
+        def _safe_exit(self, *_):
+            try:
+                if callable(self.on_exit):
+                    self.on_exit()
+            except Exception as e:
+                log_message(f"Tray exit error: {e}")
+
+        def _load_icon(self):
+            try:
+                ico_x = win32api.GetSystemMetrics(win32con.SM_CXSMICON)
+                flags = win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE
+                return win32gui.LoadImage(None, self.icon_path, win32con.IMAGE_ICON, ico_x, ico_x, flags)
+            except Exception as e:
+                log_message(f"Не удалось загрузить иконку трея: {e}")
+                return None
+
+        def _wnd_proc(self, hwnd, msg, wparam, lparam):
+            if msg == self._notify_msg:
+                if lparam in (win32con.WM_LBUTTONUP, win32con.WM_LBUTTONDBLCLK):
+                    self._safe_restore()
+                elif lparam == win32con.WM_RBUTTONUP:
+                    self._show_menu(hwnd)
+                return 0
+            if msg == win32con.WM_COMMAND:
+                cmd_id = win32api.LOWORD(wparam)
+                action = self._menu_actions.get(cmd_id)
+                if action:
+                    action()
+                return 0
+            if msg == win32con.WM_DESTROY:
+                try:
+                    win32gui.Shell_NotifyIcon(win32gui.NIM_DELETE, (hwnd, 0))
+                except Exception:
+                    pass
+                win32gui.PostQuitMessage(0)
+                return 0
+            if msg == win32con.WM_CLOSE:
+                win32gui.DestroyWindow(hwnd)
+                return 0
+            return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+        def _show_menu(self, hwnd):
+            try:
+                menu = win32gui.CreatePopupMenu()
+                win32gui.AppendMenu(menu, win32con.MF_STRING, 1, "Развернуть")
+                win32gui.AppendMenu(menu, win32con.MF_STRING, 2, "Выход")
+                win32gui.SetForegroundWindow(hwnd)
+                pos = win32gui.GetCursorPos()
+                win32gui.TrackPopupMenu(menu, win32con.TPM_LEFTALIGN, pos[0], pos[1], 0, hwnd, None)
+                win32gui.PostMessage(hwnd, win32con.WM_NULL, 0, 0)
+            except Exception as e:
+                log_message(f"Tray menu error: {e}")
+
+        def _run(self):
+            try:
+                hinst = win32api.GetModuleHandle(None)
+                wnd_class = win32gui.WNDCLASS()
+                wnd_class.hInstance = hinst
+                wnd_class.lpszClassName = self._class_name
+                wnd_class.lpfnWndProc = self._wnd_proc
+                try:
+                    win32gui.RegisterClass(wnd_class)
+                except Exception:
+                    pass
+                self.hwnd = win32gui.CreateWindow(self._class_name, self._class_name, 0, 0, 0, 0, 0, 0, 0, hinst, None)
+                self.hicon = self._load_icon() or win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+                flags = win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
+                tip = self.tooltip[:63] if self.tooltip else ""
+                nid = (self.hwnd, 0, flags, self._notify_msg, self.hicon, tip)
+                win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, nid)
+                win32gui.PumpMessages()
+            except Exception as e:
+                log_message(f"Tray loop error: {e}")
+            finally:
+                try:
+                    if self.hwnd:
+                        win32gui.DestroyWindow(self.hwnd)
+                except Exception:
+                    pass
+                self.hwnd = None
+
+        def show(self) -> bool:
+            if not TRAY_AVAILABLE:
+                return False
+            if self._thread and self._thread.is_alive():
+                return True
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+            return True
+
+        def destroy(self):
+            if not self.hwnd:
+                return
+            try:
+                win32gui.PostMessage(self.hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+else:
+    class SimpleSystemTray:
+        def __init__(self, *_, **__):
+            pass
+        def show(self) -> bool:
+            return False
+        def destroy(self):
+            pass
+
 
 class LogViewer(tk.Toplevel):
     def __init__(self, master, settings, log_path: str = "app.log"):
@@ -908,6 +1049,11 @@ class MainWindow:
         self.settings = SettingsManager(CONFIG_FILE)
         geom = self.settings.get_setting("window_geometry","1100x720+200+100")
         self.master.geometry(geom)
+        self.tray_icon = None
+        self.mini_widget = None
+        self._ignore_unmap = False
+        self._is_minimized_custom = False
+        self._force_exit = False
 
         # стили (переопределяются при изменении настроек)
         self.style = ttk.Style(self.master)
@@ -938,6 +1084,8 @@ class MainWindow:
         # Перестраивать сетку при изменении ширины (чтоб не «в столбик»)
         self._last_cols = None
         self.canvas.bind("<Configure>", self._on_canvas_resize)
+        self.master.bind("<Unmap>", self._on_unmap)
+        self.master.bind("<Map>", self._on_map)
 
         # авто-проверка обновлений и preflight
         threading.Thread(target=check_updates_async, daemon=True).start()
@@ -1849,6 +1997,10 @@ class MainWindow:
         ttk.Label(tab_common, text="Допустимые префиксы ПК (через запятую):").pack(pady=4, anchor="w")
         prefixes_var = tk.StringVar(value=", ".join(self.get_allowed_prefixes()))
         ttk.Entry(tab_common, textvariable=prefixes_var).pack(fill="x")
+        minimize_to_tray = tk.BooleanVar(value=self.settings.get_setting("minimize_to_tray", False))
+        minimize_to_widget = tk.BooleanVar(value=self.settings.get_setting("minimize_to_widget", False))
+        ttk.Checkbutton(tab_common, text="Сворачивать в трей при закрытии/сворачивании", variable=minimize_to_tray).pack(anchor="w", pady=4)
+        ttk.Checkbutton(tab_common, text="Сворачивать в мини-виджет поверх окон", variable=minimize_to_widget).pack(anchor="w", pady=2)
 
         def add_storage_warning(tab):
             if can_show_secrets:
@@ -1992,6 +2144,8 @@ class MainWindow:
         def save_all():
             prefixes = [p.strip() for p in re.split(r"[;,]", prefixes_var.get()) if p.strip()]
             self.settings.set_setting("pc_prefixes", prefixes)
+            self.settings.set_setting("minimize_to_tray", minimize_to_tray.get())
+            self.settings.set_setting("minimize_to_widget", minimize_to_widget.get())
             self.settings.set_setting("ad_username", e_user.get().strip())
             self.settings.set_setting("ad_password", e_pass.get().strip())
             self.settings.set_setting("reset_password", e_rst.get().strip())
@@ -2141,8 +2295,15 @@ class MainWindow:
 
     # --------- Закрытие ----------
     def on_closing(self):
+        if not self._force_exit and self._should_minimize_custom():
+            return self.minimize_app()
+        self._perform_exit()
+
+    def _perform_exit(self):
         self.master.update_idletasks()
         self.settings.set_setting("window_geometry", self.master.geometry())
+        self._hide_tray_icon()
+        self._destroy_mini_widget()
         try: self.executor.shutdown(wait=False)
         except: pass
         try:
@@ -2150,6 +2311,146 @@ class MainWindow:
         except:
             pass
         self.master.destroy()
+
+    def exit_app(self):
+        self._force_exit = True
+        self._perform_exit()
+
+    def _should_minimize_custom(self) -> bool:
+        return bool(self.settings.get_setting("minimize_to_tray", False) or self.settings.get_setting("minimize_to_widget", False))
+
+    def _on_unmap(self, _event):
+        if self._ignore_unmap:
+            return
+        if self.master.state() == "iconic" and self._should_minimize_custom():
+            self.master.after(50, self.minimize_app)
+
+    def _on_map(self, _event):
+        if not self._is_minimized_custom:
+            self._destroy_mini_widget()
+            self._hide_tray_icon()
+
+    def minimize_app(self):
+        if self._is_minimized_custom or not self._should_minimize_custom():
+            return
+        self._is_minimized_custom = True
+        self._ignore_unmap = True
+        try:
+            self.master.withdraw()
+        finally:
+            self.master.after(150, lambda: setattr(self, "_ignore_unmap", False))
+        if self.settings.get_setting("minimize_to_widget", False):
+            self._show_mini_widget()
+        if self.settings.get_setting("minimize_to_tray", False):
+            self._show_tray_icon()
+        if not ((self.mini_widget and self.mini_widget.winfo_exists()) or self.tray_icon):
+            self._is_minimized_custom = False
+            self.master.deiconify()
+            self.master.state("normal")
+            log_message("Не удалось свернуть: ни виджет, ни трей недоступны")
+
+    def restore_main_window(self):
+        self._is_minimized_custom = False
+        self._ignore_unmap = True
+        try:
+            self.master.deiconify()
+            self.master.state("normal")
+            self.master.lift()
+            self.master.focus_force()
+        finally:
+            self.master.after(150, lambda: setattr(self, "_ignore_unmap", False))
+        self._destroy_mini_widget()
+        self._hide_tray_icon()
+
+    def _remember_mini_geometry(self):
+        if self.mini_widget and self.mini_widget.winfo_exists():
+            try:
+                self.settings.set_setting("mini_widget_geometry", self.mini_widget.geometry())
+            except Exception:
+                pass
+
+    def _destroy_mini_widget(self):
+        if getattr(self, "mini_widget", None) and self.mini_widget.winfo_exists():
+            try:
+                self._remember_mini_geometry()
+                self.mini_widget.destroy()
+            except Exception:
+                pass
+        self.mini_widget = None
+
+    def _show_mini_widget(self):
+        if getattr(self, "mini_widget", None) and self.mini_widget.winfo_exists():
+            return
+        widget = tk.Toplevel(self.master)
+        self.mini_widget = widget
+        widget.overrideredirect(True)
+        widget.attributes("-topmost", True)
+        try:
+            widget.attributes("-alpha", 0.9)
+        except Exception:
+            pass
+        widget.configure(bg="#1f2937")
+        geom = self.settings.get_setting("mini_widget_geometry", "")
+        if geom:
+            try:
+                widget.geometry(geom)
+            except Exception:
+                pass
+        else:
+            sw, sh = widget.winfo_screenwidth(), widget.winfo_screenheight()
+            w, h = 240, 82
+            widget.geometry(f"{w}x{h}+{sw - w - 30}+{sh - h - 60}")
+
+        header = tk.Frame(widget, bg="#111827")
+        header.pack(fill="x")
+        title = tk.Label(header, text=f"{APP_NAME}", fg="#e5e7eb", bg="#111827", font=("Segoe UI", 10, "bold"))
+        title.pack(side="left", padx=10, pady=6)
+        btn_close = tk.Button(header, text="×", command=self.restore_main_window, bg="#111827", fg="#f3f4f6", relief="flat")
+        btn_close.pack(side="right", padx=6, pady=6)
+        body = tk.Frame(widget, bg="#1f2937")
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Открыть TS HELP AD", fg="#f9fafb", bg="#1f2937", font=("Segoe UI", 11)).pack(pady=(10,2))
+        tk.Button(body, text="Развернуть", command=self.restore_main_window, bg="#2563eb", fg="#f8fafc", relief="flat").pack(pady=(0,10), ipadx=8, ipady=2)
+
+        def start_move(event):
+            widget._drag_start_x = event.x
+            widget._drag_start_y = event.y
+
+        def do_move(event):
+            dx = event.x - getattr(widget, "_drag_start_x", 0)
+            dy = event.y - getattr(widget, "_drag_start_y", 0)
+            try:
+                x = widget.winfo_x() + dx
+                y = widget.winfo_y() + dy
+                widget.geometry(f"+{x}+{y}")
+            except Exception:
+                pass
+
+        for el in (widget, header, title, body):
+            el.bind("<ButtonPress-1>", start_move)
+            el.bind("<B1-Motion>", do_move)
+            el.bind("<Double-Button-1>", lambda _e: self.restore_main_window())
+        widget.protocol("WM_DELETE_WINDOW", self.restore_main_window)
+
+    def _show_tray_icon(self):
+        if self.tray_icon:
+            return
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts-logo.ico")
+        tooltip = f"{APP_NAME} {VERSION}"
+        tray = SimpleSystemTray(icon_path, tooltip, self.restore_main_window, self.exit_app)
+        if tray.show():
+            self.tray_icon = tray
+        else:
+            log_message("Трей недоступен: pywin32 не установлен или среда не Windows")
+
+    def _hide_tray_icon(self):
+        if not self.tray_icon:
+            return
+        try:
+            self.tray_icon.destroy()
+        except Exception as e:
+            log_message(f"Ошибка закрытия трея: {e}")
+        self.tray_icon = None
 
     # ----------------- Call Watcher -----------------
     def start_call_watcher(self):
