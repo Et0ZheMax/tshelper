@@ -268,6 +268,7 @@ def _pbx_dump(name: str, data):
 APP_NAME = "TS HELP AD"
 CONFIG_FILE = "config.json"
 USERS_FILE  = "users.json"
+DOCK_ITEMS_FILE = "dock_items.json"
 
 # AD defaults
 AD_SERVER   = "DC02.pak-cspmz.ru"
@@ -656,6 +657,8 @@ class UserManager:
 class SettingsManager:
     def __init__(self, path):
         self.path = path
+        base_dir = os.path.dirname(os.path.abspath(self.path))
+        self.dock_items_path = os.path.join(base_dir, DOCK_ITEMS_FILE)
         self.config = load_json(path, default={
             "window_geometry":"1100x720+200+100",
             "edit_window_geometry":"", "settings_window_geometry":"", "ad_sync_select_geometry":"", "ip_window_geometry":"",
@@ -686,7 +689,6 @@ class SettingsManager:
             # Док-панель
             "dock_enabled": False,
             "dock_side": "left",
-            "dock_items": [],
             "dock_settings_geometry": "",
             # Минимизация
             "minimize_to_tray": False,
@@ -695,6 +697,7 @@ class SettingsManager:
         })
         self.secret_storage = SecretStorage(APP_NAME)
         self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password", "glpi_app_token", "glpi_user_token"}
+        self._migrate_dock_items()
 
     def _migrate_plain_secret(self, key):
         current = self.config.get(key, "")
@@ -743,6 +746,34 @@ class SettingsManager:
     def can_show_secrets(self) -> bool:
         return self.secret_storage.available
     def save_config(self): save_json(self.path, self.config)
+
+    # --- Отдельное хранение кнопок док-панели ---
+    def _migrate_dock_items(self):
+        legacy_items = self.config.get("dock_items")
+        if isinstance(legacy_items, list):
+            if self.set_dock_items(legacy_items, save_config=False):
+                self.config.pop("dock_items", None)
+                self.save_config()
+
+    def get_dock_items(self, default=None):
+        default = [] if default is None else default
+        data = load_json(self.dock_items_path, default=None)
+        if isinstance(data, list):
+            return data
+        return default
+
+    def set_dock_items(self, items, save_config=True):
+        normalized = items if isinstance(items, list) else []
+        try:
+            save_json(self.dock_items_path, normalized)
+            success = True
+        except Exception as e:
+            log_message(f"Не удалось сохранить файл док-панели: {e}")
+            success = False
+        if success and save_config:
+            self.config.pop("dock_items", None)
+            self.save_config()
+        return success
 
 if TRAY_AVAILABLE:
     class SimpleSystemTray:
@@ -1070,7 +1101,7 @@ class MainWindow:
         self.status_icons = self._build_status_icons()
 
         # док-панель
-        self.dock_items = self._normalize_dock_items(self.settings.get_setting("dock_items", []))
+        self.dock_items = self._normalize_dock_items(self.settings.get_dock_items([]))
         self.dock_enabled_var = tk.BooleanVar(master=self.master, value=bool(self.settings.get_setting("dock_enabled", False)))
         self.dock_side_var = tk.StringVar(master=self.master, value=self._normalize_dock_side(self.settings.get_setting("dock_side", "left")))
 
@@ -1452,7 +1483,7 @@ class MainWindow:
 
     def _save_dock_items(self):
         self.dock_items = self._normalize_dock_items(self.dock_items)
-        self.settings.set_setting("dock_items", self.dock_items)
+        self.settings.set_dock_items(self.dock_items)
         self._render_dock_buttons()
 
     def _open_dock_resource(self, resource: str):
