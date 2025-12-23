@@ -1,2 +1,11 @@
-/config.json
+# Логи
+*.log
+
+# Отладочные и пользовательские данные
+_pbx_debug/
+users.json
+
+# Конфигурации и секреты
 config.json
+config.local*.json
+.ts_help_ad_secrets.json
