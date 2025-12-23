@@ -1,4 +1,0 @@
-Endpoint: 4443/4443 Not in use 0 of inf
-InAuth: 4443-auth/4443
-Aor: 4443 1
-Contact: 4443/sip:4443@10.110.205.8:5060 6b58885c8f Avail 3.935
