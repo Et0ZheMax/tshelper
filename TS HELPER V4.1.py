@@ -747,11 +747,12 @@ class SettingsManager:
 if TRAY_AVAILABLE:
     class SimpleSystemTray:
         """Простейшая иконка в трее на базе pywin32 с пунктами «Развернуть» и «Выход»."""
-        def __init__(self, icon_path: str, tooltip: str, on_restore, on_exit):
+        def __init__(self, icon_path: str, tooltip: str, on_restore, on_exit, dispatcher=None):
             self.icon_path = icon_path
             self.tooltip = tooltip
             self.on_restore = on_restore
             self.on_exit = on_exit
+            self.dispatcher = dispatcher
             self.hwnd = None
             self.hicon = None
             self._notify_msg = win32con.WM_USER + 20
@@ -762,14 +763,20 @@ if TRAY_AVAILABLE:
         def _safe_restore(self, *_):
             try:
                 if callable(self.on_restore):
-                    self.on_restore()
+                    if callable(self.dispatcher):
+                        self.dispatcher(self.on_restore)
+                    else:
+                        self.on_restore()
             except Exception as e:
                 log_message(f"Tray restore error: {e}")
 
         def _safe_exit(self, *_):
             try:
                 if callable(self.on_exit):
-                    self.on_exit()
+                    if callable(self.dispatcher):
+                        self.dispatcher(self.on_exit)
+                    else:
+                        self.on_exit()
             except Exception as e:
                 log_message(f"Tray exit error: {e}")
 
@@ -2437,7 +2444,8 @@ class MainWindow:
             return
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts-logo.ico")
         tooltip = f"{APP_NAME} {VERSION}"
-        tray = SimpleSystemTray(icon_path, tooltip, self.restore_main_window, self.exit_app)
+        dispatcher = (lambda cb: self.master.after(0, cb))
+        tray = SimpleSystemTray(icon_path, tooltip, self.restore_main_window, self.exit_app, dispatcher=dispatcher)
         if tray.show():
             self.tray_icon = tray
         else:
