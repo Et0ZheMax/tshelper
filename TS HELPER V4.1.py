@@ -1725,6 +1725,11 @@ class MainWindow:
         orphan_calls = []
         for call in callers:
             user = call.get("user")
+            if not user and call.get("name"):
+                matched_user = self._match_user_by_caller(call.get("name", ""), call.get("num", ""))
+                if matched_user:
+                    call["user"] = matched_user
+                    user = matched_user
             pc_name = user.get("pc_name") if user else None
             if pc_name:
                 caller_by_pc[pc_name] = call
