@@ -1282,6 +1282,9 @@ class MainWindow:
         ttk.Label(top, text="Поиск:").pack(side="left")
         self.search_entry = ttk.Entry(top); self.search_entry.pack(side="left", fill="x", expand=True)
         self.search_entry.bind("<KeyRelease>", self.update_search)
+        ttk.Button(top, text="Очистить", command=self.clear_search).pack(side="left", padx=(6, 0))
+        self.master.bind_all("<Control-l>", self.clear_search)
+        self.master.bind_all("<Control-L>", self.clear_search)
 
         # center area: док-панель + основное окно
         self.content = ttk.Frame(self.master, padding=(10,0))
@@ -1711,7 +1714,7 @@ class MainWindow:
         else:
             messagebox.showinfo("Пользователь", "Пользователь не найден в списке")
 
-    def populate_buttons(self, items=None):
+    def populate_buttons(self, items=None, show_empty_state=False):
         for w in self.inner.winfo_children(): w.destroy()
         all_users = self.users.get_users() if items is None else items
 
@@ -1742,6 +1745,16 @@ class MainWindow:
 
         # 2) Пользователи (отсортированы по ФИО)
         items_sorted = sorted(all_users, key=lambda u: locale.strxfrm(u["name"]))
+        if show_empty_state and not items_sorted:
+            ttk.Label(
+                self.inner,
+                text="Ничего не найдено. Попробуйте изменить запрос.",
+                font=("Segoe UI", 12, "bold")
+            ).grid(row=0, column=0, padx=16, pady=16, sticky="n")
+            self.count_lbl.config(text="Найдено аккаунтов: 0")
+            self.inner.grid_columnconfigure(0, weight=1)
+            self._update_scrollregion()
+            return
 
         # приоритет звонящих пользователей — сначала по порядку звонков, потом остальные
         prioritized = []
@@ -1797,7 +1810,7 @@ class MainWindow:
         self.search_job = self.master.after(250, self._do_search)
 
     def _do_search(self):
-        text = self.search_entry.get().lower()
+        text = self.search_entry.get().lower().strip()
         allu = self.users.get_users()
         filtered = [
             u for u in allu
@@ -1805,7 +1818,8 @@ class MainWindow:
             or text in u["pc_name"].lower()
             or text in str(u.get("ext", "")).lower()
         ]
-        self.populate_buttons(filtered)
+        show_empty_state = bool(text) and not filtered
+        self.populate_buttons(filtered, show_empty_state=show_empty_state)
         if len(text) >= 3:
             self.ping_generation += 1
             gen = self.ping_generation
@@ -1814,6 +1828,12 @@ class MainWindow:
                 if btn:
                     btn.set_status("checking")
                 self.executor.submit(self._ping_task, u["pc_name"], gen)
+
+    def clear_search(self, _=None):
+        self.search_entry.delete(0, "end")
+        self.search_entry.focus_set()
+        self._do_search()
+        return "break"
 
     def _ping_task(self, pc, gen):
         ok = self.check_availability(pc)
