@@ -1321,6 +1321,7 @@ class MainWindow:
         ttk.Button(bottom, text="Добавить", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(bottom, text="AD Sync", command=self.ad_sync).pack(side="left", padx=5)
         ttk.Button(bottom, text="GLPI Sync", command=self.glpi_prefix_sync).pack(side="left", padx=5)
+        ttk.Label(bottom, text="Статусы: 🟢 Онлайн | ⚫ Оффлайн | 🟡 Проверка").pack(side="left", padx=(10, 0))
         self.count_lbl = ttk.Label(bottom, text="Найдено аккаунтов: 0"); self.count_lbl.pack(side="right")
 
     def open_log_viewer(self):
@@ -2928,19 +2929,23 @@ class UserButton(ttk.Frame):
         # цветные кружки-эмоджи вместо картинок
         return {"online": "🟢", "offline": "⚫", "checking": "🟡"}.get(self.status_key, "")
 
+    def _status_label(self) -> str:
+        return {"online": "Онлайн", "offline": "Оффлайн", "checking": "Проверка"}.get(self.status_key, "")
+
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
 
         # статусный кружок-эмоджи
         marker = self._status_marker()
-        marker_prefix = f"{marker} " if marker else ""
+        label = self._status_label()
+        marker_prefix = f"{marker} {label} " if marker else ""
 
         if ext:
-            # первая строка: 🟢 📞 4588
-            header = f"{marker_prefix}📞 {ext}"
+            # первая строка: 🟢 Онлайн • 📞 4588
+            header = f"{marker_prefix}• 📞 {ext}" if marker_prefix else f"📞 {ext}"
             base = f"{header}\n{self.user['name']}\n({pc_label})"
         else:
-            # без телефона — 🟢 ФИО
+            # без телефона — 🟢 Онлайн ФИО
             header = f"{marker_prefix}{self.user['name']}"
             base = f"{header}\n({pc_label})"
 
