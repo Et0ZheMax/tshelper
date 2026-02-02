@@ -694,6 +694,7 @@ class SettingsManager:
             "minimize_to_tray": False,
             "minimize_to_widget": False,
             "mini_widget_geometry": "",
+            "idle_timeout_minutes": 0,
         })
         self.secret_storage = SecretStorage(APP_NAME)
         self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password", "glpi_app_token", "glpi_user_token"}
@@ -1092,6 +1093,9 @@ class MainWindow:
         self._ignore_unmap = False
         self._is_minimized_custom = False
         self._force_exit = False
+        self._idle_job = None
+        self._idle_last_activity = time.time()
+        self.idle_timeout_minutes = 0
 
         # стили (переопределяются при изменении настроек)
         self.style = ttk.Style(self.master)
@@ -1118,6 +1122,7 @@ class MainWindow:
 
         self.build_ui()
         self.populate_buttons()
+        self._setup_idle_tracking()
 
         # Перестраивать сетку при изменении ширины (чтоб не «в столбик»)
         self._last_cols = None
@@ -1247,6 +1252,21 @@ class MainWindow:
         for u in self.users.get_users():
             if norm_name(u.get("name", "")) == key:
                 return u
+
+        def name_tokens(value: str) -> list[str]:
+            return [token for token in re.split(r"\s+", (value or "").strip().lower()) if token]
+
+        caller_tokens = name_tokens(name)
+        if not caller_tokens:
+            return None
+        caller_set = set(caller_tokens)
+        for u in self.users.get_users():
+            user_tokens = name_tokens(u.get("name", ""))
+            if not user_tokens:
+                continue
+            user_set = set(user_tokens)
+            if caller_set.issubset(user_set) or user_set.issubset(caller_set):
+                return u
         return None
 
     # --------- UI ----------
@@ -1321,8 +1341,53 @@ class MainWindow:
         ttk.Button(bottom, text="Добавить", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(bottom, text="AD Sync", command=self.ad_sync).pack(side="left", padx=5)
         ttk.Button(bottom, text="GLPI Sync", command=self.glpi_prefix_sync).pack(side="left", padx=5)
-        ttk.Label(bottom, text="Статусы: 🟢 Онлайн | ⚫ Оффлайн | 🟡 Проверка").pack(side="left", padx=(10, 0))
         self.count_lbl = ttk.Label(bottom, text="Найдено аккаунтов: 0"); self.count_lbl.pack(side="right")
+
+    def _setup_idle_tracking(self):
+        self._idle_last_activity = time.time()
+        for seq in ("<Key>", "<Button>", "<Motion>", "<MouseWheel>"):
+            self.master.bind_all(seq, self._mark_activity, add="+")
+        self._apply_idle_timeout_setting(self.settings.get_setting("idle_timeout_minutes", 0))
+
+    def _mark_activity(self, _event=None):
+        self._idle_last_activity = time.time()
+        self._schedule_idle_check()
+
+    def _schedule_idle_check(self):
+        if self._idle_job:
+            self.master.after_cancel(self._idle_job)
+            self._idle_job = None
+        if self.idle_timeout_minutes <= 0 or self._is_minimized_custom:
+            return
+        delay = int(self.idle_timeout_minutes * 60 * 1000)
+        self._idle_job = self.master.after(delay, self._on_idle_timeout)
+
+    def _cancel_idle_check(self):
+        if self._idle_job:
+            self.master.after_cancel(self._idle_job)
+            self._idle_job = None
+
+    def _apply_idle_timeout_setting(self, minutes):
+        try:
+            minutes_value = float(minutes)
+        except Exception:
+            minutes_value = 0
+        self.idle_timeout_minutes = max(0, minutes_value)
+        self._schedule_idle_check()
+
+    def _on_idle_timeout(self):
+        self._idle_job = None
+        if self._is_minimized_custom:
+            return
+        if self.idle_timeout_minutes <= 0:
+            return
+        if not self.settings.get_setting("minimize_to_widget", False):
+            return
+        elapsed = time.time() - self._idle_last_activity
+        if elapsed < self.idle_timeout_minutes * 60:
+            self._schedule_idle_check()
+            return
+        self.minimize_app()
 
     def open_log_viewer(self):
         if getattr(self, "log_window", None) and self.log_window.winfo_exists():
@@ -1666,7 +1731,7 @@ class MainWindow:
         cols = self._compute_cols()
         if cols != self._last_cols:
             self._last_cols = cols
-            self.populate_buttons()  # перестраиваем сетку только при реальном изменении числа колонок
+            self.refresh_current_view()  # перестраиваем сетку только при реальном изменении числа колонок
 
 
 
@@ -1715,7 +1780,7 @@ class MainWindow:
         else:
             messagebox.showinfo("Пользователь", "Пользователь не найден в списке")
 
-    def populate_buttons(self, items=None, show_empty_state=False):
+    def populate_buttons(self, items=None, show_empty_state=False, show_status=False):
         for w in self.inner.winfo_children(): w.destroy()
         all_users = self.users.get_users() if items is None else items
 
@@ -1777,7 +1842,7 @@ class MainWindow:
 
         for u in ordered_users:
             caller = caller_by_pc.get(u.get("pc_name"))
-            btn = UserButton(self.inner, u, app=self, style_name="User.TButton", caller=caller)
+            btn = UserButton(self.inner, u, app=self, style_name="User.TButton", caller=caller, show_status=show_status)
             btn.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
             self.buttons[u["pc_name"]] = btn
             c += 1
@@ -1804,6 +1869,12 @@ class MainWindow:
 
         self._update_scrollregion()
 
+    def refresh_current_view(self):
+        if not getattr(self, "search_entry", None):
+            self.populate_buttons()
+            return
+        self._do_search()
+
 
     # --------- Поиск ----------
     def update_search(self, _=None):
@@ -1820,8 +1891,9 @@ class MainWindow:
             or text in str(u.get("ext", "")).lower()
         ]
         show_empty_state = bool(text) and not filtered
-        self.populate_buttons(filtered, show_empty_state=show_empty_state)
-        if len(text) >= 3:
+        show_status = len(text) >= 3
+        self.populate_buttons(filtered, show_empty_state=show_empty_state, show_status=show_status)
+        if show_status:
             self.ping_generation += 1
             gen = self.ping_generation
             for u in filtered:
@@ -1870,7 +1942,7 @@ class MainWindow:
         def save():
             n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.add_user({"name":n,"pc_name":p,"ext":ext}); self.populate_buttons(); self._close_save_geo(win,"edit_window_geometry")
+            self.users.add_user({"name":n,"pc_name":p,"ext":ext}); self.refresh_current_view(); self._close_save_geo(win,"edit_window_geometry")
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def open_edit_window(self, user):
@@ -1884,12 +1956,12 @@ class MainWindow:
         def save():
             n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.update_user(user["pc_name"], {"name":n,"pc_name":p,"ext":ext}); self.populate_buttons(); self._close_save_geo(win,"edit_window_geometry")
+            self.users.update_user(user["pc_name"], {"name":n,"pc_name":p,"ext":ext}); self.refresh_current_view(); self._close_save_geo(win,"edit_window_geometry")
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def delete_user_from_button(self, user):
         if messagebox.askyesno("Удалить", f"Удалить {user['name']}?"):
-            self.users.delete_user(user["pc_name"]); self.populate_buttons()
+            self.users.delete_user(user["pc_name"]); self.refresh_current_view()
 
     # --------- AD sync ----------
     def _extract_login(self, pc_name: str) -> str:
@@ -2065,6 +2137,9 @@ class MainWindow:
         minimize_to_widget = tk.BooleanVar(value=self.settings.get_setting("minimize_to_widget", False))
         ttk.Checkbutton(tab_common, text="Сворачивать в трей при закрытии/сворачивании", variable=minimize_to_tray).pack(anchor="w", pady=4)
         ttk.Checkbutton(tab_common, text="Сворачивать в мини-виджет поверх окон", variable=minimize_to_widget).pack(anchor="w", pady=2)
+        ttk.Label(tab_common, text="Тайм-аут бездействия (минуты, 0 — отключить):").pack(pady=(8, 4), anchor="w")
+        idle_timeout_var = tk.StringVar(value=str(self.settings.get_setting("idle_timeout_minutes", 0)))
+        ttk.Entry(tab_common, textvariable=idle_timeout_var).pack(fill="x")
 
         def add_storage_warning(tab):
             if can_show_secrets:
@@ -2210,6 +2285,12 @@ class MainWindow:
             self.settings.set_setting("pc_prefixes", prefixes)
             self.settings.set_setting("minimize_to_tray", minimize_to_tray.get())
             self.settings.set_setting("minimize_to_widget", minimize_to_widget.get())
+            try:
+                idle_minutes = float(idle_timeout_var.get().replace(",", ".").strip() or 0)
+            except Exception:
+                idle_minutes = 0
+            self.settings.set_setting("idle_timeout_minutes", max(0, idle_minutes))
+            self._apply_idle_timeout_setting(max(0, idle_minutes))
             self.settings.set_setting("ad_username", e_user.get().strip())
             self.settings.set_setting("ad_password", e_pass.get().strip())
             self.settings.set_setting("reset_password", e_rst.get().strip())
@@ -2253,7 +2334,7 @@ class MainWindow:
             })
             self._apply_button_styles()
             self.status_icons = self._build_status_icons()
-            self.populate_buttons()
+            self.refresh_current_view()
 
             # GLPI
             self.settings.set_setting("glpi_api_url", e_glpi_url.get().strip())
@@ -2393,11 +2474,13 @@ class MainWindow:
         if not self._is_minimized_custom:
             self._destroy_mini_widget()
             self._hide_tray_icon()
+        self._mark_activity()
 
     def minimize_app(self):
         if self._is_minimized_custom or not self._should_minimize_custom():
             return
         self._is_minimized_custom = True
+        self._cancel_idle_check()
         self._ignore_unmap = True
         try:
             self.master.withdraw()
@@ -2425,6 +2508,7 @@ class MainWindow:
             self.master.after(150, lambda: setattr(self, "_ignore_unmap", False))
         self._destroy_mini_widget()
         self._hide_tray_icon()
+        self._mark_activity()
 
     def _remember_mini_geometry(self):
         if self.mini_widget and self.mini_widget.winfo_exists():
@@ -2874,13 +2958,15 @@ class MainWindow:
 
 # --- Кнопка пользователя ---
 class UserButton(ttk.Frame):
-    def __init__(self, master, user, app: MainWindow, style_name=None, caller=None):
+    def __init__(self, master, user, app: MainWindow, style_name=None, caller=None, show_status=False):
         super().__init__(master)
         self.user = user
         self.app  = app
         self.avail = None
         self.status_key = "offline"
         self.caller_info = caller
+        self.show_status = show_status
+        self.status_image = None
 
         pc_label = self.app.get_display_pc_name(user['pc_name'])
         # создаём tk.Button, чтобы гарантированно красить
@@ -2904,7 +2990,7 @@ class UserButton(ttk.Frame):
         )
 
     def set_status(self, status_key: str):
-        """Запоминаем статус и перерисовываем текст/стиль без иконок."""
+        """Запоминаем статус и перерисовываем текст/стиль."""
         self.status_key = status_key
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         self.btn.config(text=self._compose_text(pc_label))
@@ -2925,28 +3011,21 @@ class UserButton(ttk.Frame):
         self._apply_caller_style()
 
 
-    def _status_marker(self) -> str:
-        # цветные кружки-эмоджи вместо картинок
-        return {"online": "🟢", "offline": "⚫", "checking": "🟡"}.get(self.status_key, "")
-
     def _status_label(self) -> str:
         return {"online": "Онлайн", "offline": "Оффлайн", "checking": "Проверка"}.get(self.status_key, "")
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
-
-        # статусный кружок-эмоджи
-        marker = self._status_marker()
-        label = self._status_label()
-        marker_prefix = f"{marker} {label} " if marker else ""
+        label = self._status_label() if self.show_status else ""
+        label_prefix = f"{label} " if label else ""
 
         if ext:
-            # первая строка: 🟢 Онлайн • 📞 4588
-            header = f"{marker_prefix}• 📞 {ext}" if marker_prefix else f"📞 {ext}"
+            # первая строка: Онлайн • 📞 4588
+            header = f"{label_prefix}• 📞 {ext}" if label_prefix else f"📞 {ext}"
             base = f"{header}\n{self.user['name']}\n({pc_label})"
         else:
-            # без телефона — 🟢 Онлайн ФИО
-            header = f"{marker_prefix}{self.user['name']}"
+            # без телефона — Онлайн ФИО
+            header = f"{label_prefix}{self.user['name']}"
             base = f"{header}\n({pc_label})"
 
         # если нет активного звонка — возвращаем обычный текст карточки
@@ -2961,6 +3040,10 @@ class UserButton(ttk.Frame):
         return f"📞 {num} → {ext_target}{who}\n{base}"
 
 
+    def _status_image_for_key(self):
+        if not self.show_status:
+            return None
+        return self.app.status_icons.get(self.status_key)
 
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
@@ -2985,8 +3068,10 @@ class UserButton(ttk.Frame):
             )
             self.btn.gradient = gradient
             self.btn.image = gradient
+            self.status_image = None
         else:
-            # обычный режим — БЕЗ image, только текст с эмоджи-кружком
+            # обычный режим — текст и, при поиске, цветной статус-иконкой
+            status_image = self._status_image_for_key()
             self.btn.config(
                 bg=self.app.user_bg,
                 fg=self.app.user_fg,
@@ -2996,7 +3081,7 @@ class UserButton(ttk.Frame):
                 relief="groove",
                 bd=2,
                 font=("Segoe UI", 10),
-                image="",
+                image=status_image or "",
                 compound="left",
                 anchor="nw",
                 padx=8,
@@ -3006,7 +3091,8 @@ class UserButton(ttk.Frame):
                 text=self._compose_text(pc_label),
             )
             self.btn.gradient = None
-            self.btn.image = None
+            self.btn.image = status_image
+            self.status_image = status_image
 
     def _make_gradient_image(self, width: int, height: int, start_color: str, end_color: str):
         img = tk.PhotoImage(width=width, height=height)
@@ -3069,7 +3155,7 @@ class UserButton(ttk.Frame):
 
         self.app.users.update_user(old_pc, new_user)
         self.user.update(new_user)
-        self.app.populate_buttons()
+        self.app.refresh_current_view()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
 
 
