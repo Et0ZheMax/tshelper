@@ -1780,9 +1780,28 @@ class MainWindow:
         else:
             messagebox.showinfo("Пользователь", "Пользователь не найден в списке")
 
+    def _get_filtered_users(self, text=None):
+        if text is None:
+            text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+        all_users = self.users.get_users()
+        if not text:
+            return all_users
+        return [
+            u for u in all_users
+            if text in u["name"].lower()
+            or text in u["pc_name"].lower()
+            or text in str(u.get("ext", "")).lower()
+        ]
+
     def populate_buttons(self, items=None, show_empty_state=False, show_status=False):
         for w in self.inner.winfo_children(): w.destroy()
-        all_users = self.users.get_users() if items is None else items
+        if items is None:
+            search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+            all_users = self._get_filtered_users(search_text)
+            show_empty_state = bool(search_text) and not all_users
+            show_status = len(search_text) >= 3
+        else:
+            all_users = items
 
         # 1) Активные звонки вверху (сортируем по времени убыв.)
         with self.calls_lock:
@@ -1883,13 +1902,7 @@ class MainWindow:
 
     def _do_search(self):
         text = self.search_entry.get().lower().strip()
-        allu = self.users.get_users()
-        filtered = [
-            u for u in allu
-            if text in u["name"].lower()
-            or text in u["pc_name"].lower()
-            or text in str(u.get("ext", "")).lower()
-        ]
+        filtered = self._get_filtered_users(text)
         show_empty_state = bool(text) and not filtered
         show_status = len(text) >= 3
         self.populate_buttons(filtered, show_empty_state=show_empty_state, show_status=show_status)

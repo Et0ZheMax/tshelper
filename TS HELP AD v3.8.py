@@ -523,6 +523,16 @@ class MainWindow:
                 self.master.after_cancel(self.configure_timer)
             self.configure_timer = self.master.after(300, self.populate_buttons)
 
+    def get_filtered_users(self, search_text=None):
+        if search_text is None:
+            search_text = self.search_entry.get().lower().strip()
+        if not search_text:
+            return self.users
+        return [
+            user for user in self.users
+            if search_text in user["name"].lower() or search_text in user["pc_name"].lower()
+        ]
+
     def populate_buttons(self, users=None):
         if self.loading:
             for widget in self.inner_frame.winfo_children():
@@ -530,7 +540,7 @@ class MainWindow:
             ttk.Label(self.inner_frame, text="Загрузка пользователей...").pack(padx=10, pady=10)
             return
         if users is None:
-            users = self.users
+            users = self.get_filtered_users()
         users = sorted(users, key=lambda u: locale.strxfrm(u["name"]))
         for widget in self.inner_frame.winfo_children():
             widget.destroy()
@@ -582,8 +592,8 @@ class MainWindow:
             self.buttons[pc_name].update_style(available)
 
     def update_search(self, event=None):
-        search_text = self.search_entry.get().lower()
-        filtered_users = [user for user in self.users if search_text in user["name"].lower() or search_text in user["pc_name"].lower()]
+        search_text = self.search_entry.get().lower().strip()
+        filtered_users = self.get_filtered_users(search_text)
         self.populate_buttons(filtered_users)
         self.canvas.yview_moveto(0)
         if len(search_text) >= 3:
