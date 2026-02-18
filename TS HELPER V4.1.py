@@ -3380,20 +3380,45 @@ class UserButton(ttk.Frame):
         if not target_domain:
             return messagebox.showerror("Сброс пароля", f"Неизвестный домен: {which}")
 
+        sam_escaped = sam.replace("'", "''")
+        new_pw_escaped = str(new_pw).replace("'", "''")
+
         script = f"""
-Import-Module ActiveDirectory;
-$user = Get-ADUser -Filter "SamAccountName -eq '{sam}'" -Server "{target_domain}";
-if (-not $user) {{ Write-Error 'User not found'; exit 1 }}
-Set-ADAccountPassword -Identity $user.SamAccountName -Server "{target_domain}" -Reset -NewPassword (ConvertTo-SecureString -AsPlainText "{new_pw}" -Force) -PassThru | Out-Null;
-Unlock-ADAccount -Identity $user.SamAccountName -Server "{target_domain}" -ErrorAction SilentlyContinue;
-Set-ADUser -Identity $user.SamAccountName -Server "{target_domain}" -ChangePasswordAtLogon $true -ErrorAction Stop;
-Write-Output "OK";
-"""
+$ErrorActionPreference = 'Stop'
+Import-Module ActiveDirectory
+$user = Get-ADUser -Filter "SamAccountName -eq '{sam_escaped}'" -Server '{target_domain}'
+if (-not $user) {{ throw "Пользователь не найден: {sam_escaped}" }}
+Set-ADAccountPassword -Identity $user.SamAccountName -Server '{target_domain}' -Reset -NewPassword (ConvertTo-SecureString -AsPlainText '{new_pw_escaped}' -Force)
+Unlock-ADAccount -Identity $user.SamAccountName -Server '{target_domain}' -ErrorAction SilentlyContinue
+Set-ADUser -Identity $user.SamAccountName -Server '{target_domain}' -ChangePasswordAtLogon $true
+Write-Output "OK"
+""".strip()
+
+        cmd = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-Command", script,
+        ]
+
         try:
-            run_as_admin("powershell.exe", f"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
-            messagebox.showinfo("Сброс пароля", f"Запущено для {self.user['name']} ({which.upper()}).")
-            self._log_action(f"Сброшен пароль ({which})")
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            out = (result.stdout or "").strip()
+            err = (result.stderr or "").strip()
+
+            log_message(
+                f"Сброс пароля {which}: rc={result.returncode}; user={sam}; domain={target_domain}; "
+                f"stdout={out or '-'}; stderr={err or '-'}"
+            )
+
+            if result.returncode == 0:
+                messagebox.showinfo("Сброс пароля", f"Успешно: {self.user['name']} ({which.upper()}).")
+                self._log_action(f"Сброшен пароль ({which})")
+            else:
+                details = err or out or "Неизвестная ошибка PowerShell"
+                messagebox.showerror("Сброс пароля", f"Ошибка ({which}):\n{details}")
         except Exception as e:
+            log_message(f"Сброс пароля {which}: исключение {e}")
             messagebox.showerror("Сброс пароля", str(e))
 
     def open_ssh_connection(self):
