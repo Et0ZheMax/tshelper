@@ -1458,7 +1458,8 @@ class MainWindow:
             name = str(item.get("name") or item.get("title") or "").strip()
             resource = str(item.get("resource") or item.get("target") or "").strip()
             action = str(item.get("action") or "open").strip().lower()
-            action = "copy" if action == "copy" else "open"
+            if action not in {"open", "copy", "both"}:
+                action = "open"
             copy_text = str(item.get("copy_text") or item.get("copy") or "").strip()
             if not name and not resource and not copy_text:
                 continue
@@ -1529,8 +1530,11 @@ class MainWindow:
         r = c = 0
         for item in self.dock_items:
             name = item.get("name") or "Кнопка"
-            action = "copy" if str(item.get("action", "open")).lower() == "copy" else "open"
-            title = f"📋 {name}" if action == "copy" else name
+            action = str(item.get("action", "open")).lower()
+            if action not in {"open", "copy", "both"}:
+                action = "open"
+            marker = "📋 " if action == "copy" else "↗📋 " if action == "both" else ""
+            title = f"{marker}{name}"
             btn = ttk.Button(self.dock_buttons_frame, text=title, command=lambda v=dict(item): self._run_dock_item(v))
             btn.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
             c += 1
@@ -1564,7 +1568,7 @@ class MainWindow:
         self.settings.set_dock_items(self.dock_items)
         self._render_dock_buttons()
 
-    def _copy_dock_text(self, copy_text: str, button_name: str):
+    def _copy_dock_text(self, copy_text: str, button_name: str, show_success: bool = True):
         text = (copy_text or "").strip()
         if not text:
             return messagebox.showerror("Док-панель", "Не указана ссылка для копирования.")
@@ -1572,18 +1576,23 @@ class MainWindow:
             self.master.clipboard_clear()
             self.master.clipboard_append(text)
             self.master.update_idletasks()
-            messagebox.showinfo("Док-панель", f"Ссылка «{button_name}» скопирована в буфер обмена.")
+            if show_success:
+                messagebox.showinfo("Док-панель", f"Ссылка «{button_name}» скопирована в буфер обмена.")
         except Exception as e:
             messagebox.showerror("Док-панель", f"Не удалось скопировать ссылку: {e}")
 
     def _run_dock_item(self, item: dict):
         if not isinstance(item, dict):
             return
-        action = "copy" if str(item.get("action", "open")).lower() == "copy" else "open"
-        if action == "copy":
-            self._copy_dock_text(item.get("copy_text", ""), item.get("name", "Кнопка"))
-            return
-        self._open_dock_resource(item.get("resource", ""))
+        action = str(item.get("action", "open")).lower()
+        if action not in {"open", "copy", "both"}:
+            action = "open"
+
+        if action in {"copy", "both"}:
+            self._copy_dock_text(item.get("copy_text", ""), item.get("name", "Кнопка"), show_success=(action == "copy"))
+
+        if action in {"open", "both"}:
+            self._open_dock_resource(item.get("resource", ""))
 
     def _open_dock_resource(self, resource: str):
         res = (resource or "").strip()
@@ -1665,9 +1674,18 @@ class MainWindow:
             lst.delete(0, "end")
             for idx, item in enumerate(temp_items):
                 title = item.get("name") or f"Кнопка {idx+1}"
-                action = "copy" if str(item.get("action", "open")).lower() == "copy" else "open"
-                value = item.get("copy_text") if action == "copy" else item.get("resource")
-                marker = "📋" if action == "copy" else "↗"
+                action = str(item.get("action", "open")).lower()
+                if action not in {"open", "copy", "both"}:
+                    action = "open"
+                if action == "copy":
+                    value = item.get("copy_text")
+                    marker = "📋"
+                elif action == "both":
+                    value = f"{(item.get('resource') or '').strip()} | {(item.get('copy_text') or '').strip()}"
+                    marker = "↗📋"
+                else:
+                    value = item.get("resource")
+                    marker = "↗"
                 compact_value = (value or "—").strip()
                 if len(compact_value) > 42:
                     compact_value = compact_value[:39] + "..."
@@ -1679,12 +1697,17 @@ class MainWindow:
             selecting_list = False
 
         def update_fields_visibility():
-            action = "copy" if action_var.get() == "copy" else "open"
+            action = action_var.get()
             if action == "copy":
                 copy_lbl.grid()
                 copy_entry.grid()
                 res_lbl.grid_remove()
                 res_entry.grid_remove()
+            elif action == "both":
+                res_lbl.grid()
+                res_entry.grid()
+                copy_lbl.grid()
+                copy_entry.grid()
             else:
                 res_lbl.grid()
                 res_entry.grid()
@@ -1701,7 +1724,8 @@ class MainWindow:
             name_var.set(item.get("name", ""))
             res_var.set(item.get("resource", ""))
             copy_var.set(item.get("copy_text", ""))
-            action_var.set("copy" if str(item.get("action", "open")).lower() == "copy" else "open")
+            action = str(item.get("action", "open")).lower()
+            action_var.set(action if action in {"open", "copy", "both"} else "open")
             update_fields_visibility()
 
         def clear_form_for_new():
@@ -1716,12 +1740,12 @@ class MainWindow:
             title = name_var.get().strip()
             resource = res_var.get().strip()
             copy_text = copy_var.get().strip()
-            action = "copy" if action_var.get() == "copy" else "open"
+            action = action_var.get() if action_var.get() in {"open", "copy", "both"} else "open"
             if not title:
                 return messagebox.showerror("Док-панель", "Заполните имя кнопки.")
-            if action == "copy" and not copy_text:
+            if action in {"copy", "both"} and not copy_text:
                 return messagebox.showerror("Док-панель", "Укажите ссылку для копирования.")
-            if action == "open" and not resource:
+            if action in {"open", "both"} and not resource:
                 return messagebox.showerror("Док-панель", "Заполните ресурс (путь или URL).")
             new_item = {
                 "name": title,
@@ -1771,7 +1795,8 @@ class MainWindow:
         action_row.grid(row=2, column=1, sticky="w", pady=(0,6))
         ttk.Label(action_row, text="Действие:").pack(side="left")
         ttk.Radiobutton(action_row, text="Открыть", value="open", variable=action_var, command=update_fields_visibility).pack(side="left", padx=(8,2))
-        ttk.Radiobutton(action_row, text="Копировать ссылку", value="copy", variable=action_var, command=update_fields_visibility).pack(side="left")
+        ttk.Radiobutton(action_row, text="Копировать ссылку", value="copy", variable=action_var, command=update_fields_visibility).pack(side="left", padx=(0,2))
+        ttk.Radiobutton(action_row, text="Открыть + копировать", value="both", variable=action_var, command=update_fields_visibility).pack(side="left")
 
         res_lbl = ttk.Label(frm, text="Ресурс (путь или URL):")
         res_lbl.grid(row=3, column=1, sticky="w")
