@@ -3252,17 +3252,23 @@ class UserButton(ttk.Frame):
     def reset_password_ps(self, which):
         new_pw = self.app.settings.get_setting("reset_password","12340987")
         sam, _ = self.app.normalize_pc_name(self.user["pc_name"])
+        domain_map = {
+            "pak": "pak-cspmz.ru",
+            "omg": "omg.cspfmba.ru",
+        }
+        target_domain = domain_map.get(which)
+        if not target_domain:
+            return messagebox.showerror("Сброс пароля", f"Неизвестный домен: {which}")
+
         script = f"""
 Import-Module ActiveDirectory;
-$user = Get-ADUser -Filter "SamAccountName -eq '{sam}'";
+$user = Get-ADUser -Filter "SamAccountName -eq '{sam}'" -Server "{target_domain}";
 if (-not $user) {{ Write-Error 'User not found'; exit 1 }}
-Set-ADAccountPassword $user.SamAccountName -Reset -NewPassword (ConvertTo-SecureString -AsPlainText "{new_pw}" -Force) -PassThru | Out-Null;
-Unlock-ADAccount -Identity $user.SamAccountName -ErrorAction SilentlyContinue;
-Set-ADUser -Identity $user.SamAccountName -ChangePasswordAtLogon $true -ErrorAction SilentlyContinue;
+Set-ADAccountPassword -Identity $user.SamAccountName -Server "{target_domain}" -Reset -NewPassword (ConvertTo-SecureString -AsPlainText "{new_pw}" -Force) -PassThru | Out-Null;
+Unlock-ADAccount -Identity $user.SamAccountName -Server "{target_domain}" -ErrorAction SilentlyContinue;
+Set-ADUser -Identity $user.SamAccountName -Server "{target_domain}" -ChangePasswordAtLogon $true -ErrorAction Stop;
 Write-Output "OK";
 """
-        if which == "omg":
-            script = "$env:USERDNSDOMAIN='omg.cspfmba.ru';" + script
         try:
             run_as_admin("powershell.exe", f"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"")
             messagebox.showinfo("Сброс пароля", f"Запущено для {self.user['name']} ({which.upper()}).")
