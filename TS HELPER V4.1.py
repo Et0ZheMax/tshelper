@@ -1457,9 +1457,17 @@ class MainWindow:
                 continue
             name = str(item.get("name") or item.get("title") or "").strip()
             resource = str(item.get("resource") or item.get("target") or "").strip()
-            if not name and not resource:
+            action = str(item.get("action") or "open").strip().lower()
+            action = "copy" if action == "copy" else "open"
+            copy_text = str(item.get("copy_text") or item.get("copy") or "").strip()
+            if not name and not resource and not copy_text:
                 continue
-            normalized.append({"name": name or "Кнопка", "resource": resource})
+            normalized.append({
+                "name": name or "Кнопка",
+                "resource": resource,
+                "action": action,
+                "copy_text": copy_text,
+            })
         return normalized
 
     def _update_dock_layout(self):
@@ -1521,8 +1529,9 @@ class MainWindow:
         r = c = 0
         for item in self.dock_items:
             name = item.get("name") or "Кнопка"
-            res = item.get("resource", "")
-            btn = ttk.Button(self.dock_buttons_frame, text=name, command=lambda v=res: self._open_dock_resource(v))
+            action = "copy" if str(item.get("action", "open")).lower() == "copy" else "open"
+            title = f"📋 {name}" if action == "copy" else name
+            btn = ttk.Button(self.dock_buttons_frame, text=title, command=lambda v=dict(item): self._run_dock_item(v))
             btn.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
             c += 1
             if c >= cols:
@@ -1554,6 +1563,27 @@ class MainWindow:
         self.dock_items = self._normalize_dock_items(self.dock_items)
         self.settings.set_dock_items(self.dock_items)
         self._render_dock_buttons()
+
+    def _copy_dock_text(self, copy_text: str, button_name: str):
+        text = (copy_text or "").strip()
+        if not text:
+            return messagebox.showerror("Док-панель", "Не указана ссылка для копирования.")
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(text)
+            self.master.update_idletasks()
+            messagebox.showinfo("Док-панель", f"Ссылка «{button_name}» скопирована в буфер обмена.")
+        except Exception as e:
+            messagebox.showerror("Док-панель", f"Не удалось скопировать ссылку: {e}")
+
+    def _run_dock_item(self, item: dict):
+        if not isinstance(item, dict):
+            return
+        action = "copy" if str(item.get("action", "open")).lower() == "copy" else "open"
+        if action == "copy":
+            self._copy_dock_text(item.get("copy_text", ""), item.get("name", "Кнопка"))
+            return
+        self._open_dock_resource(item.get("resource", ""))
 
     def _open_dock_resource(self, resource: str):
         res = (resource or "").strip()
@@ -1625,33 +1655,80 @@ class MainWindow:
 
         name_var = tk.StringVar()
         res_var = tk.StringVar()
+        copy_var = tk.StringVar()
+        action_var = tk.StringVar(value="open")
+        selecting_list = False
 
         def refresh_list(selected_index=None):
+            nonlocal selecting_list
+            selecting_list = True
             lst.delete(0, "end")
             for idx, item in enumerate(temp_items):
                 title = item.get("name") or f"Кнопка {idx+1}"
-                res = item.get("resource") or "—"
-                lst.insert("end", f"{idx+1}. {title} — {res}")
+                action = "copy" if str(item.get("action", "open")).lower() == "copy" else "open"
+                value = item.get("copy_text") if action == "copy" else item.get("resource")
+                marker = "📋" if action == "copy" else "↗"
+                compact_value = (value or "—").strip()
+                if len(compact_value) > 42:
+                    compact_value = compact_value[:39] + "..."
+                lst.insert("end", f"{idx+1}. {marker} {title} — {compact_value}")
             if selected_index is not None and 0 <= selected_index < len(temp_items):
                 lst.selection_set(selected_index)
+                lst.activate(selected_index)
                 lst.see(selected_index)
+            selecting_list = False
+
+        def update_fields_visibility():
+            action = "copy" if action_var.get() == "copy" else "open"
+            if action == "copy":
+                copy_lbl.grid()
+                copy_entry.grid()
+                res_lbl.grid_remove()
+                res_entry.grid_remove()
+            else:
+                res_lbl.grid()
+                res_entry.grid()
+                copy_lbl.grid_remove()
+                copy_entry.grid_remove()
 
         def on_select(_=None):
+            if selecting_list:
+                return
             sel = lst.curselection()
             if not sel:
-                name_var.set("")
-                res_var.set("")
                 return
             item = temp_items[sel[0]]
             name_var.set(item.get("name", ""))
             res_var.set(item.get("resource", ""))
+            copy_var.set(item.get("copy_text", ""))
+            action_var.set("copy" if str(item.get("action", "open")).lower() == "copy" else "open")
+            update_fields_visibility()
+
+        def clear_form_for_new():
+            lst.selection_clear(0, "end")
+            name_var.set("")
+            res_var.set("")
+            copy_var.set("")
+            action_var.set("open")
+            update_fields_visibility()
 
         def add_or_update():
             title = name_var.get().strip()
             resource = res_var.get().strip()
-            if not title or not resource:
-                return messagebox.showerror("Док-панель", "Заполните имя кнопки и ресурс.")
-            new_item = {"name": title, "resource": resource}
+            copy_text = copy_var.get().strip()
+            action = "copy" if action_var.get() == "copy" else "open"
+            if not title:
+                return messagebox.showerror("Док-панель", "Заполните имя кнопки.")
+            if action == "copy" and not copy_text:
+                return messagebox.showerror("Док-панель", "Укажите ссылку для копирования.")
+            if action == "open" and not resource:
+                return messagebox.showerror("Док-панель", "Заполните ресурс (путь или URL).")
+            new_item = {
+                "name": title,
+                "resource": resource,
+                "action": action,
+                "copy_text": copy_text,
+            }
             sel = lst.curselection()
             if sel:
                 temp_items[sel[0]] = new_item
@@ -1660,6 +1737,7 @@ class MainWindow:
                 temp_items.append(new_item)
                 idx = len(temp_items) - 1
             refresh_list(idx)
+            on_select()
 
         def delete_selected():
             sel = lst.curselection()
@@ -1667,8 +1745,7 @@ class MainWindow:
                 return
             temp_items.pop(sel[0])
             refresh_list()
-            name_var.set("")
-            res_var.set("")
+            clear_form_for_new()
 
         def move_item(delta: int):
             sel = lst.curselection()
@@ -1689,23 +1766,41 @@ class MainWindow:
 
         ttk.Label(frm, text="Имя кнопки:").grid(row=0, column=1, sticky="w")
         ttk.Entry(frm, textvariable=name_var).grid(row=1, column=1, sticky="ew", pady=(0,6))
-        ttk.Label(frm, text="Ресурс (путь или URL):").grid(row=2, column=1, sticky="w")
-        ttk.Entry(frm, textvariable=res_var).grid(row=3, column=1, sticky="ew", pady=(0,6))
+
+        action_row = ttk.Frame(frm)
+        action_row.grid(row=2, column=1, sticky="w", pady=(0,6))
+        ttk.Label(action_row, text="Действие:").pack(side="left")
+        ttk.Radiobutton(action_row, text="Открыть", value="open", variable=action_var, command=update_fields_visibility).pack(side="left", padx=(8,2))
+        ttk.Radiobutton(action_row, text="Копировать ссылку", value="copy", variable=action_var, command=update_fields_visibility).pack(side="left")
+
+        res_lbl = ttk.Label(frm, text="Ресурс (путь или URL):")
+        res_lbl.grid(row=3, column=1, sticky="w")
+        res_entry = ttk.Entry(frm, textvariable=res_var)
+        res_entry.grid(row=4, column=1, sticky="ew", pady=(0,6))
+
+        copy_lbl = ttk.Label(frm, text="Ссылка для копирования:")
+        copy_lbl.grid(row=3, column=1, sticky="w")
+        copy_entry = ttk.Entry(frm, textvariable=copy_var)
+        copy_entry.grid(row=4, column=1, sticky="ew", pady=(0,6))
+        copy_lbl.grid_remove()
+        copy_entry.grid_remove()
 
         btn_row = ttk.Frame(frm)
-        btn_row.grid(row=4, column=1, sticky="ew", pady=4)
+        btn_row.grid(row=5, column=1, sticky="ew", pady=4)
         ttk.Button(btn_row, text="Добавить/обновить", command=add_or_update).pack(side="left")
         ttk.Button(btn_row, text="Удалить", command=delete_selected).pack(side="left", padx=6)
+        ttk.Button(btn_row, text="Новая", command=clear_form_for_new).pack(side="left")
 
         order_row = ttk.Frame(frm)
-        order_row.grid(row=5, column=1, sticky="ew", pady=4)
+        order_row.grid(row=6, column=1, sticky="ew", pady=4)
         ttk.Button(order_row, text="Вверх", command=lambda: move_item(-1)).pack(side="left")
         ttk.Button(order_row, text="Вниз", command=lambda: move_item(1)).pack(side="left", padx=6)
 
-        ttk.Button(frm, text="Сохранить", command=save_and_close).grid(row=6, column=0, columnspan=2, pady=(10,0))
+        ttk.Button(frm, text="Сохранить", command=save_and_close).grid(row=7, column=0, columnspan=2, pady=(10,0))
 
         lst.bind("<<ListboxSelect>>", on_select)
         refresh_list()
+        clear_form_for_new()
 
     # --------- Кнопки/раскладка ----------
     def _compute_cols(self):
