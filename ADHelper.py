@@ -8,7 +8,7 @@ import subprocess
 import re
 import sys
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox
 from typing import Optional, Callable, Any
 
 # ==========================
@@ -2732,6 +2732,61 @@ class App(tk.Tk):
         self._offboarding_log(f"  Целевой OU: {target_ou}")
         self._offboarding_log("  Будут очищены атрибуты Общие/Адрес/Организация из безопасного списка.")
 
+    def _offboarding_confirm_login(self, expected_sam: str) -> Optional[str]:
+        modal = tk.Toplevel(self)
+        modal.title("Подтверждение")
+        modal.transient(self)
+        modal.grab_set()
+        modal.resizable(False, False)
+
+        frm = ttk.Frame(modal, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frm,
+            text="Введите логин для подтверждения (samAccountName):",
+            justify="left",
+        ).pack(anchor="w")
+
+        login_var = tk.StringVar()
+        login_entry = ttk.Entry(frm, textvariable=login_var, width=40)
+        login_entry.pack(fill="x", pady=(8, 4))
+
+        ttk.Label(
+            frm,
+            text=f"Ожидается: {expected_sam}",
+            foreground="#666666",
+            font=("TkDefaultFont", 9),
+        ).pack(anchor="w", pady=(0, 10))
+
+        result: dict[str, Optional[str]] = {"value": None}
+
+        def on_confirm(_event=None):
+            result["value"] = login_var.get()
+            modal.destroy()
+
+        def on_cancel(_event=None):
+            result["value"] = None
+            modal.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Подтвердить", command=on_confirm).pack(side="right")
+        ttk.Button(btns, text="Отмена", command=on_cancel).pack(side="right", padx=(0, 8))
+
+        modal.protocol("WM_DELETE_WINDOW", on_cancel)
+        modal.bind("<Return>", on_confirm)
+        modal.bind("<Escape>", on_cancel)
+
+        modal.update_idletasks()
+        modal.geometry(
+            f"+{self.winfo_rootx() + (self.winfo_width() // 2) - (modal.winfo_width() // 2)}"
+            f"+{self.winfo_rooty() + (self.winfo_height() // 2) - (modal.winfo_height() // 2)}"
+        )
+        login_entry.focus_set()
+        self.wait_window(modal)
+        return result["value"]
+
     def _offboarding_execute(self):
         cfg = self._offboarding_current_cfg()
         if not cfg or cfg.get("name") != "omg-cspfmba":
@@ -2761,7 +2816,7 @@ class App(tk.Tk):
             return
 
         expected_sam = (user.get("sam") or "").strip()
-        typed_sam = simpledialog.askstring("Подтверждение", "Введите логин для подтверждения (samAccountName):", parent=self)
+        typed_sam = self._offboarding_confirm_login(expected_sam)
         if (typed_sam or "").strip().lower() != expected_sam.lower():
             messagebox.showerror("Ошибка", "Логин подтверждения не совпадает. Операция отменена.")
             self._offboarding_log("[offboarding] Неверный логин подтверждения, выполнение остановлено.")
