@@ -4,9 +4,11 @@ from ctypes import wintypes
 import argparse
 import json
 import os
+import platform
 import subprocess
 import re
 import sys
+from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional, Callable, Any
@@ -42,6 +44,7 @@ COMPANY_NAME = "ФГБУ «ЦСП» ФМБА России"
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "ADHelper")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 OU_MAP_PATH = os.path.join(CONFIG_DIR, "ou_map.json")
+OFFBOARDING_LOG_PATH = os.path.join(CONFIG_DIR, "offboarding_log.jsonl")
 CONFIG_PASSWORD_KEY = "password_token"
 CONFIG_GEOMETRY_KEY = "window_geometry"
 
@@ -221,6 +224,16 @@ def save_config(data: dict) -> None:
     os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
+def ensure_config_dir() -> str:
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    return CONFIG_DIR
+
+
+def append_jsonl(path: str, obj: dict) -> None:
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 def normalize_text(value: str) -> str:
@@ -2631,9 +2644,12 @@ class App(tk.Tk):
             "clear": "Шаг 2: Очистка атрибутов (Общие/Адрес/Организация)",
             "disable": "Шаг 3: Отключение учётной записи",
             "move": "Шаг 4: Перемещение в OU Уволенные",
+            "pak_clear": "Шаг 5: pak — очистка атрибутов",
+            "pak_disable": "Шаг 6: pak — отключение учётной записи",
+            "pak_move": "Шаг 7: pak — перемещение в OU Уволенные",
         }
         self.offboarding_step_vars = {}
-        for idx, step_key in enumerate(("identity", "clear", "disable", "move")):
+        for idx, step_key in enumerate(("identity", "clear", "disable", "move", "pak_clear", "pak_disable", "pak_move")):
             var = tk.StringVar()
             self.offboarding_step_vars[step_key] = var
             self._offboarding_set_step_status(step_key, "pending")
@@ -2752,12 +2768,29 @@ class App(tk.Tk):
         login_entry = ttk.Entry(frm, textvariable=login_var, width=40)
         login_entry.pack(fill="x", pady=(8, 4))
 
-        ttk.Label(
-            frm,
-            text=f"Ожидается: {expected_sam}",
-            foreground="#666666",
-            font=("TkDefaultFont", 9),
-        ).pack(anchor="w", pady=(0, 10))
+        hint_wrap = ttk.Frame(frm)
+        hint_wrap.pack(anchor="w", pady=(0, 10))
+        ttk.Label(hint_wrap, text="Ожидается: ", foreground="#666666", font=("TkDefaultFont", 9)).pack(side="left")
+
+        copied_var = tk.StringVar(value="")
+        expected_label = ttk.Label(
+            hint_wrap,
+            text=expected_sam,
+            foreground="#1f6feb",
+            cursor="hand2",
+            font=("TkDefaultFont", 9, "underline"),
+        )
+        expected_label.pack(side="left")
+        copied_label = ttk.Label(hint_wrap, textvariable=copied_var, foreground="#22863a", font=("TkDefaultFont", 9))
+        copied_label.pack(side="left", padx=(8, 0))
+
+        def on_copy_expected(_event=None):
+            self.clipboard_clear()
+            self.clipboard_append(expected_sam)
+            copied_var.set("Скопировано!")
+            modal.after(1500, lambda: copied_var.set(""))
+
+        expected_label.bind("<Button-1>", on_copy_expected)
 
         result: dict[str, Optional[str]] = {"value": None}
 
@@ -2800,7 +2833,7 @@ class App(tk.Tk):
         target_ou = cfg.get("fired_ou_dn") or ""
         if not validate_ou_exists(cfg, target_ou):
             messagebox.showerror("Ошибка", f"Целевой OU не существует: {target_ou}")
-            self._offboarding_log(f"[offboarding] OU не найден: {target_ou}")
+            self._offboarding_log(f"[offboarding][omg] OU не найден: {target_ou}")
             return
 
         confirm_text = (
@@ -2822,45 +2855,161 @@ class App(tk.Tk):
             self._offboarding_log("[offboarding] Неверный логин подтверждения, выполнение остановлено.")
             return
 
-        for step_key in ("identity", "clear", "disable", "move"):
+        step_keys = ("identity", "clear", "disable", "move", "pak_clear", "pak_disable", "pak_move")
+        for step_key in step_keys:
             self._offboarding_set_step_status(step_key, "pending")
+        step_statuses: dict[str, str] = {k: "pending" for k in step_keys}
 
-        server = cfg.get("server") or get_preferred_dc(cfg)
-        pdc = get_preferred_dc(cfg)
-        self._offboarding_log(f"[offboarding] Основной сервер: {server}; PDC: {pdc}")
-        sam_ps = escape_ps_string(expected_sam)
-        identity_cmd = (
-            "Import-Module ActiveDirectory; "
-            f"$u = Get-ADUser -Server '{escape_ps_string(server)}' -Identity '{sam_ps}' "
-            "-Properties ObjectGUID,DistinguishedName,Enabled,GivenName,Surname,DisplayName,mail,department,title,physicalDeliveryOfficeName,mobile; "
-            "$u | Select-Object @{Name='guid';Expression={$_.ObjectGUID.ToString()}},@{Name='dn';Expression={$_.DistinguishedName}},"
-            "@{Name='enabled';Expression={$_.Enabled}},@{Name='givenName';Expression={$_.GivenName}},"
-            "@{Name='sn';Expression={$_.Surname}},@{Name='displayName';Expression={$_.DisplayName}} | ConvertTo-Json -Depth 4"
-        )
+        def set_step(step_key: str, status: str):
+            step_statuses[step_key] = status
+            self._offboarding_set_step_status(step_key, status)
 
-        self._offboarding_set_step_status("identity", "running")
-        proc = run_powershell(identity_cmd, server=server)
-        self._offboarding_log(f"[offboarding][identity] rc={proc.returncode}")
-        if proc.stdout.strip():
-            self._offboarding_log("[offboarding][identity] STDOUT:\n" + proc.stdout.strip())
-        if proc.stderr.strip():
-            self._offboarding_log("[offboarding][identity] STDERR:\n" + proc.stderr.strip())
-        if proc.returncode != 0:
-            self._offboarding_set_step_status("identity", "fail")
-            messagebox.showerror("Ошибка", "Не удалось получить пользователя для увольнения.")
+        def now_local_iso() -> str:
+            return datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
+
+        def now_utc_iso() -> str:
+            return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        def short_text(value: str) -> str:
+            v = (value or "").strip()
+            return v[:1000]
+
+        def dn_to_ou(dn: str) -> str:
+            if not dn:
+                return ""
+            parts = [part.strip() for part in dn.split(",") if part.strip().upper().startswith("OU=")]
+            return ",".join(parts)
+
+        def parse_clear_output(proc: subprocess.CompletedProcess) -> tuple[dict, list[str]]:
+            stdout_lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+            json_lines = [line for line in stdout_lines if not line.startswith("__CLEAR_FAIL__:")]
+            clear_fail_messages = [line for line in stdout_lines if line.startswith("__CLEAR_FAIL__:")]
+            clear_result = {}
+            if json_lines:
+                clear_result = json.loads("\n".join(json_lines))
+            return clear_result, clear_fail_messages
+
+        attr_props = [
+            "ObjectGUID", "DistinguishedName", "Enabled", "GivenName", "sn", "DisplayName", "samAccountName",
+            "userPrincipalName", "mail", "department", "title", "company", "physicalDeliveryOfficeName",
+            "telephoneNumber", "mobile", "streetAddress", "l", "st", "postalCode", "postOfficeBox", "co",
+            "manager", "description", "info", "memberOf",
+        ]
+        attr_props_ps = ",".join(attr_props)
+
+        def build_identity_cmd(server_name: str, sam_value: str) -> str:
+            return (
+                "Import-Module ActiveDirectory; "
+                f"$users = @(Get-ADUser -Server '{escape_ps_string(server_name)}' "
+                f"-Filter \"samAccountName -eq '{escape_ps_string(sam_value)}'\" -Properties {attr_props_ps}); "
+                "$items = @($users | ForEach-Object { "
+                "[PSCustomObject]@{ "
+                "guid=$_.ObjectGUID.ToString(); dn=$_.DistinguishedName; enabled=$_.Enabled; givenName=$_.GivenName; sn=$_.sn; "
+                "displayName=$_.DisplayName; samAccountName=$_.samAccountName; userPrincipalName=$_.userPrincipalName; mail=$_.mail; "
+                "department=$_.department; title=$_.title; company=$_.company; physicalDeliveryOfficeName=$_.physicalDeliveryOfficeName; "
+                "telephoneNumber=$_.telephoneNumber; mobile=$_.mobile; streetAddress=$_.streetAddress; l=$_.l; st=$_.st; postalCode=$_.postalCode; "
+                "postOfficeBox=$_.postOfficeBox; co=$_.co; manager=$_.manager; description=$_.description; info=$_.info; "
+                "memberOf=@($_.memberOf | Select-Object -First 30) "
+                "} "
+                "}); "
+                "@{ count=@($users).Count; users=$items } | ConvertTo-Json -Depth 6"
+            )
+
+        def fetch_domain_identity(domain_cfg: dict, sam_value: str, prefix: str) -> dict:
+            main_server = domain_cfg.get("server") or get_preferred_dc(domain_cfg)
+            pdc_server = get_preferred_dc(domain_cfg)
+            self._offboarding_log(f"[offboarding][{prefix}] Основной сервер: {main_server}; PDC: {pdc_server}")
+            proc = run_powershell(build_identity_cmd(main_server, sam_value), server=main_server)
+            self._offboarding_log(f"[offboarding][{prefix}][identity] rc={proc.returncode}")
+            if proc.stdout.strip():
+                self._offboarding_log(f"[offboarding][{prefix}][identity] STDOUT:\n" + proc.stdout.strip())
+            if proc.stderr.strip():
+                self._offboarding_log(f"[offboarding][{prefix}][identity] STDERR:\n" + proc.stderr.strip())
+            data, err = parse_ps_json(proc.stdout)
+            if proc.returncode != 0 or err or not data:
+                return {
+                    "server_main": main_server,
+                    "server_pdc": pdc_server,
+                    "identity_rc": proc.returncode,
+                    "identity_stdout": short_text(proc.stdout),
+                    "identity_stderr": short_text(proc.stderr),
+                    "count": 0,
+                    "user": None,
+                }
+            payload = data[0] if isinstance(data, list) and data else data
+            users = payload.get("users") or []
+            if isinstance(users, dict):
+                users = [users]
+            return {
+                "server_main": main_server,
+                "server_pdc": pdc_server,
+                "identity_rc": proc.returncode,
+                "identity_stdout": short_text(proc.stdout),
+                "identity_stderr": short_text(proc.stderr),
+                "count": int(payload.get("count") or len(users)),
+                "user": users[0] if users else None,
+            }
+
+        def add_step(audit_domain: dict, step_name: str, status: str, proc: Optional[subprocess.CompletedProcess] = None):
+            audit_domain.setdefault("steps", []).append({
+                "step": step_name,
+                "status": status,
+                "rc": None if proc is None else proc.returncode,
+                "stderr": short_text("" if proc is None else (proc.stderr or "")),
+                "stdout": short_text("" if proc is None else (proc.stdout or "")),
+                "timestamp": now_local_iso(),
+            })
+
+        operator_username = ""
+        try:
+            operator_username = os.getlogin()
+        except OSError:
+            operator_username = os.environ.get("USERNAME") or "unknown"
+
+        audit_entry = {
+            "timestamp_local": now_local_iso(),
+            "timestamp_utc": now_utc_iso(),
+            "operator": {
+                "username": operator_username,
+                "hostname": platform.node() or (os.environ.get("COMPUTERNAME") or ""),
+            },
+            "action": "offboarding",
+            "sam": expected_sam,
+            "displayName": user.get("displayName") or "",
+            "domains": {
+                "omg-cspfmba": {"server_main": "", "server_pdc": "", "user_found": False, "steps": [], "clear_failed_attrs": []},
+                "pak-cspmz": {"server_main": "", "server_pdc": "", "user_found": False, "steps": [], "clear_failed_attrs": []},
+            },
+        }
+
+        omg_audit = audit_entry["domains"]["omg-cspfmba"]
+        pak_audit = audit_entry["domains"]["pak-cspmz"]
+
+        omg_identity = fetch_domain_identity(cfg, expected_sam, "omg")
+        omg_audit["server_main"] = omg_identity["server_main"]
+        omg_audit["server_pdc"] = omg_identity["server_pdc"]
+
+        if omg_identity["count"] != 1 or not omg_identity["user"]:
+            set_step("identity", "fail")
+            add_step(omg_audit, "identity", "fail")
+            messagebox.showerror("Ошибка", "Не удалось получить пользователя для увольнения в omg.")
             return
-        data, err = parse_ps_json(proc.stdout)
-        if err or not data:
-            self._offboarding_set_step_status("identity", "fail")
-            self._offboarding_log(f"[offboarding][identity] {err or 'Пользователь не найден.'}")
-            return
 
-        ad_user = data[0]
-        guid = ad_user.get("guid") or ""
-        dn_before = ad_user.get("dn") or ""
-        self._offboarding_set_step_status("identity", "success")
+        omg_user = omg_identity["user"]
+        guid = omg_user.get("guid") or ""
+        dn_before = omg_user.get("dn") or ""
+        omg_audit.update({
+            "user_found": True,
+            "guid": guid,
+            "dn_before": dn_before,
+            "ou_before": dn_to_ou(dn_before),
+            "enabled_before": bool(omg_user.get("enabled")),
+            "snapshot_before": omg_user,
+        })
+        set_step("identity", "success")
+        add_step(omg_audit, "identity", "success")
 
-        clear_attrs = [
+        clear_attrs_omg = [
             "title", "department", "company", "physicalDeliveryOfficeName", "telephoneNumber", "mobile", "mail", "streetAddress",
             "l", "st", "postalCode", "postOfficeBox", "co", "manager", "description", "info",
             "facsimileTelephoneNumber", "homePhone", "ipPhone", "pager", "wWWHomePage", "otherTelephone", "otherMobile",
@@ -2870,121 +3019,277 @@ class App(tk.Tk):
             "extensionAttribute15", "division", "section",
         ]
         clear_failed_attrs: list[str] = []
-        clear_fail_messages: list[str] = []
-        clear_list_ps = ",".join(f"'{escape_ps_string(x)}'" for x in clear_attrs)
+        clear_list_ps = ",".join(f"'{escape_ps_string(x)}'" for x in clear_attrs_omg)
         clear_cmd = (
             "Import-Module ActiveDirectory; "
-            f"$gid = [Guid]'{escape_ps_string(guid)}'; "
-            "$failed = @(); "
-            "$cleared = @(); "
-            f"foreach ($a in @({clear_list_ps})) {{ "
-            "  try { "
-            f"    Set-ADUser -Server '{escape_ps_string(server)}' -Identity $gid -Clear $a -ErrorAction Stop; "
-            "    $cleared += $a; "
-            "  } catch { "
-            "    $failed += $a; "
-            "    Write-Output ('__CLEAR_FAIL__:' + $a + ':' + $_.Exception.Message); "
-            "  } "
-            "}; "
-            f"Set-ADUser -Server '{escape_ps_string(server)}' -Identity $gid "
-            f"-GivenName '{escape_ps_string(ad_user.get('givenName') or '')}' "
-            f"-Surname '{escape_ps_string(ad_user.get('sn') or '')}' "
-            f"-DisplayName '{escape_ps_string(ad_user.get('displayName') or '')}' -ErrorAction Stop; "
+            f"$gid = [Guid]'{escape_ps_string(guid)}'; $failed = @(); $cleared = @(); "
+            f"foreach ($a in @({clear_list_ps})) {{ try {{ Set-ADUser -Server '{escape_ps_string(omg_identity['server_main'])}' -Identity $gid -Clear $a -ErrorAction Stop; $cleared += $a; }} catch {{ $failed += $a; Write-Output ('__CLEAR_FAIL__:' + $a + ':' + $_.Exception.Message); }} }}; "
+            f"Set-ADUser -Server '{escape_ps_string(omg_identity['server_main'])}' -Identity $gid "
+            f"-GivenName '{escape_ps_string(omg_user.get('givenName') or '')}' "
+            f"-Surname '{escape_ps_string(omg_user.get('sn') or '')}' "
+            f"-DisplayName '{escape_ps_string(omg_user.get('displayName') or '')}' -ErrorAction Stop; "
             "@{ cleared=$cleared; failed=$failed } | ConvertTo-Json -Depth 4"
         )
 
-        self._offboarding_set_step_status("clear", "running")
+        set_step("clear", "running")
         if ADHELPER_DRYRUN_MODE:
-            self._offboarding_log(f"[offboarding][clear] DRYRUN: пропуск Set-ADUser для GUID {guid}")
-            self._offboarding_set_step_status("clear", "simulated")
+            self._offboarding_log(f"[offboarding][omg][clear] DRYRUN: пропуск Set-ADUser для GUID {guid}")
+            set_step("clear", "simulated")
+            add_step(omg_audit, "clear", "simulated")
         else:
-            proc = run_powershell(clear_cmd, server=server)
-            self._offboarding_log(f"[offboarding][clear] rc={proc.returncode}")
+            proc = run_powershell(clear_cmd, server=omg_identity["server_main"])
+            self._offboarding_log(f"[offboarding][omg][clear] rc={proc.returncode}")
             if proc.stdout.strip():
-                self._offboarding_log("[offboarding][clear] STDOUT:\n" + proc.stdout.strip())
+                self._offboarding_log("[offboarding][omg][clear] STDOUT:\n" + proc.stdout.strip())
             if proc.stderr.strip():
-                self._offboarding_log("[offboarding][clear] STDERR:\n" + proc.stderr.strip())
+                self._offboarding_log("[offboarding][omg][clear] STDERR:\n" + proc.stderr.strip())
             if proc.returncode != 0:
-                self._offboarding_set_step_status("clear", "fail")
+                set_step("clear", "fail")
+                add_step(omg_audit, "clear", "fail", proc)
                 return
-            stdout_lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
-            json_lines = [line for line in stdout_lines if not line.startswith("__CLEAR_FAIL__:")]
-            clear_fail_messages = [line for line in stdout_lines if line.startswith("__CLEAR_FAIL__:")]
             try:
-                clear_result = json.loads("\n".join(json_lines)) if json_lines else {}
+                clear_result, clear_fail_messages = parse_clear_output(proc)
             except json.JSONDecodeError as exc:
-                self._offboarding_log(f"[offboarding][clear] Ошибка разбора JSON: {exc}")
-                self._offboarding_set_step_status("clear", "fail")
+                self._offboarding_log(f"[offboarding][omg][clear] Ошибка разбора JSON: {exc}")
+                set_step("clear", "fail")
+                add_step(omg_audit, "clear", "fail", proc)
                 return
-            clear_failed_raw = clear_result.get("failed") or []
-            if isinstance(clear_failed_raw, list):
-                clear_failed_attrs = [str(x) for x in clear_failed_raw if x]
-            elif clear_failed_raw:
-                clear_failed_attrs = [str(clear_failed_raw)]
-            else:
-                clear_failed_attrs = []
+            clear_failed_attrs = [str(x) for x in (clear_result.get("failed") or []) if x]
+            omg_audit["clear_failed_attrs"] = clear_failed_attrs
             if clear_failed_attrs:
-                self._offboarding_set_step_status("clear", "warn")
-                self._offboarding_log("[offboarding][clear] Не удалось очистить атрибуты: " + ", ".join(clear_failed_attrs))
+                set_step("clear", "warn")
+                add_step(omg_audit, "clear", "warn", proc)
+                self._offboarding_log("[offboarding][omg][clear] Не удалось очистить атрибуты: " + ", ".join(clear_failed_attrs))
                 for fail_line in clear_fail_messages[:5]:
-                    self._offboarding_log("[offboarding][clear] Причина: " + fail_line)
+                    self._offboarding_log("[offboarding][omg][clear] Причина: " + fail_line)
             else:
-                self._offboarding_set_step_status("clear", "success")
+                set_step("clear", "success")
+                add_step(omg_audit, "clear", "success", proc)
 
         disable_cmd = (
             "Import-Module ActiveDirectory; "
-            f"Disable-ADAccount -Server '{escape_ps_string(server)}' -Identity '{escape_ps_string(guid)}'; "
-            f"(Get-ADUser -Server '{escape_ps_string(server)}' -Identity '{escape_ps_string(guid)}' -Properties Enabled).Enabled"
+            f"Disable-ADAccount -Server '{escape_ps_string(omg_identity['server_main'])}' -Identity '{escape_ps_string(guid)}'; "
+            f"(Get-ADUser -Server '{escape_ps_string(omg_identity['server_main'])}' -Identity '{escape_ps_string(guid)}' -Properties Enabled).Enabled"
         )
-        self._offboarding_set_step_status("disable", "running")
+        set_step("disable", "running")
         if ADHELPER_DRYRUN_MODE:
-            self._offboarding_log(f"[offboarding][disable] DRYRUN: пропуск Disable-ADAccount для GUID {guid}")
-            self._offboarding_set_step_status("disable", "simulated")
+            self._offboarding_log(f"[offboarding][omg][disable] DRYRUN: пропуск Disable-ADAccount для GUID {guid}")
+            set_step("disable", "simulated")
+            add_step(omg_audit, "disable", "simulated")
         else:
-            proc = run_powershell(disable_cmd, server=server)
-            self._offboarding_log(f"[offboarding][disable] rc={proc.returncode}")
+            proc = run_powershell(disable_cmd, server=omg_identity["server_main"])
+            self._offboarding_log(f"[offboarding][omg][disable] rc={proc.returncode}")
             if proc.stdout.strip():
-                self._offboarding_log("[offboarding][disable] STDOUT:\n" + proc.stdout.strip())
+                self._offboarding_log("[offboarding][omg][disable] STDOUT:\n" + proc.stdout.strip())
             if proc.stderr.strip():
-                self._offboarding_log("[offboarding][disable] STDERR:\n" + proc.stderr.strip())
+                self._offboarding_log("[offboarding][omg][disable] STDERR:\n" + proc.stderr.strip())
             enabled_check = (proc.stdout or "").strip().lower()
             if proc.returncode != 0 or enabled_check == "true":
-                self._offboarding_set_step_status("disable", "fail")
+                set_step("disable", "fail")
+                add_step(omg_audit, "disable", "fail", proc)
                 return
-            self._offboarding_set_step_status("disable", "success")
+            set_step("disable", "success")
+            add_step(omg_audit, "disable", "success", proc)
 
         move_cmd = (
             "Import-Module ActiveDirectory; "
             f"Move-ADObject -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -TargetPath '{escape_ps_string(target_ou)}'; "
-            f"(Get-ADUser -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -Properties DistinguishedName).DistinguishedName"
+            f"(Get-ADUser -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -Properties DistinguishedName,Enabled).DistinguishedName"
         )
-        self._offboarding_set_step_status("move", "running")
+        set_step("move", "running")
         if ADHELPER_DRYRUN_MODE:
-            self._offboarding_log(f"[offboarding][move] DRYRUN: пропуск Move-ADObject в OU {target_ou}")
-            self._offboarding_set_step_status("move", "simulated")
+            self._offboarding_log(f"[offboarding][omg][move] DRYRUN: пропуск Move-ADObject в OU {target_ou}")
+            set_step("move", "simulated")
+            add_step(omg_audit, "move", "simulated")
         else:
-            proc = run_powershell(move_cmd.format(srv=escape_ps_string(server)), server=server)
-            self._offboarding_log(f"[offboarding][move] rc={proc.returncode}")
+            proc = run_powershell(move_cmd.format(srv=escape_ps_string(omg_identity["server_main"])), server=omg_identity["server_main"])
+            self._offboarding_log(f"[offboarding][omg][move] rc={proc.returncode}")
             if proc.stdout.strip():
-                self._offboarding_log("[offboarding][move] STDOUT:\n" + proc.stdout.strip())
+                self._offboarding_log("[offboarding][omg][move] STDOUT:\n" + proc.stdout.strip())
             if proc.stderr.strip():
-                self._offboarding_log("[offboarding][move] STDERR:\n" + proc.stderr.strip())
-
-            if proc.returncode != 0 and command_failed_with_8329(proc):
-                if pdc.lower() != server.lower():
-                    self._offboarding_log(f"[offboarding][move] Ошибка 8329/uninstantiated, ретрай на PDC: {pdc}")
-                    proc = run_powershell(move_cmd.format(srv=escape_ps_string(pdc)), server=pdc)
-                    self._offboarding_log(f"[offboarding][move][retry] Сервер: {pdc}, rc={proc.returncode}")
-                    if proc.stdout.strip():
-                        self._offboarding_log("[offboarding][move][retry] STDOUT:\n" + proc.stdout.strip())
-                    if proc.stderr.strip():
-                        self._offboarding_log("[offboarding][move][retry] STDERR:\n" + proc.stderr.strip())
-
+                self._offboarding_log("[offboarding][omg][move] STDERR:\n" + proc.stderr.strip())
+            if proc.returncode != 0 and command_failed_with_8329(proc) and omg_identity["server_pdc"].lower() != omg_identity["server_main"].lower():
+                self._offboarding_log(f"[offboarding][omg][move] Ошибка 8329/uninstantiated, ретрай на PDC: {omg_identity['server_pdc']}")
+                proc = run_powershell(move_cmd.format(srv=escape_ps_string(omg_identity["server_pdc"])), server=omg_identity["server_pdc"])
+                self._offboarding_log(f"[offboarding][omg][move][retry] Сервер: {omg_identity['server_pdc']}, rc={proc.returncode}")
+                if proc.stdout.strip():
+                    self._offboarding_log("[offboarding][omg][move][retry] STDOUT:\n" + proc.stdout.strip())
+                if proc.stderr.strip():
+                    self._offboarding_log("[offboarding][omg][move][retry] STDERR:\n" + proc.stderr.strip())
             dn_after = (proc.stdout or "").strip()
             if proc.returncode != 0 or target_ou.lower() not in dn_after.lower():
-                self._offboarding_set_step_status("move", "fail")
+                set_step("move", "fail")
+                add_step(omg_audit, "move", "fail", proc)
                 return
-            self._offboarding_set_step_status("move", "success")
+            set_step("move", "success")
+            add_step(omg_audit, "move", "success", proc)
+            omg_audit["dn_after"] = dn_after
+            omg_audit["ou_after"] = dn_to_ou(dn_after)
+
+        omg_completed = all(step_statuses[k] in ("success", "simulated") for k in ("identity", "clear", "disable", "move"))
+        pak_cfg = next((d for d in DOMAIN_CONFIGS if d.get("name") == "pak-cspmz"), None)
+        pak_target_ou = "OU=Уволенные,OU=Users,OU=csp,DC=pak-cspmz,DC=ru"
+
+        if not omg_completed:
+            self._offboarding_log("[offboarding][pak] Пропуск: шаги omg завершены неуспешно.")
+            for k in ("pak_clear", "pak_disable", "pak_move"):
+                set_step(k, "warn")
+                add_step(pak_audit, k.replace("pak_", ""), "warn")
+        elif not pak_cfg:
+            self._offboarding_log("[offboarding][pak] Конфигурация pak-cspmz не найдена.")
+            for k in ("pak_clear", "pak_disable", "pak_move"):
+                set_step(k, "warn")
+                add_step(pak_audit, k.replace("pak_", ""), "warn")
+        else:
+            pak_identity = fetch_domain_identity(pak_cfg, expected_sam, "pak")
+            pak_audit["server_main"] = pak_identity["server_main"]
+            pak_audit["server_pdc"] = pak_identity["server_pdc"]
+
+            if pak_identity["count"] != 1 or not pak_identity["user"]:
+                self._offboarding_log("[offboarding][pak] Пользователь не найден однозначно, pak-шаги помечены как warn.")
+                for k in ("pak_clear", "pak_disable", "pak_move"):
+                    set_step(k, "warn")
+                    add_step(pak_audit, k.replace("pak_", ""), "warn")
+            else:
+                pak_user = pak_identity["user"]
+                pak_guid = pak_user.get("guid") or ""
+                pak_dn_before = pak_user.get("dn") or ""
+                pak_audit.update({
+                    "user_found": True,
+                    "guid": pak_guid,
+                    "dn_before": pak_dn_before,
+                    "ou_before": dn_to_ou(pak_dn_before),
+                    "enabled_before": bool(pak_user.get("enabled")),
+                    "snapshot_before": pak_user,
+                })
+
+                pak_clear_attrs = [
+                    "title", "department", "company", "physicalDeliveryOfficeName", "telephoneNumber", "mobile", "mail",
+                    "streetAddress", "l", "st", "postalCode", "postOfficeBox", "manager", "description", "info",
+                ]
+                pak_list_ps = ",".join(f"'{escape_ps_string(x)}'" for x in pak_clear_attrs)
+                pak_clear_cmd = (
+                    "Import-Module ActiveDirectory; "
+                    f"$gid = [Guid]'{escape_ps_string(pak_guid)}'; $failed = @(); $cleared = @(); "
+                    f"foreach ($a in @({pak_list_ps})) {{ try {{ Set-ADUser -Server '{escape_ps_string(pak_identity['server_main'])}' -Identity $gid -Clear $a -ErrorAction Stop; $cleared += $a; }} catch {{ $failed += $a; Write-Output ('__CLEAR_FAIL__:' + $a + ':' + $_.Exception.Message); }} }}; "
+                    "@{ cleared=$cleared; failed=$failed } | ConvertTo-Json -Depth 4"
+                )
+
+                set_step("pak_clear", "running")
+                if ADHELPER_DRYRUN_MODE:
+                    self._offboarding_log(f"[offboarding][pak][clear] DRYRUN: пропуск Set-ADUser для GUID {pak_guid}")
+                    set_step("pak_clear", "simulated")
+                    add_step(pak_audit, "clear", "simulated")
+                else:
+                    proc = run_powershell(pak_clear_cmd, server=pak_identity["server_main"])
+                    self._offboarding_log(f"[offboarding][pak][clear] rc={proc.returncode}")
+                    if proc.stdout.strip():
+                        self._offboarding_log("[offboarding][pak][clear] STDOUT:\n" + proc.stdout.strip())
+                    if proc.stderr.strip():
+                        self._offboarding_log("[offboarding][pak][clear] STDERR:\n" + proc.stderr.strip())
+                    if proc.returncode != 0:
+                        set_step("pak_clear", "fail")
+                        add_step(pak_audit, "clear", "fail", proc)
+                    else:
+                        try:
+                            pak_result, pak_fail_lines = parse_clear_output(proc)
+                            pak_failed_attrs = [str(x) for x in (pak_result.get("failed") or []) if x]
+                        except json.JSONDecodeError as exc:
+                            self._offboarding_log(f"[offboarding][pak][clear] Ошибка разбора JSON: {exc}")
+                            pak_failed_attrs = ["parse_json"]
+                            pak_fail_lines = []
+                        pak_audit["clear_failed_attrs"] = pak_failed_attrs
+                        if pak_failed_attrs:
+                            set_step("pak_clear", "warn")
+                            add_step(pak_audit, "clear", "warn", proc)
+                            self._offboarding_log("[offboarding][pak][clear] Не удалось очистить атрибуты: " + ", ".join(pak_failed_attrs))
+                            for fail_line in pak_fail_lines[:5]:
+                                self._offboarding_log("[offboarding][pak][clear] Причина: " + fail_line)
+                        else:
+                            set_step("pak_clear", "success")
+                            add_step(pak_audit, "clear", "success", proc)
+
+                pak_disable_cmd = (
+                    "Import-Module ActiveDirectory; "
+                    f"Disable-ADAccount -Server '{escape_ps_string(pak_identity['server_main'])}' -Identity '{escape_ps_string(pak_guid)}'; "
+                    f"(Get-ADUser -Server '{escape_ps_string(pak_identity['server_main'])}' -Identity '{escape_ps_string(pak_guid)}' -Properties Enabled).Enabled"
+                )
+                set_step("pak_disable", "running")
+                if ADHELPER_DRYRUN_MODE:
+                    self._offboarding_log(f"[offboarding][pak][disable] DRYRUN: пропуск Disable-ADAccount для GUID {pak_guid}")
+                    set_step("pak_disable", "simulated")
+                    add_step(pak_audit, "disable", "simulated")
+                else:
+                    proc = run_powershell(pak_disable_cmd, server=pak_identity["server_main"])
+                    self._offboarding_log(f"[offboarding][pak][disable] rc={proc.returncode}")
+                    if proc.stdout.strip():
+                        self._offboarding_log("[offboarding][pak][disable] STDOUT:\n" + proc.stdout.strip())
+                    if proc.stderr.strip():
+                        self._offboarding_log("[offboarding][pak][disable] STDERR:\n" + proc.stderr.strip())
+                    enabled_check = (proc.stdout or "").strip().lower()
+                    if proc.returncode != 0 or enabled_check == "true":
+                        set_step("pak_disable", "fail")
+                        add_step(pak_audit, "disable", "fail", proc)
+                    else:
+                        set_step("pak_disable", "success")
+                        add_step(pak_audit, "disable", "success", proc)
+
+                set_step("pak_move", "running")
+                pak_ou_exists = validate_ou_exists(pak_cfg, pak_target_ou)
+                if not pak_ou_exists:
+                    self._offboarding_log(f"[offboarding][pak][move] OU не найден: {pak_target_ou}")
+                    set_step("pak_move", "warn")
+                    add_step(pak_audit, "move", "warn")
+                elif ADHELPER_DRYRUN_MODE:
+                    self._offboarding_log(f"[offboarding][pak][move] DRYRUN: пропуск Move-ADObject в OU {pak_target_ou}")
+                    set_step("pak_move", "simulated")
+                    add_step(pak_audit, "move", "simulated")
+                else:
+                    pak_move_cmd = (
+                        "Import-Module ActiveDirectory; "
+                        f"Move-ADObject -Server '{{srv}}' -Identity '{escape_ps_string(pak_guid)}' -TargetPath '{escape_ps_string(pak_target_ou)}'; "
+                        f"(Get-ADUser -Server '{{srv}}' -Identity '{escape_ps_string(pak_guid)}' -Properties DistinguishedName,Enabled) | "
+                        "Select-Object DistinguishedName,Enabled | ConvertTo-Json -Depth 4"
+                    )
+                    proc = run_powershell(pak_move_cmd.format(srv=escape_ps_string(pak_identity["server_main"])), server=pak_identity["server_main"])
+                    self._offboarding_log(f"[offboarding][pak][move] rc={proc.returncode}")
+                    if proc.stdout.strip():
+                        self._offboarding_log("[offboarding][pak][move] STDOUT:\n" + proc.stdout.strip())
+                    if proc.stderr.strip():
+                        self._offboarding_log("[offboarding][pak][move] STDERR:\n" + proc.stderr.strip())
+                    if proc.returncode != 0 and command_failed_with_8329(proc) and pak_identity["server_pdc"].lower() != pak_identity["server_main"].lower():
+                        self._offboarding_log(f"[offboarding][pak][move] Ошибка 8329/uninstantiated, ретрай на PDC: {pak_identity['server_pdc']}")
+                        proc = run_powershell(pak_move_cmd.format(srv=escape_ps_string(pak_identity["server_pdc"])), server=pak_identity["server_pdc"])
+                        self._offboarding_log(f"[offboarding][pak][move][retry] Сервер: {pak_identity['server_pdc']}, rc={proc.returncode}")
+                    post_data, _ = parse_ps_json(proc.stdout)
+                    post_obj = post_data[0] if post_data else {}
+                    dn_after = str(post_obj.get("DistinguishedName") or "")
+                    if proc.returncode != 0 or pak_target_ou.lower() not in dn_after.lower():
+                        set_step("pak_move", "fail")
+                        add_step(pak_audit, "move", "fail", proc)
+                    else:
+                        set_step("pak_move", "success")
+                        add_step(pak_audit, "move", "success", proc)
+                        pak_audit["dn_after"] = dn_after
+                        pak_audit["ou_after"] = dn_to_ou(dn_after)
+                        pak_audit["enabled_after"] = bool(post_obj.get("Enabled"))
+
+        if ADHELPER_DRYRUN_MODE:
+            omg_audit.setdefault("dn_after", omg_audit.get("dn_before", ""))
+            omg_audit.setdefault("ou_after", omg_audit.get("ou_before", ""))
+            omg_audit.setdefault("enabled_after", omg_audit.get("enabled_before"))
+            pak_audit.setdefault("dn_after", pak_audit.get("dn_before", ""))
+            pak_audit.setdefault("ou_after", pak_audit.get("ou_before", ""))
+            pak_audit.setdefault("enabled_after", pak_audit.get("enabled_before"))
+
+        audit_ok = True
+        try:
+            ensure_config_dir()
+            append_jsonl(OFFBOARDING_LOG_PATH, audit_entry)
+            self._offboarding_log(f"[offboarding][audit] Запись сохранена: {OFFBOARDING_LOG_PATH}")
+        except OSError as exc:
+            audit_ok = False
+            self._offboarding_log(f"[offboarding][audit] Не удалось записать audit log: {exc}")
 
         self._offboarding_log(f"[offboarding] Увольнение завершено для {expected_sam}. DN до: {dn_before}")
         if clear_failed_attrs:
@@ -2993,8 +3298,11 @@ class App(tk.Tk):
                 "Готово",
                 f"Увольнение завершено, но часть полей не очистилась: {failed_list}. Требуется ручная проверка.",
             )
+        elif not audit_ok:
+            messagebox.showinfo("Готово", f"Процедура увольнения завершена для {expected_sam}, но audit log не записан.")
         else:
             messagebox.showinfo("Готово", f"Процедура увольнения завершена для {expected_sam}.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ADHelper")
