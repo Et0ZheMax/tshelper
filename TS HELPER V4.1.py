@@ -664,6 +664,7 @@ class SettingsManager:
             "edit_window_geometry":"", "settings_window_geometry":"", "ad_sync_select_geometry":"", "ip_window_geometry":"",
             # AD creds
             "ad_username":"", "ad_password":"",
+            "adhelper_path":"ADHelper(15).py",
             # Reset password
             "reset_password":"",
             # SSH
@@ -2103,6 +2104,40 @@ class MainWindow:
         pc = pc_name.strip()
         return pc.split("-",1)[1] if "-" in pc else pc
 
+    def open_in_ad(self, user: dict):
+        login = self._extract_login(user.get("pc_name", ""))
+        query = (login or user.get("name", "") or "").strip()
+        if not query:
+            return messagebox.showerror("ADHelper", "Не удалось определить строку поиска для пользователя")
+
+        adhelper_path = self.settings.get_setting("adhelper_path", "").strip()
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = []
+        if adhelper_path:
+            candidates.append(adhelper_path)
+        candidates.extend(["ADHelper(15).py", "ADHelper.py"])
+
+        resolved_path = ""
+        for candidate in candidates:
+            candidate_path = candidate if os.path.isabs(candidate) else os.path.join(script_dir, candidate)
+            if os.path.isfile(candidate_path):
+                resolved_path = candidate_path
+                break
+
+        if not resolved_path:
+            messagebox.showwarning("ADHelper", "Укажите корректный путь к ADHelper в настройках")
+            self.open_settings()
+            return
+
+        cmd = [sys.executable, resolved_path, "--search", query, "--autorun", "--focus-search"]
+        try:
+            if is_windows():
+                subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            else:
+                subprocess.Popen(cmd)
+        except Exception as exc:
+            messagebox.showerror("ADHelper", f"Не удалось запустить ADHelper: {exc}")
+
     def _merge_pc_options(self, main_pc: str, *option_lists):
         main_pc = main_pc or ""
         seen = set()
@@ -2297,6 +2332,21 @@ class MainWindow:
         e_user = ttk.Entry(tab_ad); e_user.insert(0, self.settings.get_setting("ad_username","")); e_user.pack(fill="x")
         ttk.Label(tab_ad, text="Пароль:").pack(pady=4, anchor="w")
         e_pass = ttk.Entry(tab_ad, show="*"); insert_secret(e_pass, "ad_password", ""); e_pass.pack(fill="x")
+        ttk.Label(tab_ad, text="Путь к ADHelper.py:").pack(pady=(10, 4), anchor="w")
+        adhelper_row = ttk.Frame(tab_ad)
+        adhelper_row.pack(fill="x")
+        adhelper_path_var = tk.StringVar(value=self.settings.get_setting("adhelper_path", "ADHelper(15).py"))
+        ttk.Entry(adhelper_row, textvariable=adhelper_path_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            adhelper_row,
+            text="Обзор…",
+            command=lambda: adhelper_path_var.set(
+                filedialog.askopenfilename(
+                    title="Выберите ADHelper",
+                    filetypes=[("Python", "*.py"), ("Все файлы", "*.*")],
+                ) or adhelper_path_var.get()
+            ),
+        ).pack(side="left", padx=(6, 0))
 
         # GLPI
         tab_glpi = ttk.Frame(nb); nb.add(tab_glpi, text="GLPI")
@@ -2426,6 +2476,7 @@ class MainWindow:
             self._apply_idle_timeout_setting(max(0, idle_minutes))
             self.settings.set_setting("ad_username", e_user.get().strip())
             self.settings.set_setting("ad_password", e_pass.get().strip())
+            self.settings.set_setting("adhelper_path", adhelper_path_var.get().strip())
             self.settings.set_setting("reset_password", e_rst.get().strip())
             self.settings.set_setting("ssh_login", e_ssh_login.get().strip())
             self.settings.set_setting("ssh_password", e_ssh_pass.get().strip())
@@ -3262,6 +3313,7 @@ class UserButton(ttk.Frame):
         m.add_command(label="Удаленный помощник", command=self.remote_assistance)
         m.add_command(label="Проводник (C$)", command=self.open_explorer)
         m.add_command(label="Получить IP", command=self.get_ip)
+        m.add_command(label="Открыть в AD", command=self.open_in_ad)
         m.add_command(label="Открыть в GLPI", command=self.open_glpi)
         m.add_separator()
         m.add_command(label="Сброс пароля pak", command=lambda: self.reset_password_ps("pak"))
@@ -3330,6 +3382,10 @@ class UserButton(ttk.Frame):
         url = f"https://inv.pak-cspmz.ru/front/search.php?globalsearch={urllib.parse.quote(last_name)}"
         self._log_action("Открыт профиль в GLPI")
         webbrowser.open(url)
+
+    def open_in_ad(self):
+        self._log_action("Открыт ADHelper")
+        self.app.open_in_ad(self.user)
 
     def get_ip(self):
         def task():
