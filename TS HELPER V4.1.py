@@ -95,14 +95,6 @@ def _import_requests_optional():
     except ImportError:
         return None, "requests не установлен"
 
-
-def _import_requests_optional():
-    try:
-        import requests
-        return requests, None
-    except ImportError:
-        return None, "requests не установлен"
-
 def dpapi_encrypt(s: str) -> str:
     if not DPAPI_AVAILABLE: return s
     blob = win32crypt.CryptProtectData(s.encode('utf-8'), None, None, None, None, 0)
@@ -2129,6 +2121,8 @@ class MainWindow:
             self.open_settings()
             return
 
+        self._log_action(f"[AD] Launch: {resolved_path}, query={query}")
+
         cmd = [sys.executable, resolved_path, "--search", query, "--autorun", "--focus-search"]
         try:
             if is_windows():
@@ -2136,6 +2130,7 @@ class MainWindow:
             else:
                 subprocess.Popen(cmd)
         except Exception as exc:
+            self._log_action(f"[AD] Launch error: {repr(exc)}")
             messagebox.showerror("ADHelper", f"Не удалось запустить ADHelper: {exc}")
 
     def _merge_pc_options(self, main_pc: str, *option_lists):
@@ -2259,19 +2254,6 @@ class MainWindow:
             self.populate_buttons()
             self._close_save_geo(win,"ad_sync_select_geometry")
         ttk.Button(win, text="Добавить выбранных", command=apply_sel).pack(pady=8)
-
-    def glpi_prefix_sync(self):
-        glpi_client = self._make_glpi_client()
-        if not glpi_client:
-            return
-        updated, changed = self._apply_glpi_prefixes(self.users.get_users(), glpi_client, "GLPI Sync")
-        if changed:
-            self.users.users = updated
-            self.users.save()
-            self.populate_buttons()
-            messagebox.showinfo("GLPI", "Префиксы и ПК обновлены по данным GLPI")
-        else:
-            messagebox.showinfo("GLPI", "Изменений нет")
 
     def glpi_prefix_sync(self):
         glpi_client = self._make_glpi_client()
@@ -3540,5 +3522,3 @@ if __name__ == "__main__":
     app_root = tb.Window() if USE_BOOTSTRAP else tk.Tk()
     app = MainWindow(app_root)
     app_root.mainloop()
-    app_root = tk.Tk()
-
