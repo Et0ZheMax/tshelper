@@ -2543,7 +2543,7 @@ class App(tk.Tk):
         return None
 
     def _offboarding_set_step_status(self, step_key: str, status: str):
-        mapping = {"pending": "◻", "running": "⏳", "success": "✅", "fail": "❌", "simulated": "🧪"}
+        mapping = {"pending": "◻", "running": "⏳", "success": "✅", "warn": "⚠️", "fail": "❌", "simulated": "🧪"}
         title = self.offboarding_step_titles.get(step_key, step_key)
         self.offboarding_step_vars[step_key].set(f"{mapping.get(status, '◻')} {title}")
 
@@ -2814,12 +2814,28 @@ class App(tk.Tk):
             "extensionAttribute10", "extensionAttribute11", "extensionAttribute12", "extensionAttribute13", "extensionAttribute14",
             "extensionAttribute15", "division", "section",
         ]
+        clear_failed_attrs: list[str] = []
+        clear_fail_messages: list[str] = []
         clear_list_ps = ",".join(f"'{escape_ps_string(x)}'" for x in clear_attrs)
         clear_cmd = (
             "Import-Module ActiveDirectory; "
-            f"Set-ADUser -Server '{escape_ps_string(server)}' -Identity '{escape_ps_string(guid)}' -Clear @({clear_list_ps}) "
-            f"-GivenName '{escape_ps_string(ad_user.get('givenName') or '')}' -Surname '{escape_ps_string(ad_user.get('sn') or '')}' "
-            f"-DisplayName '{escape_ps_string(ad_user.get('displayName') or '')}'"
+            f"$gid = [Guid]'{escape_ps_string(guid)}'; "
+            "$failed = @(); "
+            "$cleared = @(); "
+            f"foreach ($a in @({clear_list_ps})) {{ "
+            "  try { "
+            f"    Set-ADUser -Server '{escape_ps_string(server)}' -Identity $gid -Clear $a -ErrorAction Stop; "
+            "    $cleared += $a; "
+            "  } catch { "
+            "    $failed += $a; "
+            "    Write-Output ('__CLEAR_FAIL__:' + $a + ':' + $_.Exception.Message); "
+            "  } "
+            "}; "
+            f"Set-ADUser -Server '{escape_ps_string(server)}' -Identity $gid "
+            f"-GivenName '{escape_ps_string(ad_user.get('givenName') or '')}' "
+            f"-Surname '{escape_ps_string(ad_user.get('sn') or '')}' "
+            f"-DisplayName '{escape_ps_string(ad_user.get('displayName') or '')}' -ErrorAction Stop; "
+            "@{ cleared=$cleared; failed=$failed } | ConvertTo-Json -Depth 4"
         )
 
         self._offboarding_set_step_status("clear", "running")
@@ -2836,7 +2852,29 @@ class App(tk.Tk):
             if proc.returncode != 0:
                 self._offboarding_set_step_status("clear", "fail")
                 return
-            self._offboarding_set_step_status("clear", "success")
+            stdout_lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+            json_lines = [line for line in stdout_lines if not line.startswith("__CLEAR_FAIL__:")]
+            clear_fail_messages = [line for line in stdout_lines if line.startswith("__CLEAR_FAIL__:")]
+            try:
+                clear_result = json.loads("\n".join(json_lines)) if json_lines else {}
+            except json.JSONDecodeError as exc:
+                self._offboarding_log(f"[offboarding][clear] Ошибка разбора JSON: {exc}")
+                self._offboarding_set_step_status("clear", "fail")
+                return
+            clear_failed_raw = clear_result.get("failed") or []
+            if isinstance(clear_failed_raw, list):
+                clear_failed_attrs = [str(x) for x in clear_failed_raw if x]
+            elif clear_failed_raw:
+                clear_failed_attrs = [str(clear_failed_raw)]
+            else:
+                clear_failed_attrs = []
+            if clear_failed_attrs:
+                self._offboarding_set_step_status("clear", "warn")
+                self._offboarding_log("[offboarding][clear] Не удалось очистить атрибуты: " + ", ".join(clear_failed_attrs))
+                for fail_line in clear_fail_messages[:5]:
+                    self._offboarding_log("[offboarding][clear] Причина: " + fail_line)
+            else:
+                self._offboarding_set_step_status("clear", "success")
 
         disable_cmd = (
             "Import-Module ActiveDirectory; "
@@ -2894,7 +2932,14 @@ class App(tk.Tk):
             self._offboarding_set_step_status("move", "success")
 
         self._offboarding_log(f"[offboarding] Увольнение завершено для {expected_sam}. DN до: {dn_before}")
-        messagebox.showinfo("Готово", f"Процедура увольнения завершена для {expected_sam}.")
+        if clear_failed_attrs:
+            failed_list = ", ".join(clear_failed_attrs)
+            messagebox.showinfo(
+                "Готово",
+                f"Увольнение завершено, но часть полей не очистилась: {failed_list}. Требуется ручная проверка.",
+            )
+        else:
+            messagebox.showinfo("Готово", f"Процедура увольнения завершена для {expected_sam}.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ADHelper")
