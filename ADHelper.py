@@ -8,7 +8,7 @@ import subprocess
 import re
 import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from typing import Optional, Callable, Any
 
 # ==========================
@@ -33,6 +33,7 @@ DOMAIN_CONFIGS = [
         "ou_dn": "OU=Institute of Synthetic Biology and Genetic Engineering,DC=omg,DC=cspfmba,DC=ru",
         "upn_suffix": "@omg.cspfmba.ru",
         "email_suffix": "@cspfmba.ru",
+        "fired_ou_dn": "OU=Уволенные,OU=Users,OU=csp,DC=omg,DC=cspfmba,DC=ru",
     },
 ]
 
@@ -48,6 +49,8 @@ _POWERSHELL_EXE: Optional[str] = None
 _PREFERRED_DC_CACHE: dict[str, str] = {}
 
 _OU_CACHE: dict[str, list[dict[str, str]]] = {}
+
+ADHELPER_DRYRUN_MODE = (os.environ.get("ADHELPER_DRYRUN") or "").strip() == "1"
 
 ADDRESS_CHOICES = [
     "ул. Щукинская, дом 5, стр.5",
@@ -436,6 +439,31 @@ def parse_ps_json(raw: str) -> tuple[list, str]:
     if isinstance(data, dict):
         return [data], ""
     return [], "Не удалось разобрать ответ PowerShell (неизвестный формат)."
+
+
+def extract_ou_from_dn(distinguished_name: str) -> str:
+    dn = (distinguished_name or "").strip()
+    if not dn:
+        return ""
+    parts = dn.split(",")
+    if len(parts) <= 1:
+        return dn
+    return ",".join(parts[1:]).strip()
+
+
+def short_ou_from_dn(distinguished_name: str) -> str:
+    ou = extract_ou_from_dn(distinguished_name)
+    if not ou:
+        return ""
+    chunks = [item.strip() for item in ou.split(",") if item.strip().upper().startswith("OU=")]
+    if not chunks:
+        return ou
+    return " / ".join(chunk[3:] for chunk in chunks)
+
+
+def command_failed_with_8329(proc: subprocess.CompletedProcess) -> bool:
+    text = ((proc.stderr or "") + "\n" + (proc.stdout or "")).lower()
+    return "8329" in text or "uninstantiated" in text
 
 def translit_gost(text: str) -> str:
     mapping = {
@@ -1463,6 +1491,9 @@ class App(tk.Tk):
         btn_run = ttk.Button(frm_btn, text="Разобрать и создать", command=self.on_run)
         btn_run.pack(side="left")
         ttk.Button(frm_btn, text="Поиск пользователей", command=self._open_search_modal).pack(
+            side="left", padx=6
+        )
+        ttk.Button(frm_btn, text="Увольнение", command=self._open_offboarding_modal).pack(
             side="left", padx=6
         )
 
@@ -2502,6 +2533,368 @@ class App(tk.Tk):
             self.log("DRY RUN завершён. Пользователи фактически не создавались.")
         else:
             self.log("Создание пользователей завершено.")
+
+
+
+    def _offboarding_current_cfg(self) -> Optional[dict]:
+        for cfg in DOMAIN_CONFIGS:
+            if cfg["name"] == "omg-cspfmba":
+                return cfg
+        return None
+
+    def _offboarding_set_step_status(self, step_key: str, status: str):
+        mapping = {"pending": "◻", "running": "⏳", "success": "✅", "fail": "❌", "simulated": "🧪"}
+        title = self.offboarding_step_titles.get(step_key, step_key)
+        self.offboarding_step_vars[step_key].set(f"{mapping.get(status, '◻')} {title}")
+
+    def _offboarding_log(self, text: str):
+        self.offboarding_log_text.configure(state="normal")
+        self.offboarding_log_text.insert("end", text + "\n")
+        self.offboarding_log_text.see("end")
+        self.offboarding_log_text.configure(state="disabled")
+        self.log(text)
+
+    def _open_offboarding_modal(self):
+        cfg = self._offboarding_current_cfg()
+        if not cfg:
+            messagebox.showerror("Ошибка", "Не найдена конфигурация домена omg-cspfmba.")
+            return
+        if not self.domain_vars.get("omg-cspfmba", tk.BooleanVar(value=False)).get():
+            messagebox.showinfo("Ограничение", "Увольнение доступно только для omg.")
+            return
+
+        modal = tk.Toplevel(self)
+        modal.title("Увольнение сотрудника")
+        modal.geometry("1320x780")
+        modal.transient(self)
+        modal.grab_set()
+
+        self.offboarding_cfg = cfg
+        self.offboarding_results = []
+        self.offboarding_selected_user = None
+
+        root = ttk.Frame(modal)
+        root.pack(fill="both", expand=True, padx=10, pady=10)
+        root.columnconfigure(0, weight=3)
+        root.columnconfigure(1, weight=2)
+        root.rowconfigure(1, weight=1)
+
+        left = ttk.LabelFrame(root, text="Поиск и выбор пользователя")
+        left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 8))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(2, weight=1)
+
+        search_frame = ttk.Frame(left)
+        search_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        search_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(search_frame, text="ФИО или логин:").grid(row=0, column=0, sticky="w")
+        self.offboarding_search_var = tk.StringVar()
+        ttk.Entry(search_frame, textvariable=self.offboarding_search_var).grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        ttk.Button(search_frame, text="Найти", command=self._offboarding_search).grid(row=1, column=1, padx=(6, 0))
+
+        columns = ("display", "sam", "upn", "ou")
+        self.offboarding_tree = ttk.Treeview(left, columns=columns, show="headings", height=12)
+        self.offboarding_tree.grid(row=2, column=0, sticky="nsew", padx=8)
+        self.offboarding_tree.heading("display", text="DisplayName")
+        self.offboarding_tree.heading("sam", text="sAMAccountName")
+        self.offboarding_tree.heading("upn", text="UPN")
+        self.offboarding_tree.heading("ou", text="OU")
+        self.offboarding_tree.column("display", width=240)
+        self.offboarding_tree.column("sam", width=160)
+        self.offboarding_tree.column("upn", width=260)
+        self.offboarding_tree.column("ou", width=330)
+        self.offboarding_tree.bind("<<TreeviewSelect>>", self._offboarding_select_user)
+
+        card = ttk.LabelFrame(left, text="Карточка пользователя")
+        card.grid(row=3, column=0, sticky="ew", padx=8, pady=8)
+        card.columnconfigure(1, weight=1)
+
+        self.offboarding_card_vars = {}
+        fields = [
+            ("displayName", "DisplayName"), ("sam", "Sam"), ("upn", "UPN"), ("enabledText", "Статус"),
+            ("dn", "Current DN"), ("ou", "Current OU"), ("mail", "Mail"), ("department", "Department"),
+            ("title", "Title"), ("office", "Office"), ("mobile", "Mobile"),
+        ]
+        for row, (key, title) in enumerate(fields):
+            ttk.Label(card, text=f"{title}:").grid(row=row, column=0, sticky="ne", padx=(4, 6), pady=2)
+            var = tk.StringVar(value="")
+            self.offboarding_card_vars[key] = var
+            ttk.Label(card, textvariable=var, wraplength=560, justify="left").grid(row=row, column=1, sticky="w", pady=2)
+
+        right = ttk.LabelFrame(root, text="Чек-лист шагов")
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+
+        self.offboarding_step_titles = {
+            "identity": "Шаг 1: Проверка и подтверждение личности",
+            "clear": "Шаг 2: Очистка атрибутов (Общие/Адрес/Организация)",
+            "disable": "Шаг 3: Отключение учётной записи",
+            "move": "Шаг 4: Перемещение в OU Уволенные",
+        }
+        self.offboarding_step_vars = {}
+        for idx, step_key in enumerate(("identity", "clear", "disable", "move")):
+            var = tk.StringVar()
+            self.offboarding_step_vars[step_key] = var
+            self._offboarding_set_step_status(step_key, "pending")
+            ttk.Label(right, textvariable=var).grid(row=idx, column=0, sticky="w", padx=8, pady=4)
+
+        log_frame = ttk.LabelFrame(root, text="Лог выполнения")
+        log_frame.grid(row=1, column=1, sticky="nsew", pady=(8, 0))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        self.offboarding_log_text = tk.Text(log_frame, height=18, wrap="word", state="disabled")
+        self.offboarding_log_text.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
+        actions = ttk.Frame(modal)
+        actions.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(actions, text="Проверить план", command=self._offboarding_dry_run).pack(side="left")
+        self.offboarding_execute_btn = ttk.Button(actions, text="Выполнить увольнение", command=self._offboarding_execute, state="disabled")
+        self.offboarding_execute_btn.pack(side="left", padx=6)
+        ttk.Button(actions, text="Отмена/Закрыть", command=modal.destroy).pack(side="right")
+
+    def _offboarding_search(self):
+        query = (self.offboarding_search_var.get() or "").strip()
+        if not query:
+            messagebox.showerror("Ошибка", "Введите ФИО или логин для поиска.")
+            return
+        cfg = self.offboarding_cfg
+        server = cfg.get("server") or get_preferred_dc(cfg)
+        q_ldap = escape_ldap_filter(query)
+        ldap_filter = f"(|(displayName=*{q_ldap}*)(samAccountName=*{q_ldap}*)(userPrincipalName=*{q_ldap}*))"
+        ps = (
+            "Import-Module ActiveDirectory; "
+            f"$users = Get-ADUser -Server '{escape_ps_string(server)}' -LDAPFilter '{escape_ps_string(ldap_filter)}' "
+            f"-SearchBase '{escape_ps_string(cfg.get('search_base') or '')}' -ResultSetSize 100 "
+            "-Properties DisplayName,SamAccountName,UserPrincipalName,DistinguishedName,Enabled,mail,department,title,physicalDeliveryOfficeName,mobile,ObjectGUID; "
+            "$users | Select-Object "
+            "@{Name='displayName';Expression={$_.DisplayName}},@{Name='sam';Expression={$_.SamAccountName}},"
+            "@{Name='upn';Expression={$_.UserPrincipalName}},@{Name='dn';Expression={$_.DistinguishedName}},"
+            "@{Name='enabled';Expression={$_.Enabled}},@{Name='mail';Expression={$_.mail}},"
+            "@{Name='department';Expression={$_.department}},@{Name='title';Expression={$_.title}},"
+            "@{Name='office';Expression={$_.physicalDeliveryOfficeName}},@{Name='mobile';Expression={$_.mobile}},"
+            "@{Name='guid';Expression={$_.ObjectGUID.ToString()}} | ConvertTo-Json -Depth 4"
+        )
+        proc = run_powershell(ps, server=server)
+        if proc.returncode != 0:
+            self._offboarding_log(f"[offboarding] Ошибка поиска: {(proc.stderr or '').strip()}")
+            messagebox.showerror("Поиск", "Не удалось выполнить поиск пользователя в omg.")
+            return
+        results, err = parse_ps_json(proc.stdout)
+        if err:
+            self._offboarding_log(f"[offboarding] {err}")
+            messagebox.showerror("Поиск", err)
+            return
+        self.offboarding_results = results
+        for item in self.offboarding_tree.get_children():
+            self.offboarding_tree.delete(item)
+        for idx, user in enumerate(results):
+            self.offboarding_tree.insert("", "end", iid=str(idx), values=(
+                user.get("displayName") or "", user.get("sam") or "", user.get("upn") or "", short_ou_from_dn(user.get("dn") or "")
+            ))
+        self._offboarding_log(f"[offboarding] Найдено пользователей: {len(results)}")
+        if not results:
+            messagebox.showinfo("Поиск", "Пользователи не найдены.")
+
+    def _offboarding_select_user(self, _event=None):
+        sel = self.offboarding_tree.selection()
+        if len(sel) != 1:
+            self.offboarding_selected_user = None
+            self.offboarding_execute_btn.configure(state="disabled")
+            return
+        idx = int(sel[0])
+        if idx >= len(self.offboarding_results):
+            self.offboarding_selected_user = None
+            self.offboarding_execute_btn.configure(state="disabled")
+            return
+        user = self.offboarding_results[idx]
+        user["ou"] = extract_ou_from_dn(user.get("dn") or "")
+        user["enabledText"] = "Enabled" if bool(user.get("enabled")) else "Disabled"
+        self.offboarding_selected_user = user
+        for key, var in self.offboarding_card_vars.items():
+            var.set(user.get(key) or "")
+        self.offboarding_execute_btn.configure(state="normal")
+
+    def _offboarding_dry_run(self):
+        user = self.offboarding_selected_user
+        cfg = self._offboarding_current_cfg()
+        if not user or not cfg:
+            messagebox.showerror("Ошибка", "Выберите одного пользователя для проверки плана.")
+            return
+        target_ou = cfg.get("fired_ou_dn") or ""
+        if not validate_ou_exists(cfg, target_ou):
+            self._offboarding_log(f"[offboarding] Целевой OU не найден: {target_ou}")
+            messagebox.showerror("Ошибка", "Целевой OU Уволенные не найден в AD.")
+            return
+        self._offboarding_log("[offboarding] План действий:")
+        self._offboarding_log(f"  Пользователь: {user.get('displayName')} ({user.get('sam')})")
+        self._offboarding_log(f"  Текущий OU: {user.get('ou')}")
+        self._offboarding_log(f"  Целевой OU: {target_ou}")
+        self._offboarding_log("  Будут очищены атрибуты Общие/Адрес/Организация из безопасного списка.")
+
+    def _offboarding_execute(self):
+        cfg = self._offboarding_current_cfg()
+        if not cfg or cfg.get("name") != "omg-cspfmba":
+            messagebox.showerror("Ограничение", "Увольнение доступно только для omg.")
+            return
+        user = self.offboarding_selected_user
+        if not user:
+            messagebox.showerror("Ошибка", "Выберите ровно одного пользователя.")
+            return
+
+        target_ou = cfg.get("fired_ou_dn") or ""
+        if not validate_ou_exists(cfg, target_ou):
+            messagebox.showerror("Ошибка", f"Целевой OU не существует: {target_ou}")
+            self._offboarding_log(f"[offboarding] OU не найден: {target_ou}")
+            return
+
+        confirm_text = (
+            f"DisplayName: {user.get('displayName')}\n"
+            f"Sam: {user.get('sam')}\n"
+            f"UPN: {user.get('upn')}\n"
+            f"Текущий OU: {user.get('ou')}\n"
+            f"Целевой OU: {target_ou}\n\n"
+            "Изменения необратимы."
+        )
+        if not messagebox.askyesno("Подтверждение увольнения", confirm_text):
+            self._offboarding_log("[offboarding] Операция отменена пользователем на этапе подтверждения.")
+            return
+
+        expected_sam = (user.get("sam") or "").strip()
+        typed_sam = simpledialog.askstring("Подтверждение", "Введите логин для подтверждения (samAccountName):", parent=self)
+        if (typed_sam or "").strip().lower() != expected_sam.lower():
+            messagebox.showerror("Ошибка", "Логин подтверждения не совпадает. Операция отменена.")
+            self._offboarding_log("[offboarding] Неверный логин подтверждения, выполнение остановлено.")
+            return
+
+        for step_key in ("identity", "clear", "disable", "move"):
+            self._offboarding_set_step_status(step_key, "pending")
+
+        server = cfg.get("server") or get_preferred_dc(cfg)
+        pdc = get_preferred_dc(cfg)
+        self._offboarding_log(f"[offboarding] Основной сервер: {server}; PDC: {pdc}")
+        sam_ps = escape_ps_string(expected_sam)
+        identity_cmd = (
+            "Import-Module ActiveDirectory; "
+            f"$u = Get-ADUser -Server '{escape_ps_string(server)}' -Identity '{sam_ps}' "
+            "-Properties ObjectGUID,DistinguishedName,Enabled,GivenName,Surname,DisplayName,mail,department,title,physicalDeliveryOfficeName,mobile; "
+            "$u | Select-Object @{Name='guid';Expression={$_.ObjectGUID.ToString()}},@{Name='dn';Expression={$_.DistinguishedName}},"
+            "@{Name='enabled';Expression={$_.Enabled}},@{Name='givenName';Expression={$_.GivenName}},"
+            "@{Name='sn';Expression={$_.Surname}},@{Name='displayName';Expression={$_.DisplayName}} | ConvertTo-Json -Depth 4"
+        )
+
+        self._offboarding_set_step_status("identity", "running")
+        proc = run_powershell(identity_cmd, server=server)
+        self._offboarding_log(f"[offboarding][identity] rc={proc.returncode}")
+        if proc.stdout.strip():
+            self._offboarding_log("[offboarding][identity] STDOUT:\n" + proc.stdout.strip())
+        if proc.stderr.strip():
+            self._offboarding_log("[offboarding][identity] STDERR:\n" + proc.stderr.strip())
+        if proc.returncode != 0:
+            self._offboarding_set_step_status("identity", "fail")
+            messagebox.showerror("Ошибка", "Не удалось получить пользователя для увольнения.")
+            return
+        data, err = parse_ps_json(proc.stdout)
+        if err or not data:
+            self._offboarding_set_step_status("identity", "fail")
+            self._offboarding_log(f"[offboarding][identity] {err or 'Пользователь не найден.'}")
+            return
+
+        ad_user = data[0]
+        guid = ad_user.get("guid") or ""
+        dn_before = ad_user.get("dn") or ""
+        self._offboarding_set_step_status("identity", "success")
+
+        clear_attrs = [
+            "title", "department", "company", "physicalDeliveryOfficeName", "telephoneNumber", "mobile", "mail", "streetAddress",
+            "l", "st", "postalCode", "postOfficeBox", "co", "countryCode", "manager", "description", "info",
+            "facsimileTelephoneNumber", "homePhone", "ipPhone", "pager", "wWWHomePage", "otherTelephone", "otherMobile",
+            "otherHomePhone", "otherPager", "extensionAttribute1", "extensionAttribute2", "extensionAttribute3", "extensionAttribute4",
+            "extensionAttribute5", "extensionAttribute6", "extensionAttribute7", "extensionAttribute8", "extensionAttribute9",
+            "extensionAttribute10", "extensionAttribute11", "extensionAttribute12", "extensionAttribute13", "extensionAttribute14",
+            "extensionAttribute15", "division", "section",
+        ]
+        clear_list_ps = ",".join(f"'{escape_ps_string(x)}'" for x in clear_attrs)
+        clear_cmd = (
+            "Import-Module ActiveDirectory; "
+            f"Set-ADUser -Server '{escape_ps_string(server)}' -Identity '{escape_ps_string(guid)}' -Clear @({clear_list_ps}) "
+            f"-GivenName '{escape_ps_string(ad_user.get('givenName') or '')}' -Surname '{escape_ps_string(ad_user.get('sn') or '')}' "
+            f"-DisplayName '{escape_ps_string(ad_user.get('displayName') or '')}'"
+        )
+
+        self._offboarding_set_step_status("clear", "running")
+        if ADHELPER_DRYRUN_MODE:
+            self._offboarding_log(f"[offboarding][clear] DRYRUN: пропуск Set-ADUser для GUID {guid}")
+            self._offboarding_set_step_status("clear", "simulated")
+        else:
+            proc = run_powershell(clear_cmd, server=server)
+            self._offboarding_log(f"[offboarding][clear] rc={proc.returncode}")
+            if proc.stdout.strip():
+                self._offboarding_log("[offboarding][clear] STDOUT:\n" + proc.stdout.strip())
+            if proc.stderr.strip():
+                self._offboarding_log("[offboarding][clear] STDERR:\n" + proc.stderr.strip())
+            if proc.returncode != 0:
+                self._offboarding_set_step_status("clear", "fail")
+                return
+            self._offboarding_set_step_status("clear", "success")
+
+        disable_cmd = (
+            "Import-Module ActiveDirectory; "
+            f"Disable-ADAccount -Server '{escape_ps_string(server)}' -Identity '{escape_ps_string(guid)}'; "
+            f"(Get-ADUser -Server '{escape_ps_string(server)}' -Identity '{escape_ps_string(guid)}' -Properties Enabled).Enabled"
+        )
+        self._offboarding_set_step_status("disable", "running")
+        if ADHELPER_DRYRUN_MODE:
+            self._offboarding_log(f"[offboarding][disable] DRYRUN: пропуск Disable-ADAccount для GUID {guid}")
+            self._offboarding_set_step_status("disable", "simulated")
+        else:
+            proc = run_powershell(disable_cmd, server=server)
+            self._offboarding_log(f"[offboarding][disable] rc={proc.returncode}")
+            if proc.stdout.strip():
+                self._offboarding_log("[offboarding][disable] STDOUT:\n" + proc.stdout.strip())
+            if proc.stderr.strip():
+                self._offboarding_log("[offboarding][disable] STDERR:\n" + proc.stderr.strip())
+            enabled_check = (proc.stdout or "").strip().lower()
+            if proc.returncode != 0 or enabled_check == "true":
+                self._offboarding_set_step_status("disable", "fail")
+                return
+            self._offboarding_set_step_status("disable", "success")
+
+        move_cmd = (
+            "Import-Module ActiveDirectory; "
+            f"Move-ADObject -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -TargetPath '{escape_ps_string(target_ou)}'; "
+            f"(Get-ADUser -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -Properties DistinguishedName).DistinguishedName"
+        )
+        self._offboarding_set_step_status("move", "running")
+        if ADHELPER_DRYRUN_MODE:
+            self._offboarding_log(f"[offboarding][move] DRYRUN: пропуск Move-ADObject в OU {target_ou}")
+            self._offboarding_set_step_status("move", "simulated")
+        else:
+            proc = run_powershell(move_cmd.format(srv=escape_ps_string(server)), server=server)
+            self._offboarding_log(f"[offboarding][move] rc={proc.returncode}")
+            if proc.stdout.strip():
+                self._offboarding_log("[offboarding][move] STDOUT:\n" + proc.stdout.strip())
+            if proc.stderr.strip():
+                self._offboarding_log("[offboarding][move] STDERR:\n" + proc.stderr.strip())
+
+            if proc.returncode != 0 and command_failed_with_8329(proc):
+                if pdc.lower() != server.lower():
+                    self._offboarding_log(f"[offboarding][move] Ошибка 8329/uninstantiated, ретрай на PDC: {pdc}")
+                    proc = run_powershell(move_cmd.format(srv=escape_ps_string(pdc)), server=pdc)
+                    self._offboarding_log(f"[offboarding][move][retry] Сервер: {pdc}, rc={proc.returncode}")
+                    if proc.stdout.strip():
+                        self._offboarding_log("[offboarding][move][retry] STDOUT:\n" + proc.stdout.strip())
+                    if proc.stderr.strip():
+                        self._offboarding_log("[offboarding][move][retry] STDERR:\n" + proc.stderr.strip())
+
+            dn_after = (proc.stdout or "").strip()
+            if proc.returncode != 0 or target_ou.lower() not in dn_after.lower():
+                self._offboarding_set_step_status("move", "fail")
+                return
+            self._offboarding_set_step_status("move", "success")
+
+        self._offboarding_log(f"[offboarding] Увольнение завершено для {expected_sam}. DN до: {dn_before}")
+        messagebox.showinfo("Готово", f"Процедура увольнения завершена для {expected_sam}.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ADHelper")
