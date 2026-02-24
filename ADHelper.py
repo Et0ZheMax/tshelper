@@ -2807,7 +2807,7 @@ class App(tk.Tk):
 
         clear_attrs = [
             "title", "department", "company", "physicalDeliveryOfficeName", "telephoneNumber", "mobile", "mail", "streetAddress",
-            "l", "st", "postalCode", "postOfficeBox", "co", "countryCode", "manager", "description", "info",
+            "l", "st", "postalCode", "postOfficeBox", "co", "manager", "description", "info",
             "facsimileTelephoneNumber", "homePhone", "ipPhone", "pager", "wWWHomePage", "otherTelephone", "otherMobile",
             "otherHomePhone", "otherPager", "extensionAttribute1", "extensionAttribute2", "extensionAttribute3", "extensionAttribute4",
             "extensionAttribute5", "extensionAttribute6", "extensionAttribute7", "extensionAttribute8", "extensionAttribute9",
