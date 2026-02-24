@@ -28,7 +28,7 @@ DOMAIN_CONFIGS = [
     {
         "name": "omg-cspfmba",
         "label": "Создавать в omg.cspfmba",
-        "server": "DC23.omg.cspfmba.ru",
+        "server": "DC24.omg.cspfmba.ru",
         "search_base": "DC=omg,DC=cspfmba,DC=ru",
         "ou_dn": "OU=Institute of Synthetic Biology and Genetic Engineering,DC=omg,DC=cspfmba,DC=ru",
         "upn_suffix": "@omg.cspfmba.ru",
