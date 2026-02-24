@@ -1,10 +1,12 @@
 import base64
 import ctypes
 from ctypes import wintypes
+import argparse
 import json
 import os
 import subprocess
 import re
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional, Callable, Any
@@ -1641,6 +1643,15 @@ class App(tk.Tk):
         ttk.Button(btn_frame, text="Сохранить", command=save_and_close).pack(side="left")
         ttk.Button(btn_frame, text="Отмена", command=modal.destroy).pack(side="left", padx=5)
 
+    def open_search(self, query: str, autorun: bool = True):
+        modal = self._open_search_modal()
+        self.search_query_var.set((query or "").strip())
+        if getattr(self, "_search_entry", None):
+            self._search_entry.focus_set()
+        if autorun and (query or "").strip():
+            modal.after(50, lambda: self._run_search(modal))
+        return modal
+
     def _open_search_modal(self):
         modal = tk.Toplevel(self)
         modal.title("Поиск пользователей в AD")
@@ -1774,7 +1785,10 @@ class App(tk.Tk):
         )
         self.btn_save_search.grid(row=13, column=1, sticky="w", pady=(6, 0))
 
+        self._search_modal = modal
+        self._search_entry = entry
         entry.focus_set()
+        return modal
 
     def _run_search(self, modal):
         query = self.search_query_var.get().strip()
@@ -2490,5 +2504,15 @@ class App(tk.Tk):
             self.log("Создание пользователей завершено.")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="ADHelper")
+    parser.add_argument("--search", dest="search", default="", help="Строка поиска")
+    parser.add_argument("--autorun", dest="autorun", action="store_true", help="Автозапуск поиска")
+    parser.add_argument("--focus-search", dest="focus_search", action="store_true", help="Фокус на поле поиска")
+    args = parser.parse_args(sys.argv[1:])
+
     app = App()
+    if args.search:
+        app.after(0, lambda q=args.search, ar=args.autorun: app.open_search(q, autorun=ar))
+        if args.focus_search:
+            app.after(80, lambda: getattr(app, "_search_entry", None) and app._search_entry.focus_set())
     app.mainloop()
