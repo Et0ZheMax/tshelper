@@ -1,4 +1,4 @@
-# TS HELP AD — v4.1 (all-in-one + CallWatcher)
+# TS HELP AD — v5.0 (all-in-one + CallWatcher)
 # Требуется: Python 3.9+, Windows
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
@@ -9,7 +9,7 @@ from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
 
 # --- Версия приложения ---
-VERSION = "v4.1"
+VERSION = "v5.0"
 
 # Цвета статусов (иконка в тексте)
 STATUS_COLORS_DEFAULT = {
