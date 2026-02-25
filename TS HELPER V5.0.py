@@ -1105,6 +1105,9 @@ class MainWindow:
         self.users = UserManager(USERS_FILE)
         self.executor = ThreadPoolExecutor(max_workers=24)
         self.buttons = {}
+        self.user_widgets = {}
+        self.orphan_widgets = []
+        self.empty_state_label = None
         self.search_job = None
         self.ping_generation = 0
 
@@ -1893,6 +1896,18 @@ class MainWindow:
         else:
             messagebox.showinfo("Пользователь", "Пользователь не найден в списке")
 
+    def rebind_user_widget_key(self, old_pc: str, new_pc: str, widget=None):
+        """Обновляем ключ кэша карточек при смене основного имени ПК."""
+        if not old_pc or not new_pc or old_pc == new_pc:
+            return
+        target = widget or self.user_widgets.get(old_pc)
+        if target and self.user_widgets.get(old_pc) is target:
+            self.user_widgets.pop(old_pc, None)
+            self.user_widgets[new_pc] = target
+        if self.buttons.get(old_pc) is target:
+            self.buttons.pop(old_pc, None)
+            self.buttons[new_pc] = target
+
     def _get_filtered_users(self, text=None):
         if text is None:
             text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
@@ -1906,17 +1921,31 @@ class MainWindow:
             or text in str(u.get("ext", "")).lower()
         ]
 
-    def populate_buttons(self, items=None, show_empty_state=False, show_status=False):
-        for w in self.inner.winfo_children(): w.destroy()
-        if items is None:
-            search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
-            all_users = self._get_filtered_users(search_text)
-            show_empty_state = bool(search_text) and not all_users
-            show_status = len(search_text) >= 3
-        else:
-            all_users = items
+    def _sync_user_widgets(self):
+        users = self.users.get_users()
+        users_by_pc = {u.get("pc_name", ""): u for u in users if u.get("pc_name")}
 
-        # 1) Активные звонки вверху (сортируем по времени убыв.)
+        # удаляем карточки, которых больше нет в списке пользователей
+        for pc_name in list(self.user_widgets.keys()):
+            if pc_name not in users_by_pc:
+                widget = self.user_widgets.pop(pc_name)
+                widget.destroy()
+
+        # создаём недостающие и обновляем данные существующих карточек
+        for pc_name, user in users_by_pc.items():
+            widget = self.user_widgets.get(pc_name)
+            if widget is None:
+                widget = UserButton(self.inner, user, app=self, style_name="User.TButton", caller=None, show_status=False)
+                self.user_widgets[pc_name] = widget
+            else:
+                widget.user = user
+
+    def get_visible_users(self, search_text: str):
+        all_users = self.users.get_users()
+        users_by_pc = {u.get("pc_name", ""): u for u in all_users if u.get("pc_name")}
+        filtered_users = self._get_filtered_users(search_text)
+        filtered_sorted = sorted(filtered_users, key=lambda u: locale.strxfrm(u["name"]))
+
         with self.calls_lock:
             now = time.time()
             self.active_calls = [c for c in self.active_calls if now - c["ts"] < self.calls_ttl]
@@ -1924,82 +1953,116 @@ class MainWindow:
 
         caller_by_pc = {}
         orphan_calls = []
+        pinned_users = []
+        pinned_seen = set()
+
         for call in callers:
             user = call.get("user")
-            if not user and call.get("name"):
+            pc_name = user.get("pc_name") if user else None
+            mapped_user = users_by_pc.get(pc_name) if pc_name else None
+
+            if not mapped_user and (call.get("name") or call.get("num")):
                 matched_user = self._match_user_by_caller(call.get("name", ""), call.get("num", ""))
                 if matched_user:
                     call["user"] = matched_user
-                    user = matched_user
-            pc_name = user.get("pc_name") if user else None
-            if pc_name:
-                caller_by_pc[pc_name] = call
+                    mapped_user = users_by_pc.get(matched_user.get("pc_name"))
+
+            if mapped_user:
+                pc_name = mapped_user.get("pc_name")
+                if pc_name:
+                    caller_by_pc[pc_name] = call
+                    if pc_name not in pinned_seen:
+                        pinned_seen.add(pc_name)
+                        pinned_users.append(mapped_user)
             else:
                 orphan_calls.append(call)
 
-        self.buttons = {}
-        cols = self._compute_cols()
-        r=c=0
+        ordered_users = list(pinned_users)
+        for user in filtered_sorted:
+            if user.get("pc_name") not in pinned_seen:
+                ordered_users.append(user)
 
-        # 2) Пользователи (отсортированы по ФИО)
-        items_sorted = sorted(all_users, key=lambda u: locale.strxfrm(u["name"]))
-        if show_empty_state and not items_sorted:
-            ttk.Label(
+        return ordered_users, filtered_sorted, caller_by_pc, orphan_calls
+
+    def apply_call_state(self, caller_by_pc: dict):
+        for pc_name, widget in self.user_widgets.items():
+            widget.set_caller(caller_by_pc.get(pc_name))
+
+    def render_grid(self, ordered_users, orphan_calls, show_empty_state=False):
+        for widget in self.user_widgets.values():
+            widget.grid_remove()
+        for widget in self.orphan_widgets:
+            widget.destroy()
+        self.orphan_widgets = []
+        if self.empty_state_label:
+            self.empty_state_label.destroy()
+            self.empty_state_label = None
+
+        cols = self._compute_cols()
+        row = col = 0
+        self.buttons = {}
+
+        if show_empty_state and not ordered_users:
+            self.empty_state_label = ttk.Label(
                 self.inner,
                 text="Ничего не найдено. Попробуйте изменить запрос.",
                 font=("Segoe UI", 12, "bold")
-            ).grid(row=0, column=0, padx=16, pady=16, sticky="n")
-            self.count_lbl.config(text="Найдено аккаунтов: 0")
+            )
+            self.empty_state_label.grid(row=0, column=0, padx=16, pady=16, sticky="n")
             self.inner.grid_columnconfigure(0, weight=1)
-            self._update_scrollregion()
-            return
 
-        # приоритет звонящих пользователей — сначала по порядку звонков, потом остальные
-        prioritized = []
-        seen_pcs = set()
-        for call in callers:
-            user = call.get("user")
-            pc = user.get("pc_name") if user else None
-            if pc and pc not in seen_pcs:
-                seen_pcs.add(pc)
-                prioritized.append(pc)
-        ordered_users = []
-        for pc in prioritized:
-            u = next((item for item in items_sorted if item.get("pc_name") == pc), None)
-            if u:
-                ordered_users.append(u)
-        for u in items_sorted:
-            if u.get("pc_name") not in seen_pcs:
-                ordered_users.append(u)
-
-        for u in ordered_users:
-            caller = caller_by_pc.get(u.get("pc_name"))
-            btn = UserButton(self.inner, u, app=self, style_name="User.TButton", caller=caller, show_status=show_status)
-            btn.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
-            self.buttons[u["pc_name"]] = btn
-            c += 1
-            if c >= cols: c = 0; r += 1
+        for user in ordered_users:
+            widget = self.user_widgets.get(user.get("pc_name"))
+            if not widget:
+                continue
+            widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            self.buttons[user["pc_name"]] = widget
+            col += 1
+            if col >= cols:
+                col = 0
+                row += 1
 
         # если звонок не удалось сопоставить с пользователем — показываем отдельной карточкой
         for call in orphan_calls:
-            b = tk.Button(
+            btn = tk.Button(
                 self.inner,
                 text=f"📞 {call['num'] or 'unknown'}\n{('(' + call['name'] + ')') if call['name'] else ''}\n→ {call['ext']}",
-                bg=self.caller_bg, fg=self.caller_fg, activebackground=self.caller_bg, activeforeground=self.caller_fg,
-                relief="ridge", bd=2, justify="center", wraplength=180
+                bg=self.caller_bg,
+                fg=self.caller_fg,
+                activebackground=self.caller_bg,
+                activeforeground=self.caller_fg,
+                relief="ridge",
+                bd=2,
+                justify="center",
+                wraplength=180,
             )
-            b.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
-            c += 1
-            if c >= cols: c = 0; r += 1
+            btn.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            self.orphan_widgets.append(btn)
+            col += 1
+            if col >= cols:
+                col = 0
+                row += 1
 
-        self.count_lbl.config(text=f"Найдено аккаунтов: {len(items_sorted)}")
-
-        cols = self._compute_cols()
-        # растянуть колонки – кнопки займут всю ширину, «зазора» не останется
         for i in range(cols):
             self.inner.grid_columnconfigure(i, weight=1)
-
         self._update_scrollregion()
+
+    def populate_buttons(self, items=None, show_empty_state=False, show_status=False, search_text=None):
+        if search_text is None:
+            search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+        self._sync_user_widgets()
+        ordered_users, filtered_sorted, caller_by_pc, orphan_calls = self.get_visible_users(search_text)
+
+        # статусы обновляем у всех карточек, но иконки показываем только в режиме поиска
+        for widget in self.user_widgets.values():
+            widget.show_status = show_status
+            widget.set_status(widget.status_key)
+
+        self.apply_call_state(caller_by_pc)
+        show_empty = bool(search_text) and not filtered_sorted
+        self.render_grid(ordered_users, orphan_calls, show_empty_state=show_empty)
+        self.count_lbl.config(text=f"Найдено аккаунтов: {len(filtered_sorted)}")
+        return filtered_sorted
 
     def refresh_current_view(self):
         if not getattr(self, "search_entry", None):
@@ -2015,10 +2078,8 @@ class MainWindow:
 
     def _do_search(self):
         text = self.search_entry.get().lower().strip()
-        filtered = self._get_filtered_users(text)
-        show_empty_state = bool(text) and not filtered
         show_status = len(text) >= 3
-        self.populate_buttons(filtered, show_empty_state=show_empty_state, show_status=show_status)
+        filtered = self.populate_buttons(show_status=show_status, search_text=text)
         if show_status:
             self.ping_generation += 1
             gen = self.ping_generation
@@ -2082,7 +2143,28 @@ class MainWindow:
         def save():
             n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.update_user(user["pc_name"], {"name":n,"pc_name":p,"ext":ext}); self.refresh_current_view(); self._close_save_geo(win,"edit_window_geometry")
+
+            old_pc = user.get("pc_name", "")
+            new_user = {
+                "name": n,
+                "pc_name": p,
+                "ext": ext,
+                "pc_options": user.get("pc_options", []),
+            }
+            self.users.update_user(old_pc, new_user)
+
+            # При переименовании основного ПК переносим ключ у существующего виджета, без пересоздания.
+            if old_pc != p:
+                self.rebind_user_widget_key(old_pc, p)
+
+            widget = self.user_widgets.get(p)
+            if widget:
+                widget.user = new_user
+                widget.set_status(widget.status_key)
+
+            user.update(new_user)
+            self.refresh_current_view()
+            self._close_save_geo(win,"edit_window_geometry")
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def delete_user_from_button(self, user):
@@ -3074,7 +3156,7 @@ class MainWindow:
                                     "user": matched_user,
                                     "who_key": who_key,
                                 })
-                            self.master.after(0, self.populate_buttons)
+                            self.master.after(0, self.refresh_current_view)
 
                             # 2) всплывашка
                             if popup_on:
@@ -3096,7 +3178,7 @@ class MainWindow:
                     log_call(f"Звонок завершён на {c.get('ext')}: {who}, длительность ~{duration} c")
 
                 if ended_calls:
-                    self.master.after(0, self.populate_buttons)
+                    self.master.after(0, self.refresh_current_view)
 
             except Exception as e:
                 log_message(f"CallWatcher error: {e}")
@@ -3158,6 +3240,13 @@ class UserButton(ttk.Frame):
     def set_status(self, status_key: str):
         """Запоминаем статус и перерисовываем текст/стиль."""
         self.status_key = status_key
+        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
+        self.btn.config(text=self._compose_text(pc_label))
+        self._apply_caller_style()
+
+    def set_caller(self, caller):
+        """Переключает карточку в режим звонка или обратно без пересоздания виджета."""
+        self.caller_info = caller
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
@@ -3322,6 +3411,7 @@ class UserButton(ttk.Frame):
 
         self.app.users.update_user(old_pc, new_user)
         self.user.update(new_user)
+        self.app.rebind_user_widget_key(old_pc, pc, self)
         self.app.refresh_current_view()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
 
