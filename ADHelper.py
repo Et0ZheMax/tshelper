@@ -26,6 +26,7 @@ DOMAIN_CONFIGS = [
         "ou_dn": "OU=omg,OU=csp,OU=Users,OU=csp,DC=pak-cspmz,DC=ru",
         "upn_suffix": "@pak-cspmz.ru",
         "email_suffix": "@cspfmba.ru",
+        "fired_ou_dn": "OU=Уволенные,OU=Users,OU=csp,DC=pak-cspmz,DC=ru",
     },
     {
         "name": "omg-cspfmba",
@@ -45,6 +46,8 @@ CONFIG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), 
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 OU_MAP_PATH = os.path.join(CONFIG_DIR, "ou_map.json")
 OFFBOARDING_LOG_PATH = os.path.join(CONFIG_DIR, "offboarding_log.jsonl")
+OFFBOARDING_LOG_PRETTY_PATH = os.path.join(CONFIG_DIR, "offboarding_log_pretty.json")
+OFFBOARDING_PRETTY_MAX_ENTRIES = 300
 CONFIG_PASSWORD_KEY = "password_token"
 CONFIG_GEOMETRY_KEY = "window_geometry"
 
@@ -239,6 +242,27 @@ def append_jsonl(path: str, obj: dict) -> None:
             os.fsync(handle.fileno())
         except OSError:
             pass
+
+
+def rewrite_offboarding_pretty_log(max_entries: int = OFFBOARDING_PRETTY_MAX_ENTRIES) -> int:
+    if not os.path.exists(OFFBOARDING_LOG_PATH):
+        return 0
+    parsed_entries = []
+    skipped_count = 0
+    with open(OFFBOARDING_LOG_PATH, "r", encoding="utf-8") as handle:
+        for line in handle:
+            raw_line = (line or "").strip()
+            if not raw_line:
+                continue
+            try:
+                parsed_entries.append(json.loads(raw_line))
+            except json.JSONDecodeError:
+                skipped_count += 1
+    if max_entries > 0 and len(parsed_entries) > max_entries:
+        parsed_entries = parsed_entries[-max_entries:]
+    with open(OFFBOARDING_LOG_PRETTY_PATH, "w", encoding="utf-8") as handle:
+        json.dump(parsed_entries, handle, ensure_ascii=False, indent=2)
+    return skipped_count
 
 
 def normalize_text(value: str) -> str:
@@ -489,6 +513,12 @@ def short_ou_from_dn(distinguished_name: str) -> str:
     if not chunks:
         return ou
     return " / ".join(chunk[3:] for chunk in chunks)
+
+
+def is_fired_user(distinguished_name: str, fired_ou_dn: str) -> bool:
+    ou_part = extract_ou_from_dn(distinguished_name).strip().lower()
+    fired_ou = (fired_ou_dn or "").strip().lower()
+    return bool(ou_part and fired_ou and ou_part.endswith(fired_ou))
 
 
 def command_failed_with_8329(proc: subprocess.CompletedProcess) -> bool:
@@ -867,6 +897,7 @@ def search_users_in_domain(
         "postalCode",
         "c",
         "description",
+        "DistinguishedName",
     ]
     extra_props = ["division", "section", "otpMobile"] if domain_name == "omg-cspfmba" else []
     props_arg = ",".join(base_props + extra_props)
@@ -887,6 +918,7 @@ def search_users_in_domain(
         "    displayName = $display",
         "    sam = $_.SamAccountName",
         "    upn = $_.UserPrincipalName",
+        "    dn = $_.DistinguishedName",
         "    telephoneNumber = $_.telephoneNumber",
         "    mobile = $_.mobile",
         "    otpMobile = $_.otpMobile",
@@ -1726,6 +1758,7 @@ class App(tk.Tk):
         self.search_query_var = tk.StringVar()
         self.search_result_count_var = tk.StringVar(value="Найдено: 0")
         self.search_selected_label_var = tk.StringVar(value="Пользователь не выбран")
+        self.search_show_fired_var = tk.BooleanVar(value=False)
 
         self.search_title_var = tk.StringVar()
         self.search_department_var = tk.StringVar()
@@ -1748,6 +1781,12 @@ class App(tk.Tk):
         entry.pack(side="left", padx=6)
         entry.bind("<Return>", lambda _event: self._run_search(modal))
         ttk.Button(frm_top, text="Найти", command=lambda: self._run_search(modal)).pack(side="left")
+        ttk.Checkbutton(
+            frm_top,
+            text="Показывать уволенных",
+            variable=self.search_show_fired_var,
+            command=lambda: self._render_search_results(),
+        ).pack(side="left", padx=(8, 0))
         ttk.Label(frm_top, textvariable=self.search_result_count_var).pack(side="left", padx=10)
 
         frm_body = ttk.Frame(modal)
@@ -1864,8 +1903,23 @@ class App(tk.Tk):
             results,
             key=lambda item: ((item.get("displayName") or "").lower(), item.get("domain") or ""),
         )
+        self._render_search_results()
+        if errors:
+            messagebox.showwarning("Поиск", "Ошибки поиска:\n" + "\n".join(errors))
+        visible = getattr(self, "search_visible_results", [])
+        if not visible:
+            messagebox.showinfo("Результаты", "Пользователи не найдены.")
+
+    def _render_search_results(self):
         self.search_listbox.delete(0, "end")
+        self.search_visible_results = []
+        show_fired = bool(self.search_show_fired_var.get())
         for item in self.search_results:
+            cfg = next((cfg for cfg in DOMAIN_CONFIGS if cfg.get("name") == item.get("domain")), None)
+            fired_ou_dn = (cfg or {}).get("fired_ou_dn", "")
+            is_fired = is_fired_user(item.get("dn") or "", fired_ou_dn)
+            if is_fired and not show_fired:
+                continue
             display_name = (
                 item.get("displayName")
                 or item.get("sam")
@@ -1873,15 +1927,16 @@ class App(tk.Tk):
                 or "(без имени)"
             )
             domain = item.get("domain") or "unknown"
-            self.search_listbox.insert("end", f"{display_name} — {domain}")
-        self.search_result_count_var.set(f"Найдено: {len(self.search_results)}")
+            suffix = " [УВОЛЕН]" if is_fired else ""
+            self.search_listbox.insert("end", f"{display_name} — {domain}{suffix}")
+            self.search_visible_results.append(item)
+            if is_fired:
+                last_idx = self.search_listbox.size() - 1
+                self.search_listbox.itemconfig(last_idx, foreground="red")
+        self.search_result_count_var.set(f"Найдено: {len(self.search_visible_results)}")
         self.selected_search_index = None
         self.search_selected_label_var.set("Пользователь не выбран")
         self.btn_save_search.configure(state="disabled")
-        if errors:
-            messagebox.showwarning("Поиск", "Ошибки поиска:\n" + "\n".join(errors))
-        if not self.search_results:
-            messagebox.showinfo("Результаты", "Пользователи не найдены.")
 
     def _on_search_select(self, _event=None):
         selection = self.search_listbox.curselection()
@@ -1891,7 +1946,11 @@ class App(tk.Tk):
             return
         index = selection[0]
         self.selected_search_index = index
-        entry = self.search_results[index]
+        if index >= len(getattr(self, "search_visible_results", [])):
+            self.selected_search_index = None
+            self.btn_save_search.configure(state="disabled")
+            return
+        entry = self.search_visible_results[index]
         self.search_title_var.set(entry.get("title", "") or "")
         self.search_department_var.set(entry.get("department", "") or "")
         self._on_search_department_changed()
@@ -2006,7 +2065,10 @@ class App(tk.Tk):
         if self.selected_search_index is None:
             messagebox.showerror("Ошибка", "Выберите пользователя из результатов поиска.")
             return
-        entry = self.search_results[self.selected_search_index]
+        if self.selected_search_index >= len(getattr(self, "search_visible_results", [])):
+            messagebox.showerror("Ошибка", "Выберите пользователя из результатов поиска.")
+            return
+        entry = self.search_visible_results[self.selected_search_index]
         sam = entry.get("sam")
         domain_name = entry.get("domain")
         cfg = next((c for c in DOMAIN_CONFIGS if c["name"] == domain_name), None)
@@ -2601,6 +2663,7 @@ class App(tk.Tk):
 
         self.offboarding_cfg = cfg
         self.offboarding_results = []
+        self.offboarding_raw_results = []
         self.offboarding_selected_user = None
 
         root = ttk.Frame(modal)
@@ -2620,8 +2683,15 @@ class App(tk.Tk):
 
         ttk.Label(search_frame, text="ФИО или логин:").grid(row=0, column=0, sticky="w")
         self.offboarding_search_var = tk.StringVar()
+        self.offboarding_show_fired_var = tk.BooleanVar(value=False)
         ttk.Entry(search_frame, textvariable=self.offboarding_search_var).grid(row=1, column=0, sticky="ew", pady=(2, 0))
         ttk.Button(search_frame, text="Найти", command=self._offboarding_search).grid(row=1, column=1, padx=(6, 0))
+        ttk.Checkbutton(
+            search_frame,
+            text="Показывать уволенных",
+            variable=self.offboarding_show_fired_var,
+            command=lambda: self._offboarding_render_results(show_empty_info=False),
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         columns = ("display", "sam", "upn", "ou")
         self.offboarding_tree = ttk.Treeview(left, columns=columns, show="headings", height=12)
@@ -2634,6 +2704,7 @@ class App(tk.Tk):
         self.offboarding_tree.column("sam", width=160)
         self.offboarding_tree.column("upn", width=260)
         self.offboarding_tree.column("ou", width=330)
+        self.offboarding_tree.tag_configure("fired", foreground="red")
         self.offboarding_tree.bind("<<TreeviewSelect>>", self._offboarding_select_user)
 
         card = ttk.LabelFrame(left, text="Карточка пользователя")
@@ -2718,15 +2789,43 @@ class App(tk.Tk):
             self._offboarding_log(f"[offboarding] {err}")
             messagebox.showerror("Поиск", err)
             return
-        self.offboarding_results = results
+        self.offboarding_raw_results = results
+        self._offboarding_render_results(show_empty_info=True)
+
+    def _offboarding_render_results(self, show_empty_info: bool = False):
+        cfg = self.offboarding_cfg
+        fired_ou_dn = (cfg or {}).get("fired_ou_dn") or ""
+        show_fired = bool(self.offboarding_show_fired_var.get())
+        self.offboarding_results = []
+        for user in self.offboarding_raw_results:
+            user_dn = user.get("dn") or ""
+            user_is_fired = is_fired_user(user_dn, fired_ou_dn)
+            user["is_fired"] = user_is_fired
+            if user_is_fired and not show_fired:
+                continue
+            self.offboarding_results.append(user)
+
         for item in self.offboarding_tree.get_children():
             self.offboarding_tree.delete(item)
-        for idx, user in enumerate(results):
-            self.offboarding_tree.insert("", "end", iid=str(idx), values=(
-                user.get("displayName") or "", user.get("sam") or "", user.get("upn") or "", short_ou_from_dn(user.get("dn") or "")
-            ))
-        self._offboarding_log(f"[offboarding] Найдено пользователей: {len(results)}")
-        if not results:
+        for idx, user in enumerate(self.offboarding_results):
+            ou_text = short_ou_from_dn(user.get("dn") or "")
+            if user.get("is_fired"):
+                ou_text = f"{ou_text} (УВОЛЕН)" if ou_text else "УВОЛЕН"
+            self.offboarding_tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(user.get("displayName") or "", user.get("sam") or "", user.get("upn") or "", ou_text),
+                tags=("fired",) if user.get("is_fired") else (),
+            )
+
+        self.offboarding_selected_user = None
+        self.offboarding_execute_btn.configure(state="disabled")
+        for key, var in self.offboarding_card_vars.items():
+            var.set("")
+
+        self._offboarding_log(f"[offboarding] Найдено пользователей: {len(self.offboarding_results)}")
+        if show_empty_info and not self.offboarding_results:
             messagebox.showinfo("Поиск", "Пользователи не найдены.")
 
     def _offboarding_select_user(self, _event=None):
@@ -2742,6 +2841,8 @@ class App(tk.Tk):
             return
         user = self.offboarding_results[idx]
         user["ou"] = extract_ou_from_dn(user.get("dn") or "")
+        if user.get("is_fired"):
+            user["ou"] = f"{user['ou']} (УВОЛЕН)" if user["ou"] else "УВОЛЕН"
         user["enabledText"] = "Enabled" if bool(user.get("enabled")) else "Disabled"
         self.offboarding_selected_user = user
         for key, var in self.offboarding_card_vars.items():
@@ -3353,6 +3454,13 @@ class App(tk.Tk):
             ensure_config_dir()
             append_jsonl(OFFBOARDING_LOG_PATH, audit_entry)
             self._offboarding_log(f"[offboarding][audit] Запись сохранена: {OFFBOARDING_LOG_PATH}")
+            try:
+                skipped_count = rewrite_offboarding_pretty_log()
+                self._offboarding_log(f"[offboarding][audit] Pretty лог обновлён: {OFFBOARDING_LOG_PRETTY_PATH}")
+                if skipped_count:
+                    self._offboarding_log(f"[offboarding][audit] Предупреждение: пропущено некорректных строк JSONL: {skipped_count}")
+            except OSError as exc:
+                self._offboarding_log(f"[offboarding][audit] Предупреждение: не удалось обновить pretty лог: {exc}")
         except OSError as exc:
             audit_ok = False
             self._offboarding_log(f"[offboarding][audit] Не удалось записать audit log: {exc}")
