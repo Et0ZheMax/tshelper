@@ -234,6 +234,11 @@ def ensure_config_dir() -> str:
 def append_jsonl(path: str, obj: dict) -> None:
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
 
 
 def normalize_text(value: str) -> str:
@@ -341,6 +346,18 @@ def validate_ou_exists(domain_cfg: dict, ou_dn: str) -> bool:
         "-ErrorAction Stop | Out-Null"
     )
     proc = run_powershell(ps, server=server)
+    return proc.returncode == 0
+
+
+def validate_ou_exists_on_server(server_name: str, ou_dn: str) -> bool:
+    if not server_name or not ou_dn:
+        return False
+    ps = (
+        "Import-Module ActiveDirectory; "
+        f"Get-ADOrganizationalUnit -Server '{escape_ps_string(server_name)}' -Identity '{escape_ps_string(ou_dn)}' "
+        "-ErrorAction Stop | Out-Null"
+    )
+    proc = run_powershell(ps, server=server_name)
     return proc.returncode == 0
 
 
@@ -2898,10 +2915,12 @@ class App(tk.Tk):
         attr_props_ps = ",".join(attr_props)
 
         def build_identity_cmd(server_name: str, sam_value: str) -> str:
+            sam_ldap = escape_ldap_filter(sam_value)
+            ldap_filter = f"(samAccountName={sam_ldap})"
             return (
                 "Import-Module ActiveDirectory; "
                 f"$users = @(Get-ADUser -Server '{escape_ps_string(server_name)}' "
-                f"-Filter \"samAccountName -eq '{escape_ps_string(sam_value)}'\" -Properties {attr_props_ps}); "
+                f"-LDAPFilter '{escape_ps_string(ldap_filter)}' -Properties {attr_props_ps}); "
                 "$items = @($users | ForEach-Object { "
                 "[PSCustomObject]@{ "
                 "guid=$_.ObjectGUID.ToString(); dn=$_.DistinguishedName; enabled=$_.Enabled; givenName=$_.GivenName; sn=$_.sn; "
@@ -2925,8 +2944,8 @@ class App(tk.Tk):
                 self._offboarding_log(f"[offboarding][{prefix}][identity] STDOUT:\n" + proc.stdout.strip())
             if proc.stderr.strip():
                 self._offboarding_log(f"[offboarding][{prefix}][identity] STDERR:\n" + proc.stderr.strip())
-            data, err = parse_ps_json(proc.stdout)
-            if proc.returncode != 0 or err or not data:
+            raw_stdout = (proc.stdout or "").strip()
+            if proc.returncode != 0 or not raw_stdout:
                 return {
                     "server_main": main_server,
                     "server_pdc": pdc_server,
@@ -2936,7 +2955,21 @@ class App(tk.Tk):
                     "count": 0,
                     "user": None,
                 }
-            payload = data[0] if isinstance(data, list) and data else data
+            try:
+                payload = json.loads(raw_stdout)
+            except json.JSONDecodeError:
+                self._offboarding_log(f"[offboarding][{prefix}][identity] Ошибка JSON, первые 300 символов STDOUT: {raw_stdout[:300]}")
+                return {
+                    "server_main": main_server,
+                    "server_pdc": pdc_server,
+                    "identity_rc": proc.returncode,
+                    "identity_stdout": short_text(proc.stdout),
+                    "identity_stderr": short_text(proc.stderr),
+                    "count": 0,
+                    "user": None,
+                }
+            if isinstance(payload, list):
+                payload = payload[0] if payload else {}
             users = payload.get("users") or []
             if isinstance(users, dict):
                 users = [users]
@@ -3096,19 +3129,30 @@ class App(tk.Tk):
             f"Move-ADObject -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -TargetPath '{escape_ps_string(target_ou)}'; "
             f"(Get-ADUser -Server '{{srv}}' -Identity '{escape_ps_string(guid)}' -Properties DistinguishedName,Enabled).DistinguishedName"
         )
+        move_server = omg_identity["server_main"]
+        if not validate_ou_exists_on_server(move_server, target_ou):
+            if validate_ou_exists_on_server(omg_identity["server_pdc"], target_ou):
+                move_server = omg_identity["server_pdc"]
+                self._offboarding_log(f"[offboarding][omg][move] Целевой OU найден на PDC, перенос будет выполнен через {move_server}")
+            else:
+                self._offboarding_log(f"[offboarding][omg][move] OU не найден на серверах {omg_identity['server_main']} и {omg_identity['server_pdc']}: {target_ou}")
+                set_step("move", "fail")
+                add_step(omg_audit, "move", "fail")
+                return
+
         set_step("move", "running")
         if ADHELPER_DRYRUN_MODE:
             self._offboarding_log(f"[offboarding][omg][move] DRYRUN: пропуск Move-ADObject в OU {target_ou}")
             set_step("move", "simulated")
             add_step(omg_audit, "move", "simulated")
         else:
-            proc = run_powershell(move_cmd.format(srv=escape_ps_string(omg_identity["server_main"])), server=omg_identity["server_main"])
+            proc = run_powershell(move_cmd.format(srv=escape_ps_string(move_server)), server=move_server)
             self._offboarding_log(f"[offboarding][omg][move] rc={proc.returncode}")
             if proc.stdout.strip():
                 self._offboarding_log("[offboarding][omg][move] STDOUT:\n" + proc.stdout.strip())
             if proc.stderr.strip():
                 self._offboarding_log("[offboarding][omg][move] STDERR:\n" + proc.stderr.strip())
-            if proc.returncode != 0 and command_failed_with_8329(proc) and omg_identity["server_pdc"].lower() != omg_identity["server_main"].lower():
+            if proc.returncode != 0 and command_failed_with_8329(proc) and omg_identity["server_pdc"].lower() != move_server.lower():
                 self._offboarding_log(f"[offboarding][omg][move] Ошибка 8329/uninstantiated, ретрай на PDC: {omg_identity['server_pdc']}")
                 proc = run_powershell(move_cmd.format(srv=escape_ps_string(omg_identity["server_pdc"])), server=omg_identity["server_pdc"])
                 self._offboarding_log(f"[offboarding][omg][move][retry] Сервер: {omg_identity['server_pdc']}, rc={proc.returncode}")
@@ -3125,6 +3169,22 @@ class App(tk.Tk):
             add_step(omg_audit, "move", "success", proc)
             omg_audit["dn_after"] = dn_after
             omg_audit["ou_after"] = dn_to_ou(dn_after)
+
+            omg_state_cmd = (
+                "Import-Module ActiveDirectory; "
+                f"Get-ADUser -Server '{escape_ps_string(move_server)}' -Identity '{escape_ps_string(guid)}' -Properties DistinguishedName,Enabled | "
+                "Select-Object DistinguishedName,Enabled | ConvertTo-Json -Depth 4"
+            )
+            state_proc = run_powershell(omg_state_cmd, server=move_server)
+            if state_proc.returncode == 0 and (state_proc.stdout or "").strip():
+                try:
+                    state_obj = json.loads((state_proc.stdout or "").strip())
+                    omg_audit["enabled_after"] = bool(state_obj.get("Enabled"))
+                    if not omg_audit.get("dn_after"):
+                        omg_audit["dn_after"] = str(state_obj.get("DistinguishedName") or "")
+                        omg_audit["ou_after"] = dn_to_ou(omg_audit["dn_after"])
+                except json.JSONDecodeError:
+                    self._offboarding_log("[offboarding][omg][move] Не удалось разобрать JSON состояния после disable+move.")
 
         omg_completed = all(step_statuses[k] in ("success", "simulated") for k in ("identity", "clear", "disable", "move"))
         pak_cfg = next((d for d in DOMAIN_CONFIGS if d.get("name") == "pak-cspmz"), None)
@@ -3235,29 +3295,35 @@ class App(tk.Tk):
                         add_step(pak_audit, "disable", "success", proc)
 
                 set_step("pak_move", "running")
-                pak_ou_exists = validate_ou_exists(pak_cfg, pak_target_ou)
-                if not pak_ou_exists:
-                    self._offboarding_log(f"[offboarding][pak][move] OU не найден: {pak_target_ou}")
-                    set_step("pak_move", "warn")
-                    add_step(pak_audit, "move", "warn")
-                elif ADHELPER_DRYRUN_MODE:
+                pak_move_server = pak_identity["server_main"]
+                if not validate_ou_exists_on_server(pak_move_server, pak_target_ou):
+                    if validate_ou_exists_on_server(pak_identity["server_pdc"], pak_target_ou):
+                        pak_move_server = pak_identity["server_pdc"]
+                        self._offboarding_log(f"[offboarding][pak][move] Целевой OU найден на PDC, перенос будет выполнен через {pak_move_server}")
+                    else:
+                        self._offboarding_log(f"[offboarding][pak][move] OU не найден на серверах {pak_identity['server_main']} и {pak_identity['server_pdc']}: {pak_target_ou}")
+                        set_step("pak_move", "warn")
+                        add_step(pak_audit, "move", "warn")
+                        pak_move_server = ""
+
+                if pak_move_server and ADHELPER_DRYRUN_MODE:
                     self._offboarding_log(f"[offboarding][pak][move] DRYRUN: пропуск Move-ADObject в OU {pak_target_ou}")
                     set_step("pak_move", "simulated")
                     add_step(pak_audit, "move", "simulated")
-                else:
+                elif pak_move_server:
                     pak_move_cmd = (
                         "Import-Module ActiveDirectory; "
                         f"Move-ADObject -Server '{{srv}}' -Identity '{escape_ps_string(pak_guid)}' -TargetPath '{escape_ps_string(pak_target_ou)}'; "
                         f"(Get-ADUser -Server '{{srv}}' -Identity '{escape_ps_string(pak_guid)}' -Properties DistinguishedName,Enabled) | "
                         "Select-Object DistinguishedName,Enabled | ConvertTo-Json -Depth 4"
                     )
-                    proc = run_powershell(pak_move_cmd.format(srv=escape_ps_string(pak_identity["server_main"])), server=pak_identity["server_main"])
+                    proc = run_powershell(pak_move_cmd.format(srv=escape_ps_string(pak_move_server)), server=pak_move_server)
                     self._offboarding_log(f"[offboarding][pak][move] rc={proc.returncode}")
                     if proc.stdout.strip():
                         self._offboarding_log("[offboarding][pak][move] STDOUT:\n" + proc.stdout.strip())
                     if proc.stderr.strip():
                         self._offboarding_log("[offboarding][pak][move] STDERR:\n" + proc.stderr.strip())
-                    if proc.returncode != 0 and command_failed_with_8329(proc) and pak_identity["server_pdc"].lower() != pak_identity["server_main"].lower():
+                    if proc.returncode != 0 and command_failed_with_8329(proc) and pak_identity["server_pdc"].lower() != pak_move_server.lower():
                         self._offboarding_log(f"[offboarding][pak][move] Ошибка 8329/uninstantiated, ретрай на PDC: {pak_identity['server_pdc']}")
                         proc = run_powershell(pak_move_cmd.format(srv=escape_ps_string(pak_identity["server_pdc"])), server=pak_identity["server_pdc"])
                         self._offboarding_log(f"[offboarding][pak][move][retry] Сервер: {pak_identity['server_pdc']}, rc={proc.returncode}")
