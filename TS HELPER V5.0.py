@@ -673,6 +673,7 @@ class SettingsManager:
             "cw_cookie": "mp1oomc5u57gpj1okil7hca2ue",     # строка Cookie: 'PHPSESSID=...; fpbx_admin=...'
             "cw_interval": 2,
             "cw_popup": True,
+            "cw_debug": False,
             "cw_login": "",
             "cw_password": "",
             # Цвета
@@ -1110,6 +1111,8 @@ class MainWindow:
         self.empty_state_label = None
         self.search_job = None
         self.ping_generation = 0
+        self.ping_cache = {}
+        self.ping_cache_ttl = 15
 
         # активные звонки (список словарей)
         self.active_calls = []   # [{ext, num, name, ts, user, who_key}]
@@ -1264,6 +1267,54 @@ class MainWindow:
             if caller_set.issubset(user_set) or user_set.issubset(caller_set):
                 return u
         return None
+
+    def _match_user_by_caller_with_rule(self, name: str, num: str):
+        """Возвращает пользователя и правило, по которому найдено совпадение."""
+
+        def clean_digits(value: str) -> str:
+            return re.sub(r"\D", "", value or "")
+
+        num_digits = clean_digits(num)
+        if num_digits:
+            for u in self.users.get_users():
+                ext_digits = clean_digits(u.get("ext", ""))
+                if ext_digits and (num_digits.endswith(ext_digits) or ext_digits.endswith(num_digits)):
+                    return u, "номер/ext"
+
+        key = norm_name(name) if name else ""
+        if key:
+            for u in self.users.get_users():
+                if norm_name(u.get("name", "")) == key:
+                    return u, "точное ФИО"
+
+        caller_tokens = [token for token in re.split(r"\s+", (name or "").strip().lower()) if token]
+        caller_set = set(caller_tokens)
+        if caller_set:
+            for u in self.users.get_users():
+                user_tokens = [token for token in re.split(r"\s+", (u.get("name", "")).strip().lower()) if token]
+                if not user_tokens:
+                    continue
+                user_set = set(user_tokens)
+                if caller_set.issubset(user_set) or user_set.issubset(caller_set):
+                    return u, "частичное ФИО"
+
+        return None, "не найден"
+
+    def _cw_debug_enabled(self) -> bool:
+        return bool(self.settings.get_setting("cw_debug", False))
+
+    def _cw_debug_log(self, msg: str, call_log: bool = False):
+        if not self._cw_debug_enabled():
+            return
+        line = f"[CW DEBUG] {msg}"
+        if call_log:
+            log_call(line)
+        else:
+            log_message(line)
+
+    def _log_action(self, action: str):
+        log_action(action)
+        log_message(action)
 
     # --------- UI ----------
     def build_ui(self):
@@ -1951,6 +2002,8 @@ class MainWindow:
             self.active_calls = [c for c in self.active_calls if now - c["ts"] < self.calls_ttl]
             callers = sorted(self.active_calls, key=lambda c: c["ts"], reverse=True)
 
+        self._cw_debug_log(f"get_visible_users: callers count={len(callers)}")
+
         caller_by_pc = {}
         orphan_calls = []
         pinned_users = []
@@ -1962,7 +2015,11 @@ class MainWindow:
             mapped_user = users_by_pc.get(pc_name) if pc_name else None
 
             if not mapped_user and (call.get("name") or call.get("num")):
-                matched_user = self._match_user_by_caller(call.get("name", ""), call.get("num", ""))
+                matched_user, rule = self._match_user_by_caller_with_rule(call.get("name", ""), call.get("num", ""))
+                self._cw_debug_log(
+                    f"_match_user_by_caller для ext={call.get('ext')}: {'найден' if matched_user else 'не найден'} ({rule})",
+                    call_log=True,
+                )
                 if matched_user:
                     call["user"] = matched_user
                     mapped_user = users_by_pc.get(matched_user.get("pc_name"))
@@ -1977,6 +2034,11 @@ class MainWindow:
             else:
                 orphan_calls.append(call)
 
+        self._cw_debug_log(
+            f"get_visible_users: pinned_users={[u.get('pc_name') for u in pinned_users]}, "
+            f"caller_by_pc keys={list(caller_by_pc.keys())}, orphan_calls count={len(orphan_calls)}"
+        )
+
         ordered_users = list(pinned_users)
         for user in filtered_sorted:
             if user.get("pc_name") not in pinned_seen:
@@ -1985,8 +2047,13 @@ class MainWindow:
         return ordered_users, filtered_sorted, caller_by_pc, orphan_calls
 
     def apply_call_state(self, caller_by_pc: dict):
+        affected = []
         for pc_name, widget in self.user_widgets.items():
-            widget.set_caller(caller_by_pc.get(pc_name))
+            caller = caller_by_pc.get(pc_name)
+            if caller:
+                affected.append(pc_name)
+            widget.set_caller(caller)
+        self._cw_debug_log(f"apply_call_state: caller_info получен для {affected}")
 
     def render_grid(self, ordered_users, orphan_calls, show_empty_state=False):
         for widget in self.user_widgets.values():
@@ -2056,7 +2123,7 @@ class MainWindow:
         # статусы обновляем у всех карточек, но иконки показываем только в режиме поиска
         for widget in self.user_widgets.values():
             widget.show_status = show_status
-            widget.set_status(widget.status_key)
+            widget.refresh_text()
 
         self.apply_call_state(caller_by_pc)
         show_empty = bool(search_text) and not filtered_sorted
@@ -2069,6 +2136,10 @@ class MainWindow:
             self.populate_buttons()
             return
         self._do_search()
+
+    def _refresh_current_view_from_call_watcher(self):
+        self._cw_debug_log("refresh_current_view() вызван из CallWatcher", call_log=True)
+        self.refresh_current_view()
 
 
     # --------- Поиск ----------
@@ -2084,10 +2155,23 @@ class MainWindow:
             self.ping_generation += 1
             gen = self.ping_generation
             for u in filtered:
-                btn = self.buttons.get(u["pc_name"])
+                pc_name = u.get("pc_name")
+                if not pc_name:
+                    continue
+                cached = self.ping_cache.get(pc_name)
+                now = time.time()
+                if cached and (now - cached["ts"] <= self.ping_cache_ttl):
+                    btn = self.buttons.get(pc_name)
+                    if btn:
+                        btn.set_availability(cached["ok"])
+                    continue
+
+                btn = self.buttons.get(pc_name)
                 if btn:
                     btn.set_status("checking")
-                self.executor.submit(self._ping_task, u["pc_name"], gen)
+                self.executor.submit(self._ping_task, u, gen)
+        else:
+            self.ping_generation += 1
 
     def clear_search(self, _=None):
         self.search_entry.delete(0, "end")
@@ -2095,27 +2179,31 @@ class MainWindow:
         self._do_search()
         return "break"
 
-    def _ping_task(self, pc, gen):
-        ok = self.check_availability(pc)
+    def _ping_task(self, user, gen):
+        pc = user.get("pc_name", "")
+        ok, host, ip = self.check_availability(user)
         if gen != self.ping_generation: return
+        if pc:
+            self.ping_cache[pc] = {"ok": ok, "ts": time.time(), "host": host, "ip": ip}
         self.master.after(0, self._update_btn_style, pc, ok)
 
-    def check_availability(self, pc):
-        try:
-            if is_windows():
-                p = subprocess.run(["ping","-n","1",pc], capture_output=True, text=True, timeout=2,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
-            else:
-                p = subprocess.run(["ping","-c","1",pc], capture_output=True, text=True, timeout=2)
-            return p.returncode == 0
-        except Exception as e:
-            log_message(f"ping error {pc}: {e}")
-            return False
+    def check_availability(self, user):
+        candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
+        last_ip = ""
+        for host in candidates:
+            if not host:
+                continue
+            ok, ip = self.ping_host_with_ip(host)
+            if ok:
+                return True, host, ip
+            if ip:
+                last_ip = ip
+        return False, (candidates[0] if candidates else user.get("pc_name", "")), last_ip
 
     def _update_btn_style(self, pc, ok):
         btn = self.buttons.get(pc)
         if not btn: return
-        btn.set_availability(ok, searching=(len(self.search_entry.get())>=3))
+        btn.set_availability(ok)
 
     # --------- Users CRUD ----------
     def add_user(self):
@@ -2492,6 +2580,8 @@ class MainWindow:
         e_interval = ttk.Entry(tab_cw); e_interval.insert(0, str(self.settings.get_setting("cw_interval",2))); e_interval.pack(fill="x")
         cw_popup = tk.BooleanVar(value=self.settings.get_setting("cw_popup", True))
         ttk.Checkbutton(tab_cw, text="Показывать всплывающее окно при звонке", variable=cw_popup).pack(anchor="w", pady=4)
+        cw_debug = tk.BooleanVar(value=self.settings.get_setting("cw_debug", False))
+        ttk.Checkbutton(tab_cw, text="Включить отладочные логи CallWatcher", variable=cw_debug).pack(anchor="w", pady=4)
 
         # Цвета
         tab_colors = ttk.Frame(nb); nb.add(tab_colors, text="Цвета")
@@ -2569,6 +2659,7 @@ class MainWindow:
             except:
                 self.settings.set_setting("cw_interval", 2)
             self.settings.set_setting("cw_popup", cw_popup.get())
+            self.settings.set_setting("cw_debug", cw_debug.get())
 
             # Цвета
             self.settings.set_setting("ui_user_bg", user_bg.get())
@@ -3132,6 +3223,10 @@ class MainWindow:
                         raw_num, raw_name = caller
                         num, name, who_key = normalize_caller(raw_num, raw_name)
                         who_key = who_key or prev_who_key or f"ext-{ext}"
+                        self._cw_debug_log(
+                            f"Разбор звонка ext={ext}: num='{num}', name='{name}', who_key='{who_key}'",
+                            call_log=True,
+                        )
                         who = (num or "unknown") + (f" ({name})" if name else "")
                         key = f"{ext}|{who_key}|{int(time.time()/dup_ttl)}"
                         active_now.add((ext, who_key))
@@ -3139,7 +3234,14 @@ class MainWindow:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
                             log_call(f"Звонок на {ext} от {who}")
 
-                            matched_user = self._match_user_by_caller(name, num)
+                            matched_user, rule = self._match_user_by_caller_with_rule(name, num)
+                            if matched_user:
+                                self._cw_debug_log(
+                                    f"_match_user_by_caller: найден {matched_user.get('pc_name')} ({rule})",
+                                    call_log=True,
+                                )
+                            else:
+                                self._cw_debug_log("_match_user_by_caller: не найден (не удалось сопоставить по номеру/ФИО)", call_log=True)
 
                             # 1) показать сверху
                             with self.calls_lock:
@@ -3156,7 +3258,7 @@ class MainWindow:
                                     "user": matched_user,
                                     "who_key": who_key,
                                 })
-                            self.master.after(0, self.refresh_current_view)
+                            self.master.after(0, self._refresh_current_view_from_call_watcher)
 
                             # 2) всплывашка
                             if popup_on:
@@ -3178,7 +3280,7 @@ class MainWindow:
                     log_call(f"Звонок завершён на {c.get('ext')}: {who}, длительность ~{duration} c")
 
                 if ended_calls:
-                    self.master.after(0, self.refresh_current_view)
+                    self.master.after(0, self._refresh_current_view_from_call_watcher)
 
             except Exception as e:
                 log_message(f"CallWatcher error: {e}")
@@ -3240,6 +3342,9 @@ class UserButton(ttk.Frame):
     def set_status(self, status_key: str):
         """Запоминаем статус и перерисовываем текст/стиль."""
         self.status_key = status_key
+        self.refresh_text()
+
+    def refresh_text(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
@@ -3253,21 +3358,11 @@ class UserButton(ttk.Frame):
 
     def set_availability(self, ok, searching=False):
         self.avail = ok
-        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
-
-        if searching:
-            # пока идёт проверка доступности
-            self.set_status("checking")
-        else:
-            # результат проверки: онлайн или оффлайн
-            self.set_status("online" if ok else "offline")
-
-        self.btn.config(text=self._compose_text(pc_label))
-        self._apply_caller_style()
+        self.set_status("online" if ok else "offline")
 
 
     def _status_label(self) -> str:
-        return {"online": "Онлайн", "offline": "Оффлайн", "checking": "Проверка"}.get(self.status_key, "")
+        return {"online": "Онлайн", "offline": "Оффлайн", "checking": ""}.get(self.status_key, "")
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
