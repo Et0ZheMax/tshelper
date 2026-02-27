@@ -2002,7 +2002,7 @@ class MainWindow:
             self.active_calls = [c for c in self.active_calls if now - c["ts"] < self.calls_ttl]
             callers = sorted(self.active_calls, key=lambda c: c["ts"], reverse=True)
 
-        self._cw_debug_log(f"get_visible_users: callers count={len(callers)}")
+        self._cw_debug_log(f"get_visible_users: callers_after_ttl={len(callers)}")
 
         caller_by_pc = {}
         orphan_calls = []
@@ -2035,7 +2035,7 @@ class MainWindow:
                 orphan_calls.append(call)
 
         self._cw_debug_log(
-            f"get_visible_users: pinned_users={[u.get('pc_name') for u in pinned_users]}, "
+            f"get_visible_users: pinned_pc_names={[u.get('pc_name') for u in pinned_users]}, "
             f"caller_by_pc keys={list(caller_by_pc.keys())}, orphan_calls count={len(orphan_calls)}"
         )
 
@@ -3194,6 +3194,11 @@ class MainWindow:
                         _pbx_dump(f"endpoint_block_{ext}.txt", block)
 
                     with self.calls_lock:
+                        now_ts = time.time()
+                        self.active_calls = [
+                            c for c in self.active_calls
+                            if now_ts - c.get("ts", now_ts) < self.calls_ttl
+                        ]
                         prev_call = next((c for c in self.active_calls if c.get("ext") == ext), None)
 
                     block_active = is_block_active(block, ext)
@@ -3245,11 +3250,22 @@ class MainWindow:
 
                             # 1) показать сверху
                             with self.calls_lock:
+                                now = time.time()
                                 self.active_calls = [
                                     c for c in self.active_calls
                                     if not (c.get("ext") == ext and c.get("who_key") == who_key)
                                 ]
-                                started_ts = prev_call.get("ts") if prev_call else time.time()
+                                started_ts = now
+                                if prev_call:
+                                    prev_ts = prev_call.get("ts", now)
+                                    prev_is_same_call = (
+                                        prev_call.get("who_key") == who_key
+                                        and prev_call.get("ext") == ext
+                                    )
+                                    prev_not_expired = (now - prev_ts) < self.calls_ttl
+                                    if prev_is_same_call and prev_not_expired:
+                                        started_ts = prev_ts
+
                                 self.active_calls.insert(0, {
                                     "ext": ext,
                                     "num": num or "",
@@ -3258,6 +3274,13 @@ class MainWindow:
                                     "user": matched_user,
                                     "who_key": who_key,
                                 })
+                                self._cw_debug_log(
+                                    "active_calls add: "
+                                    f"ext={ext}, who_key={who_key}, started_ts={started_ts:.3f}, "
+                                    f"now={now:.3f}, age={now - started_ts:.3f}, "
+                                    f"matched_user={matched_user.get('pc_name') if matched_user else None}",
+                                    call_log=True,
+                                )
                             self.master.after(0, self._refresh_current_view_from_call_watcher)
 
                             # 2) всплывашка
