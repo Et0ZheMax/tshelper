@@ -289,6 +289,66 @@ def norm_name(n: str) -> str:
     p = n.strip().lower().split()
     return " ".join(p[:2]) if len(p) >= 2 else " ".join(p)
 
+
+def parse_person_name(value: str) -> dict:
+    """Нормализует ФИО/инициалы и раскладывает на составные части."""
+
+    raw = (value or "").strip().lower().replace("ё", "е")
+    raw = re.sub(r"[\"'`«»„“”()\[\]{}]", " ", raw)
+    raw = re.sub(r"[^a-zа-я.\s\-]", " ", raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    tokens = [token for token in raw.split(" ") if token]
+
+    parsed = {
+        "last": "",
+        "first": "",
+        "middle": "",
+        "first_init": "",
+        "middle_init": "",
+    }
+
+    if not tokens:
+        return parsed
+
+    def clean_word(token: str) -> str:
+        token = token.strip(". ")
+        return re.sub(r"[^a-zа-я\-]", "", token)
+
+    parsed["last"] = clean_word(tokens[0])
+
+    initials = []
+    words = []
+    for token in tokens[1:]:
+        clean_token = token.strip()
+        compact = clean_token.replace(" ", "")
+        m = re.fullmatch(r"([a-zа-я])\.([a-zа-я])\.?", compact)
+        if m:
+            initials.extend([m.group(1), m.group(2)])
+            continue
+
+        m = re.fullmatch(r"([a-zа-я])\.?", compact)
+        if m:
+            initials.append(m.group(1))
+            continue
+
+        word = clean_word(clean_token)
+        if word:
+            words.append(word)
+
+    if words:
+        parsed["first"] = words[0]
+        parsed["first_init"] = words[0][0]
+    elif initials:
+        parsed["first_init"] = initials[0]
+
+    if len(words) >= 2:
+        parsed["middle"] = words[1]
+        parsed["middle_init"] = words[1][0]
+    elif len(initials) >= 2:
+        parsed["middle_init"] = initials[1]
+
+    return parsed
+
 def clean_internal_number(num: str) -> str:
     """Минималистично очищаем внутренний номер, оставляя цифры и '+'."""
     if not num:
@@ -1286,6 +1346,37 @@ class MainWindow:
             for u in self.users.get_users():
                 if norm_name(u.get("name", "")) == key:
                     return u, "точное ФИО"
+
+        caller_name = parse_person_name(name or "")
+        users_with_same_last = []
+        if caller_name.get("last"):
+            for u in self.users.get_users():
+                user_name = parse_person_name(u.get("name", ""))
+                if user_name.get("last") == caller_name.get("last"):
+                    users_with_same_last.append((u, user_name))
+
+        self._cw_debug_log(
+            "_match_user_by_caller initials-try: "
+            f"name={name!r}, num={num!r}, "
+            f"parsed(last={caller_name.get('last')!r}, "
+            f"first_init={caller_name.get('first_init')!r}, "
+            f"middle_init={caller_name.get('middle_init')!r}), "
+            f"same_last_count={len(users_with_same_last)}"
+        )
+
+        if caller_name.get("last") and caller_name.get("first_init"):
+            for user, user_name in users_with_same_last:
+                if user_name.get("first_init") != caller_name.get("first_init"):
+                    continue
+                if caller_name.get("middle_init") and user_name.get("middle_init") != caller_name.get("middle_init"):
+                    continue
+                self._cw_debug_log(
+                    "_match_user_by_caller initials-result: "
+                    f"matched={user.get('pc_name') or None}, rule=фамилия+инициалы"
+                )
+                return user, "фамилия+инициалы"
+
+        self._cw_debug_log("_match_user_by_caller initials-result: matched=None, rule=не найден")
 
         caller_tokens = [token for token in re.split(r"\s+", (name or "").strip().lower()) if token]
         caller_set = set(caller_tokens)
@@ -3721,11 +3812,53 @@ Write-Output "OK"
         except Exception as e:
             messagebox.showerror("SSH", str(e))
 
+
+
+def selftest_name_match():
+    """Мини-проверки парсинга ФИО и матчинга фамилии с инициалами."""
+
+    parse_cases = [
+        ("Мальцев С.В.", {"last": "мальцев", "first_init": "с", "middle_init": "в"}),
+        ("Мальцев С. В.", {"last": "мальцев", "first_init": "с", "middle_init": "в"}),
+        ("Мальцев Сергей Викторович", {"last": "мальцев", "first": "сергей", "middle": "викторович"}),
+        ("«Мальцев»   Сергей   В.", {"last": "мальцев", "first_init": "с", "middle_init": "в"}),
+    ]
+
+    for src, expected in parse_cases:
+        got = parse_person_name(src)
+        for key, value in expected.items():
+            assert got.get(key) == value, f"parse_person_name({src!r})[{key}]={got.get(key)!r}, ожидалось {value!r}"
+
+    def initials_rule_match(caller_name: str, user_name: str) -> bool:
+        caller = parse_person_name(caller_name)
+        user = parse_person_name(user_name)
+        if not caller.get("last") or not caller.get("first_init"):
+            return False
+        if caller.get("last") != user.get("last"):
+            return False
+        if caller.get("first_init") != user.get("first_init"):
+            return False
+        if caller.get("middle_init") and caller.get("middle_init") != user.get("middle_init"):
+            return False
+        return True
+
+    assert initials_rule_match("Мальцев С.В.", "Мальцев Сергей Викторович")
+    assert initials_rule_match("Мальцев С.", "Мальцев Сергей Викторович")
+    assert not initials_rule_match("Мальцев А.В.", "Мальцев Сергей Викторович")
+    assert not initials_rule_match("Иванов С.В.", "Мальцев Сергей Викторович")
+
+    print("selftest_name_match: OK")
+
 # --- main ---
 if __name__ == "__main__":
+    if "--selftest-name-match" in sys.argv:
+        selftest_name_match()
+        raise SystemExit(0)
+
     try:
         os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    except: pass
+    except:
+        pass
 
     app_root = tb.Window() if USE_BOOTSTRAP else tk.Tk()
     app = MainWindow(app_root)
