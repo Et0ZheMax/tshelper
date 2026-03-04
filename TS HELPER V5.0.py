@@ -2349,8 +2349,21 @@ $items = foreach ($u in $users) {{
             return ("🟢 " if ok else "🔴 ") + base
         return base
 
+    def canonical_pc_key(self, pc_name: str) -> str:
+        """Единый ключ карточки ПК для словарей user_widgets/buttons."""
+        key = str(pc_name or "").lower()
+        key = re.sub(r"\s+", "", key)
+        while True:
+            next_key = re.sub(r"^(?:ws|lt|w|l)-", "", key, count=1)
+            next_key = re.sub(r"^[a-z]-", "", next_key, count=1)
+            if next_key == key:
+                break
+            key = next_key
+        return key
+
     def _open_user_menu(self, user: dict):
-        btn = self.buttons.get(user.get("pc_name", ""))
+        pc_key = self.canonical_pc_key(user.get("pc_name", ""))
+        btn = self.buttons.get(pc_key)
         if btn:
             btn._show_menu()
         else:
@@ -2358,15 +2371,17 @@ $items = foreach ($u in $users) {{
 
     def rebind_user_widget_key(self, old_pc: str, new_pc: str, widget=None):
         """Обновляем ключ кэша карточек при смене основного имени ПК."""
-        if not old_pc or not new_pc or old_pc == new_pc:
+        old_key = self.canonical_pc_key(old_pc)
+        new_key = self.canonical_pc_key(new_pc)
+        if not old_key or not new_key or old_key == new_key:
             return
-        target = widget or self.user_widgets.get(old_pc)
-        if target and self.user_widgets.get(old_pc) is target:
-            self.user_widgets.pop(old_pc, None)
-            self.user_widgets[new_pc] = target
-        if self.buttons.get(old_pc) is target:
-            self.buttons.pop(old_pc, None)
-            self.buttons[new_pc] = target
+        target = widget or self.user_widgets.get(old_key)
+        if target and self.user_widgets.get(old_key) is target:
+            self.user_widgets.pop(old_key, None)
+            self.user_widgets[new_key] = target
+        if self.buttons.get(old_key) is target:
+            self.buttons.pop(old_key, None)
+            self.buttons[new_key] = target
 
     def _get_filtered_users(self, text=None):
         if text is None:
@@ -2383,7 +2398,27 @@ $items = foreach ($u in $users) {{
 
     def _sync_user_widgets(self):
         users = self.users.get_users()
-        users_by_pc = {u.get("pc_name", ""): u for u in users if u.get("pc_name")}
+        users_by_pc = {
+            self.canonical_pc_key(u.get("pc_name", "")): u
+            for u in users
+            if self.canonical_pc_key(u.get("pc_name", ""))
+        }
+
+        # миграция старых/сырых ключей к canonical виду
+        for old_key, widget in list(self.user_widgets.items()):
+            new_key = self.canonical_pc_key(old_key)
+            if not new_key:
+                self.user_widgets.pop(old_key, None)
+                widget.destroy()
+                continue
+            if new_key == old_key:
+                continue
+            existing = self.user_widgets.get(new_key)
+            self.user_widgets.pop(old_key, None)
+            if existing and existing is not widget:
+                widget.destroy()
+                continue
+            self.user_widgets[new_key] = widget
 
         # удаляем карточки, которых больше нет в списке пользователей
         for pc_name in list(self.user_widgets.keys()):
@@ -2392,17 +2427,21 @@ $items = foreach ($u in $users) {{
                 widget.destroy()
 
         # создаём недостающие и обновляем данные существующих карточек
-        for pc_name, user in users_by_pc.items():
-            widget = self.user_widgets.get(pc_name)
+        for pc_key, user in users_by_pc.items():
+            widget = self.user_widgets.get(pc_key)
             if widget is None:
                 widget = UserButton(self.inner, user, app=self, style_name="User.TButton", caller=None, show_status=False)
-                self.user_widgets[pc_name] = widget
+                self.user_widgets[pc_key] = widget
             else:
                 widget.user = user
 
     def get_visible_users(self, search_text: str):
         all_users = self.users.get_users()
-        users_by_pc = {u.get("pc_name", ""): u for u in all_users if u.get("pc_name")}
+        users_by_pc = {
+            self.canonical_pc_key(u.get("pc_name", "")): u
+            for u in all_users
+            if self.canonical_pc_key(u.get("pc_name", ""))
+        }
         filtered_users = self._get_filtered_users(search_text)
         filtered_sorted = sorted(filtered_users, key=lambda u: locale.strxfrm(u["name"]))
 
@@ -2420,8 +2459,8 @@ $items = foreach ($u in $users) {{
 
         for call in callers:
             user = call.get("user")
-            pc_name = user.get("pc_name") if user else None
-            mapped_user = users_by_pc.get(pc_name) if pc_name else None
+            pc_key = self.canonical_pc_key(user.get("pc_name")) if user else ""
+            mapped_user = users_by_pc.get(pc_key) if pc_key else None
 
             if not mapped_user and (call.get("name") or call.get("num")):
                 meta = call.get("resolution") if isinstance(call.get("resolution"), dict) else None
@@ -2436,16 +2475,16 @@ $items = foreach ($u in $users) {{
                     call_log=True,
                 )
                 if matched_user:
-                    mapped_user = users_by_pc.get(matched_user.get("pc_name"))
+                    mapped_user = users_by_pc.get(self.canonical_pc_key(matched_user.get("pc_name")))
                 elif meta and meta.get("ad_display_name"):
                     call["ad_match"] = meta
 
             if mapped_user:
-                pc_name = mapped_user.get("pc_name")
-                if pc_name:
-                    caller_by_pc[pc_name] = call
-                    if pc_name not in pinned_seen:
-                        pinned_seen.add(pc_name)
+                pc_key = self.canonical_pc_key(mapped_user.get("pc_name"))
+                if pc_key:
+                    caller_by_pc[pc_key] = call
+                    if pc_key not in pinned_seen:
+                        pinned_seen.add(pc_key)
                         pinned_users.append(mapped_user)
             else:
                 if user and user.get("pc_name"):
@@ -2455,15 +2494,20 @@ $items = foreach ($u in $users) {{
                     )
                 orphan_calls.append(call)
 
-        self._cw_debug_log(
-            f"get_visible_users: pinned_pc_names={[u.get('pc_name') for u in pinned_users]}, "
-            f"caller_by_pc keys={list(caller_by_pc.keys())}, orphan_calls count={len(orphan_calls)}"
-        )
-
         ordered_users = list(pinned_users)
         for user in filtered_sorted:
-            if user.get("pc_name") not in pinned_seen:
+            if self.canonical_pc_key(user.get("pc_name")) not in pinned_seen:
                 ordered_users.append(user)
+
+        ordered_first_name = ordered_users[0].get("pc_name") if ordered_users else None
+        ordered_first_key = self.canonical_pc_key(ordered_first_name)
+        self._cw_debug_log(
+            f"get_visible_users: pinned_pc_keys={[self.canonical_pc_key(u.get('pc_name')) for u in pinned_users]}, "
+            f"caller_by_pc keys={list(caller_by_pc.keys())}, "
+            f"ordered_first_name={ordered_first_name}, ordered_first_key={ordered_first_key}, "
+            f"ordered_first_widget_exists={ordered_first_key in self.user_widgets}, "
+            f"orphan_calls count={len(orphan_calls)}"
+        )
 
         return ordered_users, filtered_sorted, caller_by_pc, orphan_calls
 
@@ -2500,11 +2544,12 @@ $items = foreach ($u in $users) {{
             self.inner.grid_columnconfigure(0, weight=1)
 
         for user in ordered_users:
-            widget = self.user_widgets.get(user.get("pc_name"))
+            pc_key = self.canonical_pc_key(user.get("pc_name"))
+            widget = self.user_widgets.get(pc_key)
             if not widget:
                 continue
             widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-            self.buttons[user["pc_name"]] = widget
+            self.buttons[pc_key] = widget
             col += 1
             if col >= cols:
                 col = 0
@@ -2577,17 +2622,18 @@ $items = foreach ($u in $users) {{
             gen = self.ping_generation
             for u in filtered:
                 pc_name = u.get("pc_name")
+                pc_key = self.canonical_pc_key(pc_name)
                 if not pc_name:
                     continue
                 cached = self.ping_cache.get(pc_name)
                 now = time.time()
                 if cached and (now - cached["ts"] <= self.ping_cache_ttl):
-                    btn = self.buttons.get(pc_name)
+                    btn = self.buttons.get(pc_key)
                     if btn:
                         btn.set_availability(cached["ok"])
                     continue
 
-                btn = self.buttons.get(pc_name)
+                btn = self.buttons.get(pc_key)
                 if btn:
                     btn.set_status("checking")
                 self.executor.submit(self._ping_task, u, gen)
@@ -2622,7 +2668,7 @@ $items = foreach ($u in $users) {{
         return False, (candidates[0] if candidates else user.get("pc_name", "")), last_ip
 
     def _update_btn_style(self, pc, ok):
-        btn = self.buttons.get(pc)
+        btn = self.buttons.get(self.canonical_pc_key(pc))
         if not btn: return
         btn.set_availability(ok)
 
@@ -2666,7 +2712,7 @@ $items = foreach ($u in $users) {{
             if old_pc != p:
                 self.rebind_user_widget_key(old_pc, p)
 
-            widget = self.user_widgets.get(p)
+            widget = self.user_widgets.get(self.canonical_pc_key(p))
             if widget:
                 widget.user = new_user
                 widget.set_status(widget.status_key)
