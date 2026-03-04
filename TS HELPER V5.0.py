@@ -349,6 +349,23 @@ def parse_person_name(value: str) -> dict:
 
     return parsed
 
+
+def normalize_phone(value: str) -> str:
+    """Нормализует телефон к каноническому формату РФ: 7XXXXXXXXXX."""
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        return "7" + digits[1:]
+    if len(digits) == 11 and digits.startswith("7"):
+        return digits
+    if len(digits) == 10:
+        return "7" + digits
+    return ""
+
+
+def phone_last10(value: str) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    return digits[-10:] if len(digits) >= 10 else ""
+
 def clean_internal_number(num: str) -> str:
     """Минималистично очищаем внутренний номер, оставляя цифры и '+'."""
     if not num:
@@ -1178,6 +1195,18 @@ class MainWindow:
         self.active_calls = []   # [{ext, num, name, ts, user, who_key}]
         self.calls_lock = threading.Lock()
         self.calls_ttl = 90      # сек держим вверху
+        self._ad_mobile_cache = {}
+        self._ad_mobile_failed_cache = {}
+        self._ad_mobile_cache_lock = threading.Lock()
+        self._ad_mobile_cache_ttl = 3 * 60 * 60
+        self._ad_mobile_failed_ttl = 15 * 60
+        self._ad_domain_order = [
+            ("omg", "omg.cspfmba.ru"),
+            ("pak", "pak-cspmz.ru"),
+        ]
+
+        if os.environ.get("TSHELPER_PHONE_SELFTEST", "").strip() == "1":
+            self._run_phone_helpers_selftest()
 
         self.build_ui()
         self.populate_buttons()
@@ -1406,6 +1435,295 @@ class MainWindow:
     def _log_action(self, action: str):
         log_action(action)
         log_message(action)
+
+    def _run_phone_helpers_selftest(self):
+        cases = [
+            ("+7 (916) 123-45-67", "79161234567", "9161234567"),
+            ("8-916-123-45-67", "79161234567", "9161234567"),
+            ("9161234567", "79161234567", "9161234567"),
+            ("12345", "", ""),
+        ]
+        failed = []
+        for raw, expected_norm, expected_last10 in cases:
+            got_norm = normalize_phone(raw)
+            got_last10 = phone_last10(raw)
+            if got_norm != expected_norm or got_last10 != expected_last10:
+                failed.append((raw, got_norm, got_last10, expected_norm, expected_last10))
+        if failed:
+            log_message(f"[SELFTEST] normalize_phone/phone_last10: FAIL {failed}")
+        else:
+            log_message("[SELFTEST] normalize_phone/phone_last10: OK")
+
+    def _run_powershell_json(self, script: str, timeout: int = 15):
+        cmd = [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-Command", script,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        if result.returncode != 0:
+            raise RuntimeError(err or out or f"PowerShell rc={result.returncode}")
+        if not out:
+            return []
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            start = out.find("[")
+            end = out.rfind("]")
+            if start != -1 and end > start:
+                data = json.loads(out[start:end+1])
+            else:
+                start = out.find("{")
+                end = out.rfind("}")
+                if start != -1 and end > start:
+                    data = json.loads(out[start:end+1])
+                else:
+                    raise
+        if isinstance(data, dict):
+            return [data]
+        if isinstance(data, list):
+            return data
+        return []
+
+    def _find_ad_candidates_by_mobile(self, domain_key: str, domain_server: str, needle: str) -> list:
+        if not needle:
+            return []
+        needle_escaped = needle.replace("'", "''")
+        filter_expr = (
+            f"(mobile -like '*{needle_escaped}*' -or "
+            f"telephoneNumber -like '*{needle_escaped}*' -or "
+            f"otherMobile -like '*{needle_escaped}*' -or "
+            f"ipPhone -like '*{needle_escaped}*' -or "
+            f"homePhone -like '*{needle_escaped}*')"
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Import-Module ActiveDirectory
+$users = Get-ADUser -Filter "{filter_expr}" -Server '{domain_server}' -Properties displayName,cn,samAccountName,mail,mobile,telephoneNumber,otherMobile,ipPhone,homePhone
+$items = foreach ($u in $users) {{
+  [PSCustomObject]@{{
+    domain = '{domain_key}'
+    displayName = $u.DisplayName
+    cn = $u.CN
+    samAccountName = $u.SamAccountName
+    mail = $u.mail
+    mobile = $u.mobile
+    telephoneNumber = $u.telephoneNumber
+    otherMobile = @($u.otherMobile)
+    ipPhone = $u.ipPhone
+    homePhone = $u.homePhone
+  }}
+}}
+@($items) | ConvertTo-Json -Compress -Depth 4
+""".strip()
+        self._cw_debug_log(f"AD lookup: домен={domain_key}, needle={needle}", call_log=True)
+        try:
+            items = self._run_powershell_json(script, timeout=18)
+            self._cw_debug_log(f"AD lookup: домен={domain_key}, кандидатов={len(items)}", call_log=True)
+            return items
+        except Exception as e:
+            self._cw_debug_log(f"AD lookup ошибка: домен={domain_key}, {e}", call_log=True)
+            return []
+
+    def map_ad_person_to_ts_user(self, ad_person: dict):
+        if not isinstance(ad_person, dict):
+            return None
+        all_users = self.users.get_users()
+        sam = str(ad_person.get("samAccountName", "") or "").strip().lower()
+        mail = str(ad_person.get("mail", "") or "").strip().lower()
+        ad_display_name = (ad_person.get("displayName") or ad_person.get("cn") or "").strip()
+
+        if sam:
+            by_login = [u for u in all_users if self.normalize_pc_name(str(u.get("pc_name", "")))[0].lower() == sam]
+            if len(by_login) == 1:
+                return by_login[0]
+
+        if ad_display_name:
+            ad_norm = norm_name(ad_display_name)
+            by_name = [u for u in all_users if norm_name(u.get("name", "")) == ad_norm]
+            if len(by_name) == 1:
+                return by_name[0]
+
+            ad_parts = parse_person_name(ad_display_name)
+            by_initials = []
+            for u in all_users:
+                user_parts = parse_person_name(u.get("name", ""))
+                if not ad_parts.get("last") or user_parts.get("last") != ad_parts.get("last"):
+                    continue
+                if ad_parts.get("first_init") and user_parts.get("first_init") != ad_parts.get("first_init"):
+                    continue
+                if ad_parts.get("middle_init") and user_parts.get("middle_init") != ad_parts.get("middle_init"):
+                    continue
+                by_initials.append(u)
+            if len(by_initials) == 1:
+                return by_initials[0]
+
+        if mail:
+            by_mail = [u for u in all_users if str(u.get("email", "")).strip().lower() == mail]
+            if len(by_mail) == 1:
+                return by_mail[0]
+
+        return None
+
+    def ad_lookup_by_mobile(self, caller_num: str):
+        canonical = normalize_phone(caller_num)
+        last10 = phone_last10(caller_num)
+        cache_key = canonical or (f"last10:{last10}" if last10 else "")
+        if not cache_key:
+            return None
+
+        now = time.time()
+        with self._ad_mobile_cache_lock:
+            cache_entry = self._ad_mobile_cache.get(cache_key)
+            if cache_entry and cache_entry.get("expires", 0) > now:
+                return cache_entry.get("value")
+            failed_exp = self._ad_mobile_failed_cache.get(cache_key, 0)
+            if failed_exp > now:
+                return None
+
+        needles = []
+        if canonical:
+            needles.append(canonical)
+        if last10 and last10 not in needles:
+            needles.append(last10)
+
+        by_exact = []
+        by_last10 = []
+        for domain_key, domain_server in self._ad_domain_order:
+            domain_candidates = []
+            for needle in needles:
+                for item in self._find_ad_candidates_by_mobile(domain_key, domain_server, needle):
+                    item = item if isinstance(item, dict) else {}
+                    item["domain"] = domain_key
+                    domain_candidates.append(item)
+
+            for person in domain_candidates:
+                phones_raw = [
+                    person.get("mobile", ""),
+                    person.get("telephoneNumber", ""),
+                    person.get("ipPhone", ""),
+                    person.get("homePhone", ""),
+                ]
+                other_mobile = person.get("otherMobile", [])
+                if isinstance(other_mobile, list):
+                    phones_raw.extend(other_mobile)
+                elif other_mobile:
+                    phones_raw.append(str(other_mobile))
+
+                canon_phones = [p for p in (normalize_phone(v) for v in phones_raw) if p]
+                last10_phones = [p for p in (phone_last10(v) for v in phones_raw) if p]
+
+                if canonical and canonical in canon_phones:
+                    matched_mobile = canonical
+                    by_exact.append((person, domain_key, matched_mobile))
+                elif last10 and last10 in last10_phones:
+                    by_last10.append((person, domain_key, last10))
+
+            if by_exact:
+                break
+
+        result = None
+        if len(by_exact) == 1:
+            person, domain_key, matched_mobile = by_exact[0]
+            result = {
+                "rule": "ad_mobile",
+                "ad_domain": domain_key,
+                "ad_display_name": (person.get("displayName") or person.get("cn") or "").strip(),
+                "ad_mobile": matched_mobile,
+                "ad_person": person,
+            }
+        elif not by_exact and len(by_last10) == 1:
+            person, domain_key, matched_mobile = by_last10[0]
+            result = {
+                "rule": "ad_mobile_last10",
+                "ad_domain": domain_key,
+                "ad_display_name": (person.get("displayName") or person.get("cn") or "").strip(),
+                "ad_mobile": matched_mobile,
+                "ad_person": person,
+            }
+
+        with self._ad_mobile_cache_lock:
+            if result:
+                self._ad_mobile_cache[cache_key] = {"expires": now + self._ad_mobile_cache_ttl, "value": result}
+                self._ad_mobile_failed_cache.pop(cache_key, None)
+            else:
+                self._ad_mobile_failed_cache[cache_key] = now + self._ad_mobile_failed_ttl
+        return result
+
+    def resolve_call_to_user(self, call_name: str, call_num: str):
+        raw_num = call_num or ""
+        normalized_num = normalize_phone(raw_num)
+        self._cw_debug_log(
+            f"resolve_call_to_user: raw_num={raw_num!r}, normalized={normalized_num!r}, call_name={call_name!r}",
+            call_log=True,
+        )
+
+        matched_user, rule = self._match_user_by_caller_with_rule(call_name, call_num)
+        self._cw_debug_log(
+            f"resolve_call_to_user: match ext/ФИО => {'найден' if matched_user else 'не найден'} ({rule})",
+            call_log=True,
+        )
+        if matched_user:
+            return matched_user, {
+                "rule": rule,
+                "ad_domain": "",
+                "ad_display_name": "",
+                "ad_mobile": "",
+            }
+
+        ad_match = self.ad_lookup_by_mobile(call_num)
+        if not ad_match:
+            return None, {
+                "rule": "no_match",
+                "ad_domain": "",
+                "ad_display_name": "",
+                "ad_mobile": "",
+            }
+
+        ts_user = self.map_ad_person_to_ts_user(ad_match.get("ad_person", {}))
+        if ts_user:
+            self._cw_debug_log(
+                f"resolve_call_to_user: AD найден, TS user={ts_user.get('pc_name')}",
+                call_log=True,
+            )
+        else:
+            self._cw_debug_log(
+                "resolve_call_to_user: AD найден, но карточка в users.json не найдена",
+                call_log=True,
+            )
+        meta = {
+            "rule": ad_match.get("rule", "ad_mobile"),
+            "ad_domain": ad_match.get("ad_domain", ""),
+            "ad_display_name": ad_match.get("ad_display_name", ""),
+            "ad_mobile": ad_match.get("ad_mobile", ""),
+        }
+        return ts_user, meta
+
+    def _format_orphan_call_text(self, call: dict) -> str:
+        ad_match = call.get("ad_match") or {}
+        if ad_match.get("ad_display_name"):
+            return (
+                f"📞 {call.get('num') or 'unknown'}\n"
+                f"Определён из AD: {ad_match.get('ad_display_name')}\n"
+                f"mobile: {ad_match.get('ad_mobile') or '-'}\n"
+                f"→ {call.get('ext') or '-'}"
+            )
+        return (
+            f"📞 {call.get('num') or 'unknown'}\n"
+            f"{('(' + (call.get('name') or '') + ')') if call.get('name') else ''}\n"
+            f"→ {call.get('ext') or '-'}"
+        )
 
     # --------- UI ----------
     def build_ui(self):
@@ -2106,14 +2424,21 @@ class MainWindow:
             mapped_user = users_by_pc.get(pc_name) if pc_name else None
 
             if not mapped_user and (call.get("name") or call.get("num")):
-                matched_user, rule = self._match_user_by_caller_with_rule(call.get("name", ""), call.get("num", ""))
+                meta = call.get("resolution") if isinstance(call.get("resolution"), dict) else None
+                matched_user = call.get("user")
+                if not meta:
+                    matched_user, meta = self.resolve_call_to_user(call.get("name", ""), call.get("num", ""))
+                    call["resolution"] = meta
+                    if matched_user:
+                        call["user"] = matched_user
                 self._cw_debug_log(
-                    f"_match_user_by_caller для ext={call.get('ext')}: {'найден' if matched_user else 'не найден'} ({rule})",
+                    f"resolve_call_to_user для ext={call.get('ext')}: {'найден' if matched_user else 'не найден'} ({meta.get('rule') if meta else 'no_meta'})",
                     call_log=True,
                 )
                 if matched_user:
-                    call["user"] = matched_user
                     mapped_user = users_by_pc.get(matched_user.get("pc_name"))
+                elif meta and meta.get("ad_display_name"):
+                    call["ad_match"] = meta
 
             if mapped_user:
                 pc_name = mapped_user.get("pc_name")
@@ -2123,6 +2448,11 @@ class MainWindow:
                         pinned_seen.add(pc_name)
                         pinned_users.append(mapped_user)
             else:
+                if user and user.get("pc_name"):
+                    self._cw_debug_log(
+                        f"get_visible_users: user={user.get('pc_name')} не найден в users_by_pc (рассинхрон users.json)",
+                        call_log=True,
+                    )
                 orphan_calls.append(call)
 
         self._cw_debug_log(
@@ -2184,7 +2514,7 @@ class MainWindow:
         for call in orphan_calls:
             btn = tk.Button(
                 self.inner,
-                text=f"📞 {call['num'] or 'unknown'}\n{('(' + call['name'] + ')') if call['name'] else ''}\n→ {call['ext']}",
+                text=self._format_orphan_call_text(call),
                 bg=self.caller_bg,
                 fg=self.caller_fg,
                 activebackground=self.caller_bg,
@@ -3320,7 +3650,7 @@ class MainWindow:
                         num, name, who_key = normalize_caller(raw_num, raw_name)
                         who_key = who_key or prev_who_key or f"ext-{ext}"
                         self._cw_debug_log(
-                            f"Разбор звонка ext={ext}: num='{num}', name='{name}', who_key='{who_key}'",
+                            f"Разбор звонка ext={ext}: raw_num='{raw_num}', num='{num}', normalized='{normalize_phone(num)}', name='{name}', who_key='{who_key}'",
                             call_log=True,
                         )
                         who = (num or "unknown") + (f" ({name})" if name else "")
@@ -3330,14 +3660,19 @@ class MainWindow:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
                             log_call(f"Звонок на {ext} от {who}")
 
-                            matched_user, rule = self._match_user_by_caller_with_rule(name, num)
+                            matched_user, resolution_meta = self.resolve_call_to_user(name, num)
                             if matched_user:
                                 self._cw_debug_log(
-                                    f"_match_user_by_caller: найден {matched_user.get('pc_name')} ({rule})",
+                                    f"resolve_call_to_user: найден {matched_user.get('pc_name')} ({resolution_meta.get('rule')})",
                                     call_log=True,
                                 )
                             else:
-                                self._cw_debug_log("_match_user_by_caller: не найден (не удалось сопоставить по номеру/ФИО)", call_log=True)
+                                self._cw_debug_log(
+                                    f"resolve_call_to_user: не найден ({resolution_meta.get('rule')})",
+                                    call_log=True,
+                                )
+
+                            ad_match = resolution_meta if resolution_meta.get("ad_display_name") else None
 
                             # 1) показать сверху
                             with self.calls_lock:
@@ -3364,6 +3699,8 @@ class MainWindow:
                                     "ts": started_ts,
                                     "user": matched_user,
                                     "who_key": who_key,
+                                    "resolution": resolution_meta,
+                                    "ad_match": ad_match,
                                 })
                                 self._cw_debug_log(
                                     "active_calls add: "
@@ -3376,7 +3713,22 @@ class MainWindow:
 
                             # 2) всплывашка
                             if popup_on:
-                                self.master.after(0, lambda e=ext, w=who: self._popup(f"Звонок на {e}", w))
+                                popup_message = None
+                                if resolution_meta.get("rule") in {"ad_mobile", "ad_mobile_last10"}:
+                                    if matched_user:
+                                        popup_message = (
+                                            f"{num or 'unknown'} → {ext}\n"
+                                            f"Совпадение: {resolution_meta.get('ad_display_name') or matched_user.get('name', '')}\n"
+                                            f"mobile: {resolution_meta.get('ad_mobile') or '-'}"
+                                        )
+                                    elif resolution_meta.get("ad_display_name"):
+                                        popup_message = (
+                                            f"{num or 'unknown'} → {ext}\n"
+                                            f"Определён из AD: {resolution_meta.get('ad_display_name')}\n"
+                                            f"mobile: {resolution_meta.get('ad_mobile') or '-'}"
+                                        )
+                                if popup_message:
+                                    self.master.after(0, lambda e=ext, m=popup_message: self._popup(f"Звонок на {e}", m))
 
                 with self.calls_lock:
                     now_ts = time.time()
