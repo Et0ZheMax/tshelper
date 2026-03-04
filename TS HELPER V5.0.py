@@ -1192,7 +1192,7 @@ class MainWindow:
         self.ping_cache_ttl = 15
 
         # активные звонки (список словарей)
-        self.active_calls = []   # [{ext, num, name, ts, user, who_key}]
+        self.active_calls = []   # [{call_id, ext, num, name, ts, started_ts, last_seen_ts, user, who_key}]
         self.calls_lock = threading.Lock()
         self.calls_ttl = 90      # сек держим вверху
         self._ad_mobile_cache = {}
@@ -1709,6 +1709,65 @@ $items = foreach ($u in $users) {{
             "ad_mobile": ad_match.get("ad_mobile", ""),
         }
         return ts_user, meta
+
+    def _build_call_id(self, ext: str, who_key: str, num: str) -> str:
+        num_key = normalize_phone(num) or phone_last10(num) or clean_internal_number(num) or "unknown"
+        return f"{ext}|{who_key or 'unknown'}|{num_key}"
+
+    def _upsert_active_call(self, ext: str, num: str, name: str, who_key: str, matched_user, resolution_meta: dict):
+        now = time.time()
+        call_id = self._build_call_id(ext, who_key, num)
+        ad_match = resolution_meta if resolution_meta.get("ad_display_name") else None
+
+        updated = False
+        change_flags = {
+            "pc_key_changed": False,
+            "num_changed": False,
+            "name_changed": False,
+            "rule_changed": False,
+        }
+        with self.calls_lock:
+            for call in self.active_calls:
+                if call.get("call_id") == call_id:
+                    prev_pc_key = self.canonical_pc_key((call.get("user") or {}).get("pc_name", ""))
+                    next_pc_key = self.canonical_pc_key((matched_user or {}).get("pc_name", ""))
+                    prev_num = call.get("num", "") or ""
+                    prev_name = call.get("name", "") or ""
+                    prev_rule = ((call.get("resolution") or {}).get("rule") or "")
+
+                    call["num"] = num or ""
+                    call["name"] = name or ""
+                    call["user"] = matched_user
+                    call["who_key"] = who_key
+                    call["resolution"] = resolution_meta
+                    call["ad_match"] = ad_match
+                    call["last_seen_ts"] = now
+                    call["ts"] = now
+                    change_flags = {
+                        "pc_key_changed": prev_pc_key != next_pc_key,
+                        "num_changed": prev_num != (num or ""),
+                        "name_changed": prev_name != (name or ""),
+                        "rule_changed": prev_rule != (resolution_meta.get("rule") or ""),
+                    }
+                    updated = True
+                    break
+
+            if not updated:
+                self.active_calls.append({
+                    "call_id": call_id,
+                    "ext": ext,
+                    "num": num or "",
+                    "name": name or "",
+                    "ts": now,
+                    "started_ts": now,
+                    "last_seen_ts": now,
+                    "user": matched_user,
+                    "who_key": who_key,
+                    "resolution": resolution_meta,
+                    "ad_match": ad_match,
+                })
+
+        return call_id, now, ("update" if updated else "add"), change_flags
 
     def _format_orphan_call_text(self, call: dict) -> str:
         ad_match = call.get("ad_match") or {}
@@ -2454,7 +2513,10 @@ $items = foreach ($u in $users) {{
 
         with self.calls_lock:
             now = time.time()
-            self.active_calls = [c for c in self.active_calls if now - c["ts"] < self.calls_ttl]
+            self.active_calls = [
+                c for c in self.active_calls
+                if now - c.get("last_seen_ts", c.get("ts", now)) < self.calls_ttl
+            ]
             callers = sorted(self.active_calls, key=lambda c: c["ts"], reverse=True)
 
         self._cw_debug_log(f"get_visible_users: callers_after_ttl={len(callers)}")
@@ -2504,7 +2566,9 @@ $items = foreach ($u in $users) {{
                             f"widget_missing=True, user_widgets_sample={sample_keys}",
                             call_log=True,
                         )
-                    caller_by_pc[pc_key] = call
+                    existing_call = caller_by_pc.get(pc_key)
+                    if not existing_call or call.get("ts", 0) > existing_call.get("ts", 0):
+                        caller_by_pc[pc_key] = call
                     if pc_key not in pinned_seen:
                         pinned_seen.add(pc_key)
                         pinned_keys.append(pc_key)
@@ -3689,9 +3753,13 @@ $items = foreach ($u in $users) {{
                         now_ts = time.time()
                         self.active_calls = [
                             c for c in self.active_calls
-                            if now_ts - c.get("ts", now_ts) < self.calls_ttl
+                            if now_ts - c.get("last_seen_ts", c.get("ts", now_ts)) < self.calls_ttl
                         ]
-                        prev_call = next((c for c in self.active_calls if c.get("ext") == ext), None)
+                        prev_call = max(
+                            (c for c in self.active_calls if c.get("ext") == ext),
+                            key=lambda c: c.get("last_seen_ts", c.get("ts", 0)),
+                            default=None,
+                        )
 
                     block_active = is_block_active(block, ext)
                     caller = parse_caller_from_block(block, ext) if block_active and block else None
@@ -3726,61 +3794,67 @@ $items = foreach ($u in $users) {{
                         )
                         who = (num or "unknown") + (f" ({name})" if name else "")
                         key = f"{ext}|{who_key}|{int(time.time()/dup_ttl)}"
-                        active_now.add((ext, who_key))
+                        call_id = self._build_call_id(ext, who_key, num)
+                        first_seen_in_cycle = call_id not in active_now
+                        active_now.add(call_id)
+
+                        matched_user, resolution_meta = self.resolve_call_to_user(name, num)
+                        if matched_user:
+                            self._cw_debug_log(
+                                f"resolve_call_to_user: найден {matched_user.get('pc_name')} ({resolution_meta.get('rule')})",
+                                call_log=True,
+                            )
+                        else:
+                            self._cw_debug_log(
+                                f"resolve_call_to_user: не найден ({resolution_meta.get('rule')})",
+                                call_log=True,
+                            )
+
+                        call_id, call_ts, upsert_mode, change_flags = self._upsert_active_call(
+                            ext=ext,
+                            num=num,
+                            name=name,
+                            who_key=who_key,
+                            matched_user=matched_user,
+                            resolution_meta=resolution_meta,
+                        )
+                        call_pc_key = ""
+                        if matched_user:
+                            call_pc_key = self.canonical_pc_key(matched_user.get("pc_name", ""))
+                        self._cw_debug_log(
+                            f"active_calls {upsert_mode}: ext={ext}, who_key={who_key}, pc_key={call_pc_key or '-'}, "
+                            f"ts={call_ts:.3f}, rule={resolution_meta.get('rule')}, call_id={call_id}",
+                            call_log=True,
+                        )
+
+                        refresh_reason = ""
+                        if upsert_mode == "add":
+                            refresh_reason = "add"
+                        else:
+                            update_reasons = []
+                            if first_seen_in_cycle:
+                                update_reasons.append("first_seen_in_cycle")
+                            if change_flags.get("pc_key_changed"):
+                                update_reasons.append("pc_key")
+                            if change_flags.get("num_changed"):
+                                update_reasons.append("num")
+                            if change_flags.get("name_changed"):
+                                update_reasons.append("name")
+                            if change_flags.get("rule_changed"):
+                                update_reasons.append("rule")
+                            if update_reasons:
+                                refresh_reason = "update:" + ",".join(update_reasons)
+
+                        if refresh_reason:
+                            self._cw_debug_log(
+                                f"refresh reason: {refresh_reason}, call_id={call_id}, ext={ext}",
+                                call_log=True,
+                            )
+                            self.master.after(0, self._refresh_current_view_from_call_watcher)
+
                         if key not in seen:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
                             log_call(f"Звонок на {ext} от {who}")
-
-                            matched_user, resolution_meta = self.resolve_call_to_user(name, num)
-                            if matched_user:
-                                self._cw_debug_log(
-                                    f"resolve_call_to_user: найден {matched_user.get('pc_name')} ({resolution_meta.get('rule')})",
-                                    call_log=True,
-                                )
-                            else:
-                                self._cw_debug_log(
-                                    f"resolve_call_to_user: не найден ({resolution_meta.get('rule')})",
-                                    call_log=True,
-                                )
-
-                            ad_match = resolution_meta if resolution_meta.get("ad_display_name") else None
-
-                            # 1) показать сверху
-                            with self.calls_lock:
-                                now = time.time()
-                                self.active_calls = [
-                                    c for c in self.active_calls
-                                    if not (c.get("ext") == ext and c.get("who_key") == who_key)
-                                ]
-                                started_ts = now
-                                if prev_call:
-                                    prev_ts = prev_call.get("ts", now)
-                                    prev_is_same_call = (
-                                        prev_call.get("who_key") == who_key
-                                        and prev_call.get("ext") == ext
-                                    )
-                                    prev_not_expired = (now - prev_ts) < self.calls_ttl
-                                    if prev_is_same_call and prev_not_expired:
-                                        started_ts = prev_ts
-
-                                self.active_calls.insert(0, {
-                                    "ext": ext,
-                                    "num": num or "",
-                                    "name": name or "",
-                                    "ts": started_ts,
-                                    "user": matched_user,
-                                    "who_key": who_key,
-                                    "resolution": resolution_meta,
-                                    "ad_match": ad_match,
-                                })
-                                self._cw_debug_log(
-                                    "active_calls add: "
-                                    f"ext={ext}, who_key={who_key}, started_ts={started_ts:.3f}, "
-                                    f"now={now:.3f}, age={now - started_ts:.3f}, "
-                                    f"matched_user={matched_user.get('pc_name') if matched_user else None}",
-                                    call_log=True,
-                                )
-                            self.master.after(0, self._refresh_current_view_from_call_watcher)
 
                             # 2) всплывашка
                             if popup_on:
@@ -3806,13 +3880,32 @@ $items = foreach ($u in $users) {{
                     original_calls = list(self.active_calls)
                     filtered_calls = [
                         c for c in self.active_calls
-                        if (c.get("ext"), c.get("who_key")) in active_now and now_ts - c["ts"] < self.calls_ttl
+                        if c.get("call_id") in active_now and now_ts - c.get("last_seen_ts", c.get("ts", now_ts)) < self.calls_ttl
                     ]
                     ended_calls = [c for c in original_calls if c not in filtered_calls]
                     self.active_calls = filtered_calls
 
+                    mapped_pc_keys = sorted({
+                        self.canonical_pc_key(c.get("user", {}).get("pc_name", ""))
+                        for c in self.active_calls
+                        if isinstance(c.get("user"), dict)
+                    })
+                    mapped_pc_keys = [k for k in mapped_pc_keys if k]
+                    pinned_keys = []
+                    pinned_seen = set()
+                    for call in sorted(self.active_calls, key=lambda c: c.get("ts", 0), reverse=True):
+                        user = call.get("user")
+                        pc_key = self.canonical_pc_key((user or {}).get("pc_name", "")) if isinstance(user, dict) else ""
+                        if pc_key and pc_key not in pinned_seen:
+                            pinned_seen.add(pc_key)
+                            pinned_keys.append(pc_key)
+                    self._cw_debug_log(
+                        f"cycle summary: active_calls={len(self.active_calls)}, unique_pc_keys={len(mapped_pc_keys)}, pc_keys={mapped_pc_keys}, pinned_keys={pinned_keys}",
+                        call_log=True,
+                    )
+
                 for c in ended_calls:
-                    duration = int(now_ts - c.get("ts", now_ts))
+                    duration = int(now_ts - c.get("started_ts", c.get("ts", now_ts)))
                     who = (c.get("num") or "unknown") + (f" ({c.get('name')})" if c.get("name") else "")
                     log_call(f"Звонок завершён на {c.get('ext')}: {who}, длительность ~{duration} c")
 
