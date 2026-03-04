@@ -2405,20 +2405,27 @@ $items = foreach ($u in $users) {{
         }
 
         # миграция старых/сырых ключей к canonical виду
+        migrated = {}
         for old_key, widget in list(self.user_widgets.items()):
             new_key = self.canonical_pc_key(old_key)
             if not new_key:
-                self.user_widgets.pop(old_key, None)
                 widget.destroy()
                 continue
-            if new_key == old_key:
+
+            existing = migrated.get(new_key)
+            if not existing:
+                migrated[new_key] = widget
                 continue
-            existing = self.user_widgets.get(new_key)
-            self.user_widgets.pop(old_key, None)
-            if existing and existing is not widget:
+
+            existing_pc_key = self.canonical_pc_key(getattr(existing, "user", {}).get("pc_name", ""))
+            widget_pc_key = self.canonical_pc_key(getattr(widget, "user", {}).get("pc_name", ""))
+            if existing_pc_key != new_key and widget_pc_key == new_key:
+                existing.destroy()
+                migrated[new_key] = widget
+            else:
                 widget.destroy()
-                continue
-            self.user_widgets[new_key] = widget
+
+        self.user_widgets = migrated
 
         # удаляем карточки, которых больше нет в списке пользователей
         for pc_name in list(self.user_widgets.keys()):
@@ -2454,7 +2461,7 @@ $items = foreach ($u in $users) {{
 
         caller_by_pc = {}
         orphan_calls = []
-        pinned_users = []
+        pinned_keys = []
         pinned_seen = set()
 
         for call in callers:
@@ -2480,12 +2487,27 @@ $items = foreach ($u in $users) {{
                     call["ad_match"] = meta
 
             if mapped_user:
-                pc_key = self.canonical_pc_key(mapped_user.get("pc_name"))
-                if pc_key:
+                mapped_pc_name = mapped_user.get("pc_name")
+                pc_key = self.canonical_pc_key(mapped_pc_name)
+                if not pc_key:
+                    sample_keys = list(self.user_widgets.keys())[:20] if self._cw_debug_enabled() else []
+                    self._cw_debug_log(
+                        f"get_visible_users: mapped_user pc_name={mapped_pc_name}, canonical_pc_key={pc_key!r}, "
+                        f"user_widgets_sample={sample_keys}",
+                        call_log=True,
+                    )
+                else:
+                    if pc_key not in self.user_widgets:
+                        sample_keys = list(self.user_widgets.keys())[:20] if self._cw_debug_enabled() else []
+                        self._cw_debug_log(
+                            f"get_visible_users: mapped_user pc_name={mapped_pc_name}, canonical_pc_key={pc_key}, "
+                            f"widget_missing=True, user_widgets_sample={sample_keys}",
+                            call_log=True,
+                        )
                     caller_by_pc[pc_key] = call
                     if pc_key not in pinned_seen:
                         pinned_seen.add(pc_key)
-                        pinned_users.append(mapped_user)
+                        pinned_keys.append(pc_key)
             else:
                 if user and user.get("pc_name"):
                     self._cw_debug_log(
@@ -2494,22 +2516,22 @@ $items = foreach ($u in $users) {{
                     )
                 orphan_calls.append(call)
 
-        ordered_users = list(pinned_users)
+        ordered_keys = list(pinned_keys)
         for user in filtered_sorted:
-            if self.canonical_pc_key(user.get("pc_name")) not in pinned_seen:
-                ordered_users.append(user)
+            pc_key = self.canonical_pc_key(user.get("pc_name"))
+            if pc_key and pc_key not in pinned_seen:
+                ordered_keys.append(pc_key)
 
-        ordered_first_name = ordered_users[0].get("pc_name") if ordered_users else None
-        ordered_first_key = self.canonical_pc_key(ordered_first_name)
+        missing_widgets = [k for k in pinned_keys if k not in self.user_widgets]
         self._cw_debug_log(
-            f"get_visible_users: pinned_pc_keys={[self.canonical_pc_key(u.get('pc_name')) for u in pinned_users]}, "
+            f"get_visible_users: pinned_keys={pinned_keys}, "
+            f"ordered_keys[:10]={ordered_keys[:10]}, "
+            f"missing_widgets={missing_widgets}, "
             f"caller_by_pc keys={list(caller_by_pc.keys())}, "
-            f"ordered_first_name={ordered_first_name}, ordered_first_key={ordered_first_key}, "
-            f"ordered_first_widget_exists={ordered_first_key in self.user_widgets}, "
             f"orphan_calls count={len(orphan_calls)}"
         )
 
-        return ordered_users, filtered_sorted, caller_by_pc, orphan_calls
+        return ordered_keys, filtered_sorted, caller_by_pc, orphan_calls
 
     def apply_call_state(self, caller_by_pc: dict):
         affected = []
@@ -2520,7 +2542,7 @@ $items = foreach ($u in $users) {{
             widget.set_caller(caller)
         self._cw_debug_log(f"apply_call_state: caller_info получен для {affected}")
 
-    def render_grid(self, ordered_users, orphan_calls, show_empty_state=False):
+    def render_grid(self, ordered_keys, orphan_calls, show_empty_state=False):
         for widget in self.user_widgets.values():
             widget.grid_remove()
         for widget in self.orphan_widgets:
@@ -2534,7 +2556,7 @@ $items = foreach ($u in $users) {{
         row = col = 0
         self.buttons = {}
 
-        if show_empty_state and not ordered_users:
+        if show_empty_state and not ordered_keys:
             self.empty_state_label = ttk.Label(
                 self.inner,
                 text="Ничего не найдено. Попробуйте изменить запрос.",
@@ -2543,10 +2565,13 @@ $items = foreach ($u in $users) {{
             self.empty_state_label.grid(row=0, column=0, padx=16, pady=16, sticky="n")
             self.inner.grid_columnconfigure(0, weight=1)
 
-        for user in ordered_users:
-            pc_key = self.canonical_pc_key(user.get("pc_name"))
+        for pc_key in ordered_keys:
             widget = self.user_widgets.get(pc_key)
             if not widget:
+                sample_keys = list(self.user_widgets.keys())[:20] if self._cw_debug_enabled() else []
+                self._cw_debug_log(
+                    f"render_grid: отсутствует widget для pc_key={pc_key}, available_keys_sample={sample_keys}"
+                )
                 continue
             widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
             self.buttons[pc_key] = widget
@@ -2584,7 +2609,7 @@ $items = foreach ($u in $users) {{
         if search_text is None:
             search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
         self._sync_user_widgets()
-        ordered_users, filtered_sorted, caller_by_pc, orphan_calls = self.get_visible_users(search_text)
+        ordered_keys, filtered_sorted, caller_by_pc, orphan_calls = self.get_visible_users(search_text)
 
         # статусы обновляем у всех карточек, но иконки показываем только в режиме поиска
         for widget in self.user_widgets.values():
@@ -2593,7 +2618,7 @@ $items = foreach ($u in $users) {{
 
         self.apply_call_state(caller_by_pc)
         show_empty = bool(search_text) and not filtered_sorted
-        self.render_grid(ordered_users, orphan_calls, show_empty_state=show_empty)
+        self.render_grid(ordered_keys, orphan_calls, show_empty_state=show_empty)
         self.count_lbl.config(text=f"Найдено аккаунтов: {len(filtered_sorted)}")
         return filtered_sorted
 
