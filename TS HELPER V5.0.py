@@ -236,7 +236,7 @@ class SecretStorage:
         self._ephemeral.pop(key_name, None)
 
 # --- Debug dumps for PBX page ---
-PBX_DEBUG_DUMP = True
+PBX_DEBUG_DUMP = False
 PBX_DUMP_DIR = "./_pbx_debug"
 
 def _pbx_dump(name: str, data):
@@ -751,6 +751,8 @@ class SettingsManager:
             "cw_interval": 2,
             "cw_popup": True,
             "cw_debug": False,
+            "cw_ui_debounce_ms": 150,
+            "pbx_debug_dump": False,
             "cw_login": "",
             "cw_password": "",
             # Цвета
@@ -1195,6 +1197,20 @@ class MainWindow:
         self.active_calls = []   # [{call_id, ext, num, name, ts, started_ts, last_seen_ts, user, who_key}]
         self.calls_lock = threading.Lock()
         self.calls_ttl = 90      # сек держим вверху
+        self._cw_ui_job = None
+        self._cw_ui_refresh_pending = False
+        self._cw_last_signature = None
+        self._cw_render_state = {
+            "ordered_keys": [],
+            "caller_by_pc": {},
+            "orphan_signature": (),
+            "orphan_data": [],
+            "show_empty": False,
+            "count": 0,
+            "search_text": "",
+            "show_status": False,
+        }
+        self._gradient_cache = {}
         self._ad_mobile_cache = {}
         self._ad_mobile_failed_cache = {}
         self._ad_mobile_cache_lock = threading.Lock()
@@ -1242,6 +1258,30 @@ class MainWindow:
                 dx, dy = x - cx, y - cy
                 if dx*dx + dy*dy <= r*r:
                     img.put(color, (x, y))
+        return img
+
+    def get_gradient_image(self, width: int, height: int, start_color: str, end_color: str):
+        key = (int(width), int(height), str(start_color), str(end_color))
+        cached = self._gradient_cache.get(key)
+        if cached is not None:
+            return cached
+        img = tk.PhotoImage(width=width, height=height)
+
+        def hex_to_rgb(h: str):
+            h = h.lstrip('#')
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+        def rgb_to_hex(rgb):
+            return "#%02x%02x%02x" % rgb
+
+        start_rgb = hex_to_rgb(start_color)
+        end_rgb = hex_to_rgb(end_color)
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            line_rgb = tuple(int(start_rgb[i] + (end_rgb[i] - start_rgb[i]) * ratio) for i in range(3))
+            img.put(rgb_to_hex(line_rgb), to=(0, y, width, y + 1))
+
+        self._gradient_cache[key] = img
         return img
 
     # --------- Работа с именами ПК ----------
@@ -2597,14 +2637,116 @@ $items = foreach ($u in $users) {{
 
         return ordered_keys, filtered_sorted, caller_by_pc, orphan_calls
 
-    def apply_call_state(self, caller_by_pc: dict):
+    def apply_call_state(self, caller_by_pc: dict, changed_keys=None):
         affected = []
-        for pc_name, widget in self.user_widgets.items():
+        if changed_keys is None:
+            iterable = list(self.user_widgets.keys())
+        else:
+            iterable = [k for k in changed_keys if k in self.user_widgets]
+        for pc_name in iterable:
+            widget = self.user_widgets.get(pc_name)
+            if not widget:
+                continue
             caller = caller_by_pc.get(pc_name)
             if caller:
                 affected.append(pc_name)
             widget.set_caller(caller)
-        self._cw_debug_log(f"apply_call_state: caller_info получен для {affected}")
+        if changed_keys is None or affected:
+            self._cw_debug_log(f"apply_call_state: caller_info получен для {affected}")
+
+    def _compute_view_state(self, search_text: str, show_status: bool):
+        ordered_keys, filtered_sorted, caller_by_pc, orphan_calls = self.get_visible_users(search_text)
+        show_empty = bool(search_text) and not filtered_sorted
+        orphan_signature = tuple(
+            (
+                call.get("call_id", ""),
+                call.get("ext", ""),
+                call.get("num", ""),
+                call.get("name", ""),
+                ((call.get("ad_match") or {}).get("ad_display_name") if isinstance(call.get("ad_match"), dict) else ""),
+                ((call.get("ad_match") or {}).get("ad_mobile") if isinstance(call.get("ad_match"), dict) else ""),
+            )
+            for call in orphan_calls
+        )
+        return {
+            "ordered_keys": ordered_keys,
+            "filtered_sorted": filtered_sorted,
+            "caller_by_pc": caller_by_pc,
+            "orphan_calls": orphan_calls,
+            "orphan_signature": orphan_signature,
+            "show_empty": show_empty,
+            "count": len(filtered_sorted),
+            "search_text": search_text,
+            "show_status": bool(show_status),
+        }
+
+    def _apply_status_visibility(self, show_status: bool, keys=None):
+        widgets = self.user_widgets.values() if keys is None else [self.user_widgets[k] for k in keys if k in self.user_widgets]
+        for widget in widgets:
+            if widget.show_status != show_status:
+                widget.show_status = show_status
+                widget.refresh_text()
+
+    def _refresh_orphan_widgets(self, orphan_calls):
+        for widget in self.orphan_widgets:
+            widget.destroy()
+        self.orphan_widgets = []
+
+        cols = self._compute_cols()
+        start_row = max(0, (len(self._cw_render_state.get("ordered_keys") or []) + cols - 1) // cols)
+        row, col = start_row, 0
+        for call in orphan_calls:
+            btn = tk.Button(
+                self.inner,
+                text=self._format_orphan_call_text(call),
+                bg=self.caller_bg,
+                fg=self.caller_fg,
+                activebackground=self.caller_bg,
+                activeforeground=self.caller_fg,
+                relief="ridge",
+                bd=2,
+                justify="center",
+                wraplength=180,
+            )
+            btn.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            self.orphan_widgets.append(btn)
+            col += 1
+            if col >= cols:
+                col = 0
+                row += 1
+
+    def _apply_call_state_delta(self, prev_state: dict, next_state: dict):
+        prev_callers = prev_state.get("caller_by_pc", {}) if prev_state else {}
+        next_callers = next_state.get("caller_by_pc", {})
+        changed_keys = {
+            k for k in set(prev_callers.keys()) | set(next_callers.keys())
+            if prev_callers.get(k) != next_callers.get(k)
+        }
+        if changed_keys:
+            self.apply_call_state(next_callers, changed_keys=changed_keys)
+
+        order_changed = (prev_state.get("ordered_keys") if prev_state else []) != next_state.get("ordered_keys")
+        empty_state_changed = (prev_state.get("show_empty") if prev_state else False) != next_state.get("show_empty")
+        orphan_changed = (prev_state.get("orphan_signature") if prev_state else ()) != next_state.get("orphan_signature")
+        if order_changed or empty_state_changed:
+            self.render_grid(next_state["ordered_keys"], next_state["orphan_calls"], show_empty_state=next_state["show_empty"])
+        elif orphan_changed:
+            self._refresh_orphan_widgets(next_state["orphan_calls"])
+            self._update_scrollregion()
+
+        if (prev_state.get("count") if prev_state else None) != next_state.get("count"):
+            self.count_lbl.config(text=f"Найдено аккаунтов: {next_state['count']}")
+
+        self._cw_render_state = {
+            "ordered_keys": list(next_state["ordered_keys"]),
+            "caller_by_pc": dict(next_state["caller_by_pc"]),
+            "orphan_signature": next_state["orphan_signature"],
+            "orphan_data": list(next_state["orphan_calls"]),
+            "show_empty": next_state["show_empty"],
+            "count": next_state["count"],
+            "search_text": next_state["search_text"],
+            "show_status": next_state["show_status"],
+        }
 
     def render_grid(self, ordered_keys, orphan_calls, show_empty_state=False):
         for widget in self.user_widgets.values():
@@ -2673,18 +2815,22 @@ $items = foreach ($u in $users) {{
         if search_text is None:
             search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
         self._sync_user_widgets()
-        ordered_keys, filtered_sorted, caller_by_pc, orphan_calls = self.get_visible_users(search_text)
-
-        # статусы обновляем у всех карточек, но иконки показываем только в режиме поиска
-        for widget in self.user_widgets.values():
-            widget.show_status = show_status
-            widget.refresh_text()
-
-        self.apply_call_state(caller_by_pc)
-        show_empty = bool(search_text) and not filtered_sorted
-        self.render_grid(ordered_keys, orphan_calls, show_empty_state=show_empty)
-        self.count_lbl.config(text=f"Найдено аккаунтов: {len(filtered_sorted)}")
-        return filtered_sorted
+        view_state = self._compute_view_state(search_text, show_status=show_status)
+        self._apply_status_visibility(bool(show_status))
+        self.apply_call_state(view_state["caller_by_pc"])
+        self.render_grid(view_state["ordered_keys"], view_state["orphan_calls"], show_empty_state=view_state["show_empty"])
+        self.count_lbl.config(text=f"Найдено аккаунтов: {view_state['count']}")
+        self._cw_render_state = {
+            "ordered_keys": list(view_state["ordered_keys"]),
+            "caller_by_pc": dict(view_state["caller_by_pc"]),
+            "orphan_signature": view_state["orphan_signature"],
+            "orphan_data": list(view_state["orphan_calls"]),
+            "show_empty": view_state["show_empty"],
+            "count": view_state["count"],
+            "search_text": view_state["search_text"],
+            "show_status": view_state["show_status"],
+        }
+        return view_state["filtered_sorted"]
 
     def refresh_current_view(self):
         if not getattr(self, "search_entry", None):
@@ -2692,9 +2838,44 @@ $items = foreach ($u in $users) {{
             return
         self._do_search()
 
+    def _schedule_call_ui_refresh(self, reason=""):
+        self._cw_ui_refresh_pending = True
+        if self._cw_ui_job:
+            return
+        debounce_ms = max(80, int(self.settings.get_setting("cw_ui_debounce_ms", 150)))
+        self._cw_ui_job = self.master.after(debounce_ms, self._flush_call_ui_refresh)
+        if reason:
+            self._cw_debug_log(f"call-ui refresh scheduled: {reason}")
+
+    def _flush_call_ui_refresh(self):
+        self._cw_ui_job = None
+        if not self._cw_ui_refresh_pending:
+            return
+        self._cw_ui_refresh_pending = False
+
+        search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+        show_status = len(search_text) >= 3
+        prev_state = self._cw_render_state or {}
+        next_state = self._compute_view_state(search_text, show_status=show_status)
+        signature = (
+            tuple(next_state["ordered_keys"]),
+            tuple(sorted((k, c.get("call_id", "")) for k, c in next_state["caller_by_pc"].items())),
+            next_state["orphan_signature"],
+            next_state["show_empty"],
+            next_state["show_status"],
+            next_state["count"],
+        )
+        if signature == self._cw_last_signature:
+            return
+        self._cw_last_signature = signature
+
+        if prev_state.get("show_status") != next_state["show_status"]:
+            self._apply_status_visibility(next_state["show_status"])
+
+        self._apply_call_state_delta(prev_state, next_state)
+
     def _refresh_current_view_from_call_watcher(self):
-        self._cw_debug_log("refresh_current_view() вызван из CallWatcher", call_log=True)
-        self.refresh_current_view()
+        self._schedule_call_ui_refresh("watcher")
 
 
     # --------- Поиск ----------
@@ -2705,6 +2886,7 @@ $items = foreach ($u in $users) {{
     def _do_search(self):
         text = self.search_entry.get().lower().strip()
         show_status = len(text) >= 3
+        self._cw_last_signature = None
         filtered = self.populate_buttons(show_status=show_status, search_text=text)
         if show_status:
             self.ping_generation += 1
@@ -3138,6 +3320,8 @@ $items = foreach ($u in $users) {{
         ttk.Checkbutton(tab_cw, text="Показывать всплывающее окно при звонке", variable=cw_popup).pack(anchor="w", pady=4)
         cw_debug = tk.BooleanVar(value=self.settings.get_setting("cw_debug", False))
         ttk.Checkbutton(tab_cw, text="Включить отладочные логи CallWatcher", variable=cw_debug).pack(anchor="w", pady=4)
+        pbx_debug_dump = tk.BooleanVar(value=self.settings.get_setting("pbx_debug_dump", False))
+        ttk.Checkbutton(tab_cw, text="Сохранять PBX debug-дампы (raw/plain/block)", variable=pbx_debug_dump).pack(anchor="w", pady=2)
 
         # Цвета
         tab_colors = ttk.Frame(nb); nb.add(tab_colors, text="Цвета")
@@ -3216,6 +3400,7 @@ $items = foreach ($u in $users) {{
                 self.settings.set_setting("cw_interval", 2)
             self.settings.set_setting("cw_popup", cw_popup.get())
             self.settings.set_setting("cw_debug", cw_debug.get())
+            self.settings.set_setting("pbx_debug_dump", pbx_debug_dump.get())
 
             # Цвета
             self.settings.set_setting("ui_user_bg", user_bg.get())
@@ -3735,18 +3920,18 @@ $items = foreach ($u in $users) {{
                     log_message("CallWatcher: страница логина — проверь Cookie")
                     time.sleep(interval); continue
 
-                # сохраняем сырой html и плейн
-                _pbx_dump("peers_raw.html", html)
                 text = html_unwrap(html)
-                _pbx_dump("peers_plain.txt", text)
-                _pbx_dump("peersplain.txt", text)
+                if self.settings.get_setting("pbx_debug_dump", False):
+                    _pbx_dump("peers_raw.html", html)
+                    _pbx_dump("peers_plain.txt", text)
+                    _pbx_dump("peersplain.txt", text)
 
 
                 active_now = set()
 
                 for ext in watch_exts:
                     block = extract_block_for_ext(text, ext)
-                    if block:
+                    if block and self.settings.get_setting("pbx_debug_dump", False):
                         _pbx_dump(f"endpoint_block_{ext}.txt", block)
 
                     with self.calls_lock:
@@ -3850,7 +4035,7 @@ $items = foreach ($u in $users) {{
                                 f"refresh reason: {refresh_reason}, call_id={call_id}, ext={ext}",
                                 call_log=True,
                             )
-                            self.master.after(0, self._refresh_current_view_from_call_watcher)
+                            self.master.after(0, lambda r=refresh_reason: self._schedule_call_ui_refresh(r))
 
                         if key not in seen:
                             seen.add(key); seen_ttl[key] = time.time() + dup_ttl
@@ -3910,7 +4095,7 @@ $items = foreach ($u in $users) {{
                     log_call(f"Звонок завершён на {c.get('ext')}: {who}, длительность ~{duration} c")
 
                 if ended_calls:
-                    self.master.after(0, self._refresh_current_view_from_call_watcher)
+                    self.master.after(0, lambda: self._schedule_call_ui_refresh("ended_calls"))
 
             except Exception as e:
                 log_message(f"CallWatcher error: {e}")
@@ -3930,7 +4115,7 @@ $items = foreach ($u in $users) {{
         tk.Label(frm, text=title, font=("Segoe UI", 11, "bold"), bg="white").pack(padx=10, pady=(10,0))
         tk.Label(frm, text=message, font=("Segoe UI", 10), bg="white", justify="left").pack(padx=10, pady=(2,10))
 
-        self.master.update_idletasks(); win.update_idletasks()
+        win.update_idletasks()
         sw, sh = self.master.winfo_screenwidth(), self.master.winfo_screenheight()
         ww, wh = win.winfo_width(), win.winfo_height()
         win.geometry(f"+{sw-ww-20}+{sh-wh-40}")
@@ -3970,7 +4155,9 @@ class UserButton(ttk.Frame):
         )
 
     def set_status(self, status_key: str):
-        """Запоминаем статус и перерисовываем текст/стиль."""
+        """Запоминаем статус и перерисовываем только при изменении."""
+        if self.status_key == status_key:
+            return
         self.status_key = status_key
         self.refresh_text()
 
@@ -3980,10 +4167,11 @@ class UserButton(ttk.Frame):
         self._apply_caller_style()
 
     def set_caller(self, caller):
-        """Переключает карточку в режим звонка или обратно без пересоздания виджета."""
+        """Переключает карточку в режим звонка/обычный только при изменении состояния."""
+        prev = self.caller_info
+        if prev == caller:
+            return
         self.caller_info = caller
-        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
-        self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
 
     def set_availability(self, ok, searching=False):
@@ -4028,7 +4216,7 @@ class UserButton(ttk.Frame):
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         if self.caller_info:
-            gradient = self._make_gradient_image(220, 90, self.app.caller_bg, "#f97316")
+            gradient = self.app.get_gradient_image(220, 90, self.app.caller_bg, "#f97316")
             self.btn.config(
                 bg=self.app.caller_bg,
                 fg=self.app.caller_fg,
@@ -4073,25 +4261,6 @@ class UserButton(ttk.Frame):
             self.btn.gradient = None
             self.btn.image = status_image
             self.status_image = status_image
-
-    def _make_gradient_image(self, width: int, height: int, start_color: str, end_color: str):
-        img = tk.PhotoImage(width=width, height=height)
-
-        def hex_to_rgb(h: str):
-            h = h.lstrip('#')
-            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-        def rgb_to_hex(rgb):
-            return "#%02x%02x%02x" % rgb
-
-        start_rgb = hex_to_rgb(start_color)
-        end_rgb = hex_to_rgb(end_color)
-        for y in range(height):
-            ratio = y / max(1, height - 1)
-            line_rgb = tuple(int(start_rgb[i] + (end_rgb[i] - start_rgb[i]) * ratio) for i in range(3))
-            line_hex = rgb_to_hex(line_rgb)
-            img.put(line_hex, to=(0, y, width, y+1))
-        return img
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
