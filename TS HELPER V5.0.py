@@ -1495,6 +1495,12 @@ class MainWindow:
             log_message("[SELFTEST] normalize_phone/phone_last10: OK")
 
     def _run_powershell_json(self, script: str, timeout: int = 15):
+        script = "\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+            script,
+        ])
         cmd = [
             "powershell.exe",
             "-NoProfile",
@@ -1548,7 +1554,6 @@ class MainWindow:
             f"homePhone -like '*{needle_escaped}*')"
         )
         script = f"""
-$ErrorActionPreference = 'Stop'
 Import-Module ActiveDirectory
 $users = Get-ADUser -Filter "{filter_expr}" -Server '{domain_server}' -Properties displayName,cn,samAccountName,mail,mobile,telephoneNumber,otherMobile,ipPhone,homePhone
 $items = foreach ($u in $users) {{
@@ -1571,6 +1576,18 @@ $items = foreach ($u in $users) {{
         try:
             items = self._run_powershell_json(script, timeout=18)
             self._cw_debug_log(f"AD lookup: домен={domain_key}, кандидатов={len(items)}", call_log=True)
+            if items:
+                display_names = [
+                    (item.get("displayName") or item.get("cn") or "").strip()
+                    for item in items
+                    if isinstance(item, dict)
+                ]
+                display_names = [name for name in display_names if name]
+                if display_names:
+                    self._cw_debug_log(
+                        f"AD lookup: домен={domain_key}, displayName={display_names[0]!r}",
+                        call_log=True,
+                    )
             return items
         except Exception as e:
             self._cw_debug_log(f"AD lookup ошибка: домен={domain_key}, {e}", call_log=True)
