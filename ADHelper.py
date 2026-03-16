@@ -1831,7 +1831,7 @@ class App(tk.Tk):
 
     def build_welcome_sheet_context(self, sam: str, parsed: dict, password_plain: str, email_suffix: str) -> dict[str, str]:
         email = sam + email_suffix if parsed.get("need_mail") else ""
-        login = f"omg\\{sam}"
+        login = f"{sam}"
         context = {
             "sam": sam,
             "login": login,
