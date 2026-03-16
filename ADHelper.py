@@ -1473,47 +1473,45 @@ def update_user_in_domain(
     return "\n".join(log_lines) + "\n", success
 
 
-def _replace_prefixed_line(text: str, prefix: str, value: str) -> tuple[str, bool]:
-    pattern = re.compile(rf"({re.escape(prefix)}\s*)([^\r\n<]+)")
-    replaced = False
+WELCOME_REQUIRED_PLACEHOLDERS = ("{{LOGIN}}", "{{DOMAIN_LOGIN}}", "{{EMAIL}}", "{{PASSWORD}}")
 
-    def repl(match: re.Match[str]) -> str:
-        nonlocal replaced
-        replaced = True
-        return f"{match.group(1)}{value}"
 
-    result = pattern.sub(repl, text, count=1)
-    return result, replaced
+def _read_welcome_content_xml(template_path: str) -> str:
+    try:
+        with zipfile.ZipFile(template_path, "r") as source_zip:
+            return source_zip.read("content.xml").decode("utf-8")
+    except KeyError as error:
+        raise RuntimeError("В шаблоне ODT отсутствует content.xml") from error
+
+
+def _collect_welcome_placeholders(content_xml: str) -> list[str]:
+    found_tokens = [token for token in WELCOME_REQUIRED_PLACEHOLDERS if token in content_xml]
+    return found_tokens
+
+
+def _validate_welcome_template(content_xml: str) -> list[str]:
+    found_tokens = _collect_welcome_placeholders(content_xml)
+    missing_tokens = [token for token in WELCOME_REQUIRED_PLACEHOLDERS if token not in found_tokens]
+    if missing_tokens:
+        first_missing = missing_tokens[0]
+        raise RuntimeError(
+            f"В шаблоне приветственного листа не найден плейсхолдер {first_missing}. "
+            "Проверьте файл New User.odt: шаблон повреждён или токен разбит форматированием."
+        )
+    return found_tokens
 
 
 def _replace_welcome_placeholders(content_xml: str, replacements: dict[str, str]) -> tuple[str, list[str]]:
-    replaced_tokens: list[str] = []
     updated = content_xml
-    for token, value in replacements.items():
-        if token in updated:
-            updated = updated.replace(token, value)
-            replaced_tokens.append(token)
+    replaced_tokens: list[str] = []
+    for token in WELCOME_REQUIRED_PLACEHOLDERS:
+        value = replacements[token]
+        updated = updated.replace(token, value)
+        replaced_tokens.append(token)
     return updated, replaced_tokens
 
 
-def _replace_welcome_text_by_prefix(content_xml: str, context: dict[str, str]) -> tuple[str, list[str]]:
-    replaced_fields: list[str] = []
-    updated = content_xml
-    prefix_map = [
-        ("Логин:", context.get("login") or "", "login"),
-        ("Ваш Email:", context.get("email") or "", "email"),
-        ("Временный пароль:", context.get("password") or "", "password"),
-    ]
-    for prefix, value, key in prefix_map:
-        if not value:
-            continue
-        updated, replaced = _replace_prefixed_line(updated, prefix, value)
-        if replaced:
-            replaced_fields.append(key)
-    return updated, replaced_fields
-
-
-def _write_odt_with_updated_content(template_path: str, output_path: str, content_xml: str) -> None:
+def _pack_welcome_odt_with_content(template_path: str, output_path: str, content_xml: str) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="adhelper_welcome_") as temp_dir:
         with zipfile.ZipFile(template_path, "r") as source_zip:
@@ -1541,25 +1539,18 @@ def _write_odt_with_updated_content(template_path: str, output_path: str, conten
                     result_zip.write(abs_path, rel_path, compress_type=zipfile.ZIP_DEFLATED)
 
 
-def generate_welcome_odt(template_path: str, output_path: str, context: dict[str, str]) -> tuple[str, list[str], bool]:
-    with zipfile.ZipFile(template_path, "r") as source_zip:
-        content_xml = source_zip.read("content.xml").decode("utf-8")
-
+def generate_welcome_odt(template_path: str, output_path: str, context: dict[str, str]) -> tuple[str, list[str], list[str]]:
+    content_xml = _read_welcome_content_xml(template_path)
+    found_tokens = _validate_welcome_template(content_xml)
     placeholders = {
         "{{LOGIN}}": context.get("login") or "",
-        "{{DOMAIN_LOGIN}}": context.get("login") or "",
+        "{{DOMAIN_LOGIN}}": context.get("domain_login") or "",
         "{{EMAIL}}": context.get("email") or "",
         "{{PASSWORD}}": context.get("password") or "",
     }
     content_xml, replaced_tokens = _replace_welcome_placeholders(content_xml, placeholders)
-    used_placeholders = bool(replaced_tokens)
-
-    if not used_placeholders:
-        content_xml, replaced_prefixes = _replace_welcome_text_by_prefix(content_xml, context)
-        replaced_tokens.extend(replaced_prefixes)
-
-    _write_odt_with_updated_content(template_path, output_path, content_xml)
-    return output_path, replaced_tokens, used_placeholders
+    _pack_welcome_odt_with_content(template_path, output_path, content_xml)
+    return output_path, found_tokens, replaced_tokens
 
 
 def print_welcome_document(document_path: str) -> tuple[bool, str]:
@@ -1830,17 +1821,21 @@ class App(tk.Tk):
             self.chk_print_welcome.state(["disabled"])
 
     def build_welcome_sheet_context(self, sam: str, parsed: dict, password_plain: str, email_suffix: str) -> dict[str, str]:
-        email = sam + email_suffix if parsed.get("need_mail") else ""
-        login = re.sub(r"(?i)^omg\\", "", f"{sam}")
+        sam_clean = (sam or "").strip()
+        email = (sam_clean + email_suffix).strip() if parsed.get("need_mail") else ""
+        login = re.sub(r"(?i)^omg\\", "", sam_clean).strip()
+        domain_login = f"omg\\{login}".strip() if login else ""
+        password = (password_plain or "").strip()
         context = {
-            "sam": sam,
+            "sam": sam_clean,
             "login": login,
+            "domain_login": domain_login,
             "email": email,
-            "password": password_plain,
+            "password": password,
         }
         self.log(
             "[welcome] Контекст приветственного: "
-            f"sam='{context['sam']}', login='{context['login']}', "
+            f"sam='{context['sam']}', login='{context['login']}', domain_login='{context['domain_login']}', "
             f"email='{context['email'] or 'не задан'}', password='***'"
         )
         return context
@@ -1861,7 +1856,7 @@ class App(tk.Tk):
             result["welcome_print_requested"] = False
             return result
 
-        self.log(f"[welcome] Поиск шаблона приветственного: {WELCOME_TEMPLATE_PATH}")
+        self.log(f"[welcome] template loaded: {WELCOME_TEMPLATE_PATH}")
         if not os.path.exists(WELCOME_TEMPLATE_PATH):
             warn = f"Шаблон не найден: {WELCOME_TEMPLATE_PATH}"
             self.log(warn)
@@ -1876,20 +1871,19 @@ class App(tk.Tk):
         self.log(f"[welcome] Генерация приветственного в: {output_path}")
 
         try:
-            generated_path, replaced_tokens, used_placeholders = generate_welcome_odt(
+            generated_path, found_tokens, replaced_tokens = generate_welcome_odt(
                 WELCOME_TEMPLATE_PATH,
                 output_path,
                 context,
             )
             result["welcome_created"] = True
             result["welcome_path"] = generated_path
-            self.log(
-                f"[welcome] Приветственный создан: {generated_path}. "
-                f"Подстановки: {', '.join(replaced_tokens) if replaced_tokens else 'не найдены'}; "
-                f"режим: {'плейсхолдеры' if used_placeholders else 'префиксные строки'}"
-            )
+            self.log(f"[welcome] placeholders found: {', '.join(token.strip('{}') for token in found_tokens)}")
+            self.log(f"[welcome] placeholders replaced: {', '.join(token.strip('{}') for token in replaced_tokens)}")
+            self.log(f"[welcome] file generated: {generated_path}")
         except Exception as error:
             warn = f"Ошибка генерации приветственного: {error}"
+            self.log("[welcome] warning: шаблон приветственного некорректен.")
             self.log(warn)
             messagebox.showwarning("Приветственный листок", f"{warn}\nСоздание пользователя в AD уже выполнено.")
             result["warnings"].append(warn)
@@ -1909,6 +1903,7 @@ class App(tk.Tk):
         if not should_print:
             return result
 
+        self.log("[welcome] print requested by user")
         print_success, print_message = print_welcome_document(result["welcome_path"])
         self.log(f"[welcome] {print_message}")
         result["welcome_printed"] = print_success
