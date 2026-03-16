@@ -1500,8 +1500,7 @@ def _replace_welcome_text_by_prefix(content_xml: str, context: dict[str, str]) -
     replaced_fields: list[str] = []
     updated = content_xml
     prefix_map = [
-        ("Логин:", context.get("sam") or "", "sam"),
-        ("Доменный логин:", context.get("domain_login") or "", "domain_login"),
+        ("Логин:", context.get("login") or "", "login"),
         ("Ваш Email:", context.get("email") or "", "email"),
         ("Временный пароль:", context.get("password") or "", "password"),
     ]
@@ -1547,8 +1546,8 @@ def generate_welcome_odt(template_path: str, output_path: str, context: dict[str
         content_xml = source_zip.read("content.xml").decode("utf-8")
 
     placeholders = {
-        "{{LOGIN}}": context.get("sam") or "",
-        "{{DOMAIN_LOGIN}}": context.get("domain_login") or "",
+        "{{LOGIN}}": context.get("login") or "",
+        "{{DOMAIN_LOGIN}}": context.get("login") or "",
         "{{EMAIL}}": context.get("email") or "",
         "{{PASSWORD}}": context.get("password") or "",
     }
@@ -1830,28 +1829,23 @@ class App(tk.Tk):
             self.print_welcome_var.set(False)
             self.chk_print_welcome.state(["disabled"])
 
-    def build_welcome_sheet_context(self, cfg: dict, sam: str, parsed: dict, password_plain: str) -> dict[str, str]:
-        email = sam + cfg["email_suffix"] if parsed.get("need_mail") else ""
-        upn_suffix = (cfg.get("upn_suffix") or "").lstrip("@")
-        domain_prefix = upn_suffix.split(".")[0] if upn_suffix else ""
-        if not domain_prefix and cfg.get("name"):
-            domain_prefix = cfg["name"].split("-")[0]
-        domain_login = f"{domain_prefix}\\{sam}" if domain_prefix else sam
+    def build_welcome_sheet_context(self, sam: str, parsed: dict, password_plain: str, email_suffix: str) -> dict[str, str]:
+        email = sam + email_suffix if parsed.get("need_mail") else ""
+        login = f"omg\\{sam}"
         context = {
             "sam": sam,
-            "domain_login": domain_login,
+            "login": login,
             "email": email,
             "password": password_plain,
-            "domain_prefix": domain_prefix,
         }
         self.log(
-            f"[{cfg['name']}] Контекст приветственного: "
-            f"sam='{context['sam']}', domain_login='{context['domain_login']}', "
+            "[welcome] Контекст приветственного: "
+            f"sam='{context['sam']}', login='{context['login']}', "
             f"email='{context['email'] or 'не задан'}', password='***'"
         )
         return context
 
-    def postprocess_created_user(self, cfg: dict, context: dict[str, str]) -> dict[str, Any]:
+    def postprocess_created_user(self, context: dict[str, str]) -> dict[str, Any]:
         result: dict[str, Any] = {
             "welcome_requested": self.create_welcome_var.get(),
             "welcome_created": False,
@@ -1863,13 +1857,13 @@ class App(tk.Tk):
         }
 
         if not result["welcome_requested"]:
-            self.log(f"[{cfg['name']}] Генерация приветственного отключена оператором.")
+            self.log("[welcome] Генерация приветственного отключена оператором.")
             result["welcome_print_requested"] = False
             return result
 
-        self.log(f"[{cfg['name']}] Поиск шаблона приветственного: {WELCOME_TEMPLATE_PATH}")
+        self.log(f"[welcome] Поиск шаблона приветственного: {WELCOME_TEMPLATE_PATH}")
         if not os.path.exists(WELCOME_TEMPLATE_PATH):
-            warn = f"[{cfg['name']}] Шаблон не найден: {WELCOME_TEMPLATE_PATH}"
+            warn = f"Шаблон не найден: {WELCOME_TEMPLATE_PATH}"
             self.log(warn)
             messagebox.showwarning("Приветственный листок", warn)
             result["warnings"].append(warn)
@@ -1877,9 +1871,9 @@ class App(tk.Tk):
             return result
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_name = f"Welcome_{context['sam']}_{cfg['name']}_{timestamp}.odt"
+        output_name = f"Welcome_{context['sam']}_{timestamp}.odt"
         output_path = os.path.join(WELCOME_OUTPUT_DIR, output_name)
-        self.log(f"[{cfg['name']}] Генерация приветственного в: {output_path}")
+        self.log(f"[welcome] Генерация приветственного в: {output_path}")
 
         try:
             generated_path, replaced_tokens, used_placeholders = generate_welcome_odt(
@@ -1890,12 +1884,12 @@ class App(tk.Tk):
             result["welcome_created"] = True
             result["welcome_path"] = generated_path
             self.log(
-                f"[{cfg['name']}] Приветственный создан: {generated_path}. "
+                f"[welcome] Приветственный создан: {generated_path}. "
                 f"Подстановки: {', '.join(replaced_tokens) if replaced_tokens else 'не найдены'}; "
                 f"режим: {'плейсхолдеры' if used_placeholders else 'префиксные строки'}"
             )
         except Exception as error:
-            warn = f"[{cfg['name']}] Ошибка генерации приветственного: {error}"
+            warn = f"Ошибка генерации приветственного: {error}"
             self.log(warn)
             messagebox.showwarning("Приветственный листок", f"{warn}\nСоздание пользователя в AD уже выполнено.")
             result["warnings"].append(warn)
@@ -1903,7 +1897,7 @@ class App(tk.Tk):
             return result
 
         if not result["welcome_print_requested"]:
-            self.log(f"[{cfg['name']}] Печать приветственного отключена оператором.")
+            self.log("[welcome] Печать приветственного отключена оператором.")
             return result
 
         should_print = messagebox.askyesno(
@@ -1911,16 +1905,16 @@ class App(tk.Tk):
             "Приветственный листок создан. Распечатать на принтере по умолчанию?",
         )
         result["welcome_print_confirmed"] = should_print
-        self.log(f"[{cfg['name']}] Показан запрос печати. Подтверждение: {'Да' if should_print else 'Нет'}")
+        self.log(f"[welcome] Показан запрос печати. Подтверждение: {'Да' if should_print else 'Нет'}")
         if not should_print:
             return result
 
         print_success, print_message = print_welcome_document(result["welcome_path"])
-        self.log(f"[{cfg['name']}] {print_message}")
+        self.log(f"[welcome] {print_message}")
         result["welcome_printed"] = print_success
         if not print_success:
             warn = (
-                f"[{cfg['name']}] Печать не выполнена. Файл доступен по пути: {result['welcome_path']}"
+                f"Печать не выполнена. Файл доступен по пути: {result['welcome_path']}"
             )
             result["warnings"].append(warn)
             messagebox.showwarning("Печать приветственного", warn)
@@ -2806,7 +2800,9 @@ class App(tk.Tk):
                 self.log("Операция отменена пользователем.")
                 return
 
-        creation_results: list[dict[str, Any]] = []
+        successful_domains: list[str] = []
+        welcome_postprocess: Optional[dict[str, Any]] = None
+        welcome_email_suffix = ""
         for cfg in configs_to_create:
             try:
                 result_log, success = create_user_in_domain(
@@ -2821,12 +2817,9 @@ class App(tk.Tk):
                 )
                 self.log(result_log)
                 if success and not dry_run:
-                    welcome_context = self.build_welcome_sheet_context(cfg, sam, parsed, password_plain)
-                    postprocess = self.postprocess_created_user(cfg, welcome_context)
-                    creation_results.append({
-                        "cfg": cfg,
-                        "postprocess": postprocess,
-                    })
+                    successful_domains.append(cfg["name"])
+                    if not welcome_email_suffix:
+                        welcome_email_suffix = cfg.get("email_suffix") or ""
                     division_value = OMG_DIVISION_VALUE if cfg["name"] == "omg-cspfmba" else ""
                     section_value = section_preview if cfg["name"] == "omg-cspfmba" else ""
                     department_value = omg_department if cfg["name"] == "omg-cspfmba" else ad_department
@@ -2857,32 +2850,35 @@ class App(tk.Tk):
         if dry_run:
             self.log("DRY RUN завершён. Пользователи фактически не создавались.")
         else:
+            if successful_domains:
+                welcome_context = self.build_welcome_sheet_context(
+                    sam,
+                    parsed,
+                    password_plain,
+                    welcome_email_suffix,
+                )
+                welcome_postprocess = self.postprocess_created_user(welcome_context)
             self.log("Создание пользователей завершено.")
-            if creation_results:
+            if successful_domains:
                 summary_lines = ["Пользователь создан в AD. Итоги постобработки:"]
-                for item in creation_results:
-                    cfg = item["cfg"]
-                    post = item["postprocess"]
-                    welcome_state = "создан" if post["welcome_created"] else "не создан"
-                    printed_state = (
-                        "напечатан"
-                        if post["welcome_printed"]
-                        else "не напечатан"
-                    )
-                    if not post["welcome_requested"]:
-                        welcome_state = "не запрошен"
-                        printed_state = "не запрошен"
-                    elif post["welcome_created"] and not post["welcome_print_requested"]:
-                        printed_state = "не запрошен"
-                    elif post["welcome_created"] and post["welcome_print_requested"] and not post["welcome_print_confirmed"]:
-                        printed_state = "отклонён оператором"
-                    summary_lines.append(
-                        f"- [{cfg['name']}] Приветственный: {welcome_state}; печать: {printed_state}."
-                    )
-                    if post.get("welcome_path"):
-                        summary_lines.append(f"  Файл: {post['welcome_path']}")
-                    for warning in post.get("warnings", []):
-                        summary_lines.append(f"  Предупреждение: {warning}")
+                summary_lines.append(f"Домены создания: {', '.join(successful_domains)}")
+                post = welcome_postprocess or {}
+                welcome_state = "создан" if post.get("welcome_created") else "не создан"
+                printed_state = "напечатан" if post.get("welcome_printed") else "не напечатан"
+                if not post.get("welcome_requested"):
+                    welcome_state = "не запрошен"
+                    printed_state = "не запрошен"
+                elif post.get("welcome_created") and not post.get("welcome_print_requested"):
+                    printed_state = "не запрошен"
+                elif post.get("welcome_created") and post.get("welcome_print_requested") and not post.get("welcome_print_confirmed"):
+                    printed_state = "отклонён оператором"
+                summary_lines.append(
+                    f"Приветственный: {welcome_state}; печать: {printed_state}."
+                )
+                if post.get("welcome_path"):
+                    summary_lines.append(f"Файл: {post['welcome_path']}")
+                for warning in post.get("warnings", []):
+                    summary_lines.append(f"Предупреждение: {warning}")
                 messagebox.showinfo("Итог создания", "\n".join(summary_lines))
 
 
