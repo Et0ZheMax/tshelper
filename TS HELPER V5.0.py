@@ -1366,9 +1366,7 @@ class MainWindow:
             pref_low = pref.lower()
             if host.startswith(pref_low):
                 return pref_low.rstrip("-")
-
-        m = re.match(r"^([a-z0-9]+)-", host)
-        return m.group(1) if m else ""
+        return ""
 
     def detect_os_type_from_host(self, host: str) -> str:
         prefix = self.normalize_host_prefix(host)
@@ -1381,10 +1379,13 @@ class MainWindow:
     def get_os_marker(self, os_type: str) -> str:
         markers = {
             "windows": "⊞",
-            "linux": "🐧",
+            "linux": "[L]",
             "unknown": "",
         }
         return markers.get((os_type or "unknown").lower(), "")
+
+    def _ping_cache_key(self, pc_name: str) -> str:
+        return self.canonical_pc_key(pc_name)
 
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
@@ -2942,7 +2943,8 @@ $items = foreach ($u in $users) {{
                 pc_key = self.canonical_pc_key(pc_name)
                 if not pc_name:
                     continue
-                cached = self.ping_cache.get(pc_name)
+                cache_key = self._ping_cache_key(pc_name)
+                cached = self.ping_cache.get(cache_key)
                 now = time.time()
                 if cached and (now - cached["ts"] <= self.ping_cache_ttl):
                     btn = self.buttons.get(pc_key)
@@ -2967,9 +2969,20 @@ $items = foreach ($u in $users) {{
         pc = user.get("pc_name", "")
         ok, host, ip, os_type = self.check_availability(user)
         if gen != self.ping_generation: return
-        if pc:
-            self.ping_cache[pc] = {"ok": ok, "ts": time.time(), "host": host, "ip": ip, "os_type": os_type}
-        self.master.after(0, self._update_btn_style, pc, ok, os_type)
+        cache_key = self._ping_cache_key(pc)
+        cached = self.ping_cache.get(cache_key, {}) if cache_key else {}
+        resolved_os = (os_type or "unknown").lower()
+        if resolved_os == "unknown":
+            resolved_os = cached.get("os_type", "unknown")
+        if cache_key:
+            self.ping_cache[cache_key] = {
+                "ok": ok,
+                "ts": time.time(),
+                "host": host,
+                "ip": ip,
+                "os_type": resolved_os,
+            }
+        self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
 
     def check_availability(self, user):
         candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
@@ -4223,7 +4236,7 @@ class UserButton(ttk.Frame):
         self.caller_info = caller
         self._apply_caller_style()
 
-    def set_availability(self, ok, searching=False, os_type="unknown"):
+    def set_availability(self, ok, os_type="unknown"):
         new_status = "online" if ok else "offline"
         normalized_os = (os_type or "unknown").lower()
         status_changed = self.status_key != new_status
@@ -4248,22 +4261,18 @@ class UserButton(ttk.Frame):
         ext = (self.user.get("ext") or "").strip()
         label = self._status_label() if self.show_status else ""
         label_prefix = f"{label} " if label else ""
-        os_prefix = f"{self.os_icon} " if self.os_icon else ""
+        pc_line = f"({self.os_icon + ' ' if self.os_icon else ''}{pc_label})"
 
         if ext:
-            # первая строка: Онлайн • 📞 4588
             header = f"{label_prefix}• 📞 {ext}" if label_prefix else f"📞 {ext}"
-            base = f"{header}\n{os_prefix}{self.user['name']}\n({pc_label})"
+            base = f"{header}\n{self.user['name']}\n{pc_line}"
         else:
-            # без телефона — Онлайн ФИО
-            header = f"{label_prefix}{os_prefix}{self.user['name']}"
-            base = f"{header}\n({pc_label})"
+            header = f"{label_prefix}{self.user['name']}"
+            base = f"{header}\n{pc_line}"
 
-        # если нет активного звонка — возвращаем обычный текст карточки
         if not self.caller_info:
             return base
 
-        # режим звонка: сверху инфа о звонке, снизу та же карточка со статусом
         num = self.caller_info.get("num") or "unknown"
         name = self.caller_info.get("name") or ""
         ext_target = self.caller_info.get("ext") or "?"
