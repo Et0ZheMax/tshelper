@@ -1357,6 +1357,35 @@ class MainWindow:
                 return pc_name[len(pref):], pref
         return pc_name, ""
 
+    def normalize_host_prefix(self, host: str) -> str:
+        host = (host or "").strip().lower()
+        if not host:
+            return ""
+
+        for pref in self.get_allowed_prefixes():
+            pref_low = pref.lower()
+            if host.startswith(pref_low):
+                return pref_low.rstrip("-")
+
+        m = re.match(r"^([a-z0-9]+)-", host)
+        return m.group(1) if m else ""
+
+    def detect_os_type_from_host(self, host: str) -> str:
+        prefix = self.normalize_host_prefix(host)
+        prefix_map = {
+            "w": "windows",
+            "l": "linux",
+        }
+        return prefix_map.get(prefix, "unknown")
+
+    def get_os_marker(self, os_type: str) -> str:
+        markers = {
+            "windows": "⊞",
+            "linux": "🐧",
+            "unknown": "",
+        }
+        return markers.get((os_type or "unknown").lower(), "")
+
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
         return clean if pref else pc_name
@@ -2918,7 +2947,7 @@ $items = foreach ($u in $users) {{
                 if cached and (now - cached["ts"] <= self.ping_cache_ttl):
                     btn = self.buttons.get(pc_key)
                     if btn:
-                        btn.set_availability(cached["ok"])
+                        btn.set_availability(cached["ok"], os_type=cached.get("os_type", "unknown"))
                     continue
 
                 btn = self.buttons.get(pc_key)
@@ -2936,11 +2965,11 @@ $items = foreach ($u in $users) {{
 
     def _ping_task(self, user, gen):
         pc = user.get("pc_name", "")
-        ok, host, ip = self.check_availability(user)
+        ok, host, ip, os_type = self.check_availability(user)
         if gen != self.ping_generation: return
         if pc:
-            self.ping_cache[pc] = {"ok": ok, "ts": time.time(), "host": host, "ip": ip}
-        self.master.after(0, self._update_btn_style, pc, ok)
+            self.ping_cache[pc] = {"ok": ok, "ts": time.time(), "host": host, "ip": ip, "os_type": os_type}
+        self.master.after(0, self._update_btn_style, pc, ok, os_type)
 
     def check_availability(self, user):
         candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
@@ -2950,15 +2979,16 @@ $items = foreach ($u in $users) {{
                 continue
             ok, ip = self.ping_host_with_ip(host)
             if ok:
-                return True, host, ip
+                return True, host, ip, self.detect_os_type_from_host(host)
             if ip:
                 last_ip = ip
-        return False, (candidates[0] if candidates else user.get("pc_name", "")), last_ip
+        fallback_host = candidates[0] if candidates else user.get("pc_name", "")
+        return False, fallback_host, last_ip, "unknown"
 
-    def _update_btn_style(self, pc, ok):
+    def _update_btn_style(self, pc, ok, os_type="unknown"):
         btn = self.buttons.get(self.canonical_pc_key(pc))
         if not btn: return
-        btn.set_availability(ok)
+        btn.set_availability(ok, os_type=os_type)
 
     # --------- Users CRUD ----------
     def add_user(self):
@@ -4149,6 +4179,8 @@ class UserButton(ttk.Frame):
         self.caller_info = caller
         self.show_status = show_status
         self.status_image = None
+        self.os_type = "unknown"
+        self.os_icon = ""
 
         pc_label = self.app.get_display_pc_name(user['pc_name'])
         # создаём tk.Button, чтобы гарантированно красить
@@ -4191,9 +4223,22 @@ class UserButton(ttk.Frame):
         self.caller_info = caller
         self._apply_caller_style()
 
-    def set_availability(self, ok, searching=False):
+    def set_availability(self, ok, searching=False, os_type="unknown"):
+        new_status = "online" if ok else "offline"
+        normalized_os = (os_type or "unknown").lower()
+        status_changed = self.status_key != new_status
+        os_changed = self.os_type != normalized_os
+        avail_changed = self.avail != ok
+        if not (status_changed or os_changed or avail_changed):
+            return
+
         self.avail = ok
-        self.set_status("online" if ok else "offline")
+        self.os_type = normalized_os
+        self.os_icon = self.app.get_os_marker(normalized_os)
+        if status_changed:
+            self.set_status(new_status)
+        elif os_changed:
+            self.refresh_text()
 
 
     def _status_label(self) -> str:
@@ -4203,14 +4248,15 @@ class UserButton(ttk.Frame):
         ext = (self.user.get("ext") or "").strip()
         label = self._status_label() if self.show_status else ""
         label_prefix = f"{label} " if label else ""
+        os_prefix = f"{self.os_icon} " if self.os_icon else ""
 
         if ext:
             # первая строка: Онлайн • 📞 4588
             header = f"{label_prefix}• 📞 {ext}" if label_prefix else f"📞 {ext}"
-            base = f"{header}\n{self.user['name']}\n({pc_label})"
+            base = f"{header}\n{os_prefix}{self.user['name']}\n({pc_label})"
         else:
             # без телефона — Онлайн ФИО
-            header = f"{label_prefix}{self.user['name']}"
+            header = f"{label_prefix}{os_prefix}{self.user['name']}"
             base = f"{header}\n({pc_label})"
 
         # если нет активного звонка — возвращаем обычный текст карточки
