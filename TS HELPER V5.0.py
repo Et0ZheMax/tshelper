@@ -687,6 +687,68 @@ def is_block_active(block: str, ext: str) -> bool:
         active = bool(m_inuse and int(m_inuse.group(1)) > 0)
     return active
 
+
+class SudoRepairPasswordDialog:
+    def __init__(self, parent, host_name: str, username: str):
+        self.result = None
+        self.window = tk.Toplevel(parent)
+        self.window.title("Подтверждение sudo")
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.window.resizable(False, False)
+        self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        frame = ttk.Frame(self.window, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=f"Host: {host_name}").pack(anchor="w")
+        ttk.Label(frame, text=f"User: {username}").pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            frame,
+            text="Пароль будет использован только для текущей операции и не будет сохранён.",
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", pady=(12, 8))
+
+        self.password_var = tk.StringVar()
+        self.show_password_var = tk.BooleanVar(value=False)
+        self.password_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
+        self.password_entry.pack(fill="x")
+        ttk.Checkbutton(
+            frame,
+            text="Показать пароль",
+            variable=self.show_password_var,
+            command=self._toggle_password,
+        ).pack(anchor="w", pady=(8, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="OK", command=self._confirm).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side="left", padx=(8, 0))
+
+        self.window.bind("<Return>", lambda _event: self._confirm())
+        self.window.bind("<Escape>", lambda _event: self._cancel())
+        self.password_entry.focus_set()
+
+    def _toggle_password(self):
+        self.password_entry.configure(show="" if self.show_password_var.get() else "*")
+
+    def _confirm(self):
+        password = self.password_var.get()
+        if not password:
+            messagebox.showerror("Подтверждение sudo", "Введите пароль пользователя support.", parent=self.window)
+            return
+        self.result = password
+        self.window.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.window.destroy()
+
+    def show(self):
+        self.window.wait_window()
+        return self.result
+
 # --------- Главный класс окна ----------
 class UserManager:
     def __init__(self, users_file):
@@ -4793,32 +4855,85 @@ Write-Output "OK"
             log_window, append_log = self.app.open_action_log_window(f"Установка ПО — {self.user.get('name', '?')}")
             append_log(f"Старт установки ПО {item_id} для {self.user.get('name', '?')}")
 
-            def work():
-                from remote_ops import SSHExecutor, UbuntuSoftwareInstaller
+            def run_install():
+                def work():
+                    from remote_ops import SSHExecutor, UbuntuSoftwareInstaller
 
-                auth = self.app.get_remote_ops_auth()
-                if not auth.username:
-                    raise RuntimeError("Не задан SSH Login в настройках")
-                host = self.app.build_remote_host(self.user)
-                executor = SSHExecutor(auth, logger=append_log)
-                installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
-                return installer.install_software(host, item_id, force_reinstall=force_reinstall)
+                    auth = self.app.get_remote_ops_auth()
+                    if not auth.username:
+                        raise RuntimeError("Не задан SSH Login в настройках")
+                    host = self.app.build_remote_host(self.user)
+                    executor = SSHExecutor(auth, logger=append_log)
+                    installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
+                    return installer.install_software(host, item_id, force_reinstall=force_reinstall)
 
-            def on_success(result):
-                append_log(result.summary)
-                self._log_action(f"Remote install: {item_id} -> {'OK' if result.success else 'ERROR'}")
-                log_action(f"Remote install {self.user.get('name', '?')}: {item_id} ({'OK' if result.success else 'ERROR'})")
-                self._show_action_result(result, title="Установка ПО")
+                def on_success(result):
+                    append_log(result.summary)
+                    if getattr(result, "needs_sudo_repair", False):
+                        self._handle_sudo_repair_flow(result, catalog, item_id, force_reinstall, append_log, run_install)
+                        return
+                    self._log_action(f"Remote install: {item_id} -> {'OK' if result.success else 'ERROR'}")
+                    log_action(f"Remote install {self.user.get('name', '?')}: {item_id} ({'OK' if result.success else 'ERROR'})")
+                    self._show_action_result(result, title="Установка ПО")
 
-            def on_error(error):
-                append_log(f"Ошибка: {error}")
-                log_message(f"Установка ПО ошибка: {error}")
-                messagebox.showerror("Установка ПО", str(error))
+                def on_error(error):
+                    append_log(f"Ошибка: {error}")
+                    log_message(f"Установка ПО ошибка: {error}")
+                    messagebox.showerror("Установка ПО", str(error))
 
-            self.app.run_background(work, on_success, on_error)
+                self.app.run_background(work, on_success, on_error)
+
+            run_install()
 
         from remote_install_dialog import SoftwareInstallDialog
         SoftwareInstallDialog(self.app.master, catalog, on_submit)
+
+    def _handle_sudo_repair_flow(self, result, catalog, item_id: str, force_reinstall: bool, append_log, retry_install_callback):
+        host_name = result.host_used or self.user.get("pc_name", "") or "неизвестный хост"
+        append_log("Требуется донастройка sudoers")
+        confirmed = messagebox.askokcancel(
+            "Требуется донастройка sudo",
+            f"На хосте {host_name} для пользователя support не настроен passwordless sudo. Можно один раз применить безопасный sudoers-профиль для automation и продолжить установку ПО.",
+            parent=self.app.master,
+        )
+        if not confirmed:
+            append_log("Исправление sudoers отменено оператором")
+            messagebox.showinfo("Установка ПО", "Операция отменена: sudoers не был изменён.", parent=self.app.master)
+            return
+
+        append_log("Оператор подтвердил исправление sudoers")
+        password_dialog = SudoRepairPasswordDialog(self.app.master, host_name, "support")
+        sudo_password = password_dialog.show()
+        if sudo_password is None:
+            append_log("Исправление sudoers отменено оператором")
+            messagebox.showinfo("Установка ПО", "Операция отменена: пароль не был введён.", parent=self.app.master)
+            return
+
+        def work():
+            from remote_ops import SSHExecutor, UbuntuSoftwareInstaller
+
+            auth = self.app.get_remote_ops_auth()
+            if not auth.username:
+                raise RuntimeError("Не задан SSH Login в настройках")
+            host = self.app.build_remote_host(self.user)
+            executor = SSHExecutor(auth, logger=append_log)
+            installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
+            return installer.repair_passwordless_sudo(host, sudo_password)
+
+        def on_success(repair_result):
+            append_log(repair_result.summary)
+            if repair_result.success:
+                append_log("Повторный запуск установки ПО")
+                retry_install_callback()
+                return
+            self._show_action_result(repair_result, title="Исправление sudoers")
+
+        def on_error(error):
+            append_log(f"Ошибка: {error}")
+            log_message(f"Исправление sudoers ошибка: {error}")
+            messagebox.showerror("Исправление sudoers", str(error), parent=self.app.master)
+
+        self.app.run_background(work, on_success, on_error)
 
     def bootstrap_ssh_key(self):
         log_window, append_log = self.app.open_action_log_window(f"Проброс SSH-ключа — {self.user.get('name', '?')}")
