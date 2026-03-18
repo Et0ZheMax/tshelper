@@ -749,6 +749,65 @@ class SudoRepairPasswordDialog:
         self.window.wait_window()
         return self.result
 
+
+class InteractiveInstallerPromptDialog:
+    def __init__(self, parent, host_name: str, software_title: str, prompt_text: str):
+        self.result = None
+        self.window = tk.Toplevel(parent)
+        self.window.title("Требуется ответ установщику")
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.window.resizable(False, False)
+        self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        frame = ttk.Frame(self.window, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=f"Host: {host_name or 'неизвестно'}").pack(anchor="w")
+        ttk.Label(frame, text=f"ПО: {software_title or 'неизвестно'}").pack(anchor="w", pady=(4, 0))
+        ttk.Label(frame, text="Вопрос установщика / последние строки вывода:").pack(anchor="w", pady=(12, 4))
+
+        prompt_box = tk.Text(frame, height=8, width=72, wrap="word")
+        prompt_box.insert("1.0", prompt_text or "")
+        prompt_box.configure(state="disabled")
+        prompt_box.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Ответ операторa:").pack(anchor="w", pady=(12, 4))
+        self.answer_var = tk.StringVar()
+        answer_entry = ttk.Entry(frame, textvariable=self.answer_var)
+        answer_entry.pack(fill="x")
+
+        quick_buttons = ttk.Frame(frame)
+        quick_buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(quick_buttons, text="Y", command=lambda: self._set_result("Y\n")).pack(side="left")
+        ttk.Button(quick_buttons, text="N", command=lambda: self._set_result("N\n")).pack(side="left", padx=(8, 0))
+        ttk.Button(quick_buttons, text="Enter", command=lambda: self._set_result("Y\n")).pack(side="left", padx=(8, 0))
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="Отправить", command=self._submit).pack(side="left")
+        ttk.Button(buttons, text="Отменить установку", command=self._cancel).pack(side="left", padx=(8, 0))
+
+        self.window.bind("<Return>", lambda _event: self._submit())
+        self.window.bind("<Escape>", lambda _event: self._cancel())
+        answer_entry.focus_set()
+
+    def _set_result(self, value: str):
+        self.result = value
+        self.window.destroy()
+
+    def _submit(self):
+        self.result = f"{self.answer_var.get()}\n"
+        self.window.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.window.destroy()
+
+    def show(self):
+        self.window.wait_window()
+        return self.result
+
 # --------- Главный класс окна ----------
 class UserManager:
     def __init__(self, users_file):
@@ -4843,6 +4902,21 @@ Write-Output "OK"
             details = failed_step.stderr or failed_step.stdout or details
         messagebox.showerror(title, f"{result.summary}\n\n{details or 'Неизвестная ошибка'}")
 
+    def _request_interactive_installer_response(self, host_name: str, software_title: str, prompt_text: str, append_log):
+        response_queue = queue.Queue(maxsize=1)
+
+        def show_dialog():
+            dialog = InteractiveInstallerPromptDialog(self.app.master, host_name, software_title, prompt_text)
+            response = dialog.show()
+            response_queue.put(response)
+
+        self.app.master.after(0, show_dialog)
+        try:
+            return response_queue.get(timeout=300)
+        except queue.Empty:
+            append_log("[interactive] оператор не ответил в течение 300 секунд")
+            return "__TIMEOUT__"
+
     def install_software_dialog(self):
         try:
             catalog = self.app.load_software_catalog()
@@ -4865,7 +4939,17 @@ Write-Output "OK"
                     host = self.app.build_remote_host(self.user)
                     executor = SSHExecutor(auth, logger=append_log)
                     installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
-                    return installer.install_software(host, item_id, force_reinstall=force_reinstall)
+                    return installer.install_software(
+                        host,
+                        item_id,
+                        force_reinstall=force_reinstall,
+                        prompt_callback=lambda host_name, software_title, prompt_text: self._request_interactive_installer_response(
+                            host_name,
+                            software_title,
+                            prompt_text,
+                            append_log,
+                        ),
+                    )
 
                 def on_success(result):
                     append_log(result.summary)

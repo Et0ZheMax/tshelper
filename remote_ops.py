@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import re
 import shlex
 import socket
-import time
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -25,6 +26,14 @@ class SSHConnectionError(RemoteOpsError):
 
 class CatalogError(RemoteOpsError):
     """Ошибка каталога ПО."""
+
+
+class InteractivePromptTimeout(RemoteOpsError):
+    """Не получен ответ оператора на интерактивный запрос."""
+
+
+class InteractivePromptCancelled(RemoteOpsError):
+    """Оператор отменил интерактивный запрос."""
 
 
 @dataclass(slots=True)
@@ -111,6 +120,7 @@ class SoftwareItem:
     requires_sudo: bool = False
     timeout_sec: int = 1800
     tags: list[str] = field(default_factory=list)
+    interactive_responses: list[dict[str, str]] = field(default_factory=list)
 
 
 class SoftwareCatalog:
@@ -165,6 +175,14 @@ class SoftwareCatalog:
                     requires_sudo=bool(raw_item.get("requires_sudo", False)),
                     timeout_sec=max(1, int(raw_item.get("timeout_sec", 1800))),
                     tags=[str(tag).strip() for tag in raw_item.get("tags", []) if str(tag).strip()],
+                    interactive_responses=[
+                        {
+                            "pattern": str(entry.get("pattern", "")).strip(),
+                            "response": str(entry.get("response", "")),
+                        }
+                        for entry in raw_item.get("interactive_responses", [])
+                        if isinstance(entry, dict) and str(entry.get("pattern", "")).strip()
+                    ],
                 )
             )
         return cls(items, json_path)
@@ -344,6 +362,176 @@ class SSHExecutor:
         if line:
             self._log(f"[{step_name}] {stream_name}: {line}")
 
+    def _extract_tail_lines(self, text: str, max_lines: int = 6) -> str:
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return text.strip()[-400:]
+        return "\n".join(lines[-max_lines:])[-1200:]
+
+    def _looks_like_prompt(self, text: str) -> bool:
+        probe = (text or "").strip()
+        if not probe:
+            return False
+        prompt_patterns = (
+            r"\[[Yy]/[Nn]\]",
+            r"\([Yy]/[Nn]\)",
+            r"\[[Nn]/[Yy]\]",
+            r"do you want",
+            r"continue\?",
+            r"press enter",
+            r"yes/no",
+            r"enter choice",
+            r"введите",
+            r"продолжить",
+            r"подтверд",
+        )
+        if any(re.search(pattern, probe, re.IGNORECASE) for pattern in prompt_patterns):
+            return True
+        return probe.endswith(":") or probe.endswith("?")
+
+    def _match_auto_response(
+        self,
+        prompt_text: str,
+        interactive_responses: list[dict[str, str]],
+    ) -> Optional[tuple[str, str]]:
+        for entry in interactive_responses:
+            pattern = str(entry.get("pattern", "")).strip()
+            if not pattern:
+                continue
+            if re.search(pattern, prompt_text, re.IGNORECASE | re.MULTILINE):
+                return pattern, str(entry.get("response", ""))
+        return None
+
+    def run_command_interactive(
+        self,
+        client,
+        command: str,
+        timeout_sec: int,
+        step_name: str,
+        stdin_data: str = "",
+        interactive_responses: Optional[list[dict[str, str]]] = None,
+        prompt_callback: Optional[Callable[[str], Optional[str]]] = None,
+        prompt_idle_sec: int = 2,
+    ) -> StepResult:
+        started = time.time()
+        stdin, stdout, stderr = client.exec_command(command, timeout=timeout_sec, get_pty=True)
+        if stdin_data:
+            stdin.write(stdin_data)
+            stdin.flush()
+
+        channel = stdout.channel
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stdout_buffer = bytearray()
+        stderr_buffer = bytearray()
+        combined_tail = ""
+        last_output_at = time.time()
+        last_prompt_text = ""
+        timed_out = False
+        deadline = started + max(1, timeout_sec)
+        interactive_responses = interactive_responses or []
+
+        while True:
+            activity = False
+            while channel.recv_ready():
+                chunk = channel.recv(65536)
+                stdout_chunks.append(chunk)
+                stdout_buffer.extend(chunk)
+                self._emit_output_lines(step_name, "stdout", stdout_buffer)
+                combined_tail = (combined_tail + chunk.decode("utf-8", errors="replace"))[-4000:]
+                last_output_at = time.time()
+                activity = True
+            while channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(65536)
+                stderr_chunks.append(chunk)
+                stderr_buffer.extend(chunk)
+                self._emit_output_lines(step_name, "stderr", stderr_buffer)
+                combined_tail = (combined_tail + chunk.decode("utf-8", errors="replace"))[-4000:]
+                last_output_at = time.time()
+                activity = True
+
+            if channel.exit_status_ready():
+                if not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+
+            prompt_text = self._extract_tail_lines(combined_tail)
+            idle_for = time.time() - last_output_at
+            if (
+                not activity
+                and prompt_text
+                and prompt_text != last_prompt_text
+                and idle_for >= prompt_idle_sec
+                and self._looks_like_prompt(prompt_text)
+            ):
+                last_prompt_text = prompt_text
+                self._log("[interactive] detected possible prompt")
+                auto_response = self._match_auto_response(prompt_text, interactive_responses)
+                if auto_response is not None:
+                    pattern, response = auto_response
+                    stdin.write(response if response.endswith("\n") else f"{response}\n")
+                    stdin.flush()
+                    self._log(f"[auto-response] matched '{pattern}' -> sent response")
+                    last_output_at = time.time()
+                elif prompt_callback is not None:
+                    self._log("[interactive] waiting for operator response")
+                    operator_response = prompt_callback(prompt_text)
+                    if operator_response is None:
+                        raise InteractivePromptCancelled("Операция отменена оператором во время интерактивного запроса")
+                    if operator_response == "__TIMEOUT__":
+                        raise InteractivePromptTimeout("Не получен ответ оператора на интерактивный запрос установщика")
+                    stdin.write(operator_response if operator_response.endswith("\n") else f"{operator_response}\n")
+                    stdin.flush()
+                    self._log("[interactive] operator response sent")
+                    last_output_at = time.time()
+
+            if time.time() >= deadline:
+                timed_out = True
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+                break
+
+            time.sleep(0.05)
+
+        while channel.recv_ready():
+            chunk = channel.recv(65536)
+            stdout_chunks.append(chunk)
+            stdout_buffer.extend(chunk)
+            self._emit_output_lines(step_name, "stdout", stdout_buffer)
+        while channel.recv_stderr_ready():
+            chunk = channel.recv_stderr(65536)
+            stderr_chunks.append(chunk)
+            stderr_buffer.extend(chunk)
+            self._emit_output_lines(step_name, "stderr", stderr_buffer)
+
+        self._flush_output_buffer(step_name, "stdout", stdout_buffer)
+        self._flush_output_buffer(step_name, "stderr", stderr_buffer)
+
+        if timed_out:
+            return StepResult(
+                name=step_name,
+                success=False,
+                return_code=-1,
+                stdout=b"".join(stdout_chunks).decode("utf-8", errors="replace").strip(),
+                stderr=(b"".join(stderr_chunks).decode("utf-8", errors="replace").strip() or f"Команда превысила таймаут {timeout_sec} сек."),
+                command=command,
+                duration_sec=time.time() - started,
+            )
+
+        exit_status = channel.recv_exit_status()
+        out_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+        err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        return StepResult(
+            name=step_name,
+            success=exit_status == 0,
+            return_code=exit_status,
+            stdout=out_text.strip(),
+            stderr=err_text.strip(),
+            command=command,
+            duration_sec=time.time() - started,
+        )
+
     def run_command(self, client, command: str, timeout_sec: int, step_name: str, get_pty: bool = False, stdin_data: str = "") -> StepResult:
         started = time.time()
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout_sec, get_pty=get_pty)
@@ -520,9 +708,38 @@ class UbuntuSoftwareInstaller:
         result.error_message = step_result.stderr or step_result.stdout or self._passwordless_sudo_message()
         return step_result
 
-    def _run_step(self, result: ActionResult, client, command: str, step_name: str, timeout_sec: int, get_pty: bool = False, stdin_data: str = "") -> StepResult:
+    def _run_step(
+        self,
+        result: ActionResult,
+        client,
+        command: str,
+        step_name: str,
+        timeout_sec: int,
+        get_pty: bool = False,
+        stdin_data: str = "",
+        interactive_responses: Optional[list[dict[str, str]]] = None,
+        prompt_callback: Optional[Callable[[str], Optional[str]]] = None,
+    ) -> StepResult:
         self._log(f"[{step_name}] Выполняю: {command}")
-        step_result = self.executor.run_command(client, command, timeout_sec=timeout_sec, step_name=step_name, get_pty=get_pty, stdin_data=stdin_data)
+        if get_pty and (interactive_responses or prompt_callback):
+            step_result = self.executor.run_command_interactive(
+                client,
+                command,
+                timeout_sec=timeout_sec,
+                step_name=step_name,
+                stdin_data=stdin_data,
+                interactive_responses=interactive_responses,
+                prompt_callback=prompt_callback,
+            )
+        else:
+            step_result = self.executor.run_command(
+                client,
+                command,
+                timeout_sec=timeout_sec,
+                step_name=step_name,
+                get_pty=get_pty,
+                stdin_data=stdin_data,
+            )
         result.steps.append(step_result)
         if step_result.success:
             self._log(f"[{step_name}] OK")
@@ -648,7 +865,13 @@ class UbuntuSoftwareInstaller:
                     self._log(f"Не удалось удалить временный sudoers drop-in: {cleanup_error}")
                 self.executor.close_client(client)
 
-    def install_software(self, host: RemoteHost, item_id: str, force_reinstall: bool = False) -> ActionResult:
+    def install_software(
+        self,
+        host: RemoteHost,
+        item_id: str,
+        force_reinstall: bool = False,
+        prompt_callback: Optional[Callable[[str, str, str], Optional[str]]] = None,
+    ) -> ActionResult:
         item = self.catalog.get(item_id)
         action_result = ActionResult(action_name=f"Установка ПО: {item.title}", success=False)
         client = None
@@ -671,6 +894,11 @@ class UbuntuSoftwareInstaller:
             timeout_sec = min(item.timeout_sec, self.executor.auth.command_timeout_sec)
             install_type = item.install_type.lower()
             install_result: Optional[StepResult] = None
+
+            def item_prompt_callback(prompt_text: str) -> Optional[str]:
+                if prompt_callback is None:
+                    return None
+                return prompt_callback(action_result.host_used or "", item.title, prompt_text)
 
             if install_type == "apt":
                 if not item.package_name:
@@ -704,7 +932,16 @@ class UbuntuSoftwareInstaller:
                     "sudo -n apt-get -o DPkg::Lock::Timeout=60 install -y "
                     f"{shlex.quote(remote_deb)}"
                 )
-                install_result = self._run_step(action_result, client, install_command, "Установка deb-пакета", timeout_sec)
+                install_result = self._run_step(
+                    action_result,
+                    client,
+                    install_command,
+                    "Установка deb-пакета",
+                    timeout_sec,
+                    get_pty=True,
+                    interactive_responses=item.interactive_responses,
+                    prompt_callback=item_prompt_callback,
+                )
             elif install_type == "local_script":
                 local_path = item.local_path
                 if not local_path:
@@ -744,7 +981,16 @@ class UbuntuSoftwareInstaller:
                 # В custom_cmd ответственность за добавление sudo остаётся на install_cmd.
                 # requires_sudo здесь влияет только на режим выполнения (PTY), чтобы команда,
                 # уже содержащая sudo, могла корректно запросить tty на удалённой стороне.
-                install_result = self._run_step(action_result, client, item.install_cmd, "Выполнение команды", timeout_sec, get_pty=item.requires_sudo)
+                install_result = self._run_step(
+                    action_result,
+                    client,
+                    item.install_cmd,
+                    "Выполнение команды",
+                    timeout_sec,
+                    get_pty=(item.requires_sudo or bool(item.interactive_responses)),
+                    interactive_responses=item.interactive_responses,
+                    prompt_callback=item_prompt_callback,
+                )
             else:
                 raise CatalogError(f"Неподдерживаемый install_type: {item.install_type}")
 
@@ -753,7 +999,16 @@ class UbuntuSoftwareInstaller:
                 return action_result
 
             if item.post_install_cmd:
-                post_result = self._run_step(action_result, client, item.post_install_cmd, "Post-install", timeout_sec, get_pty=item.requires_sudo)
+                post_result = self._run_step(
+                    action_result,
+                    client,
+                    item.post_install_cmd,
+                    "Post-install",
+                    timeout_sec,
+                    get_pty=(item.requires_sudo or install_type in {"deb_url", "custom_cmd"} or bool(item.interactive_responses)),
+                    interactive_responses=item.interactive_responses,
+                    prompt_callback=item_prompt_callback,
+                )
                 if not post_result.success:
                     action_result.error_message = post_result.stderr or post_result.stdout or "Ошибка post-install"
                     return action_result
