@@ -740,6 +740,13 @@ class SettingsManager:
             "reset_password":"",
             # SSH
             "ssh_login":"", "ssh_password":"", "ssh_terminal":"Windows Terminal", "ssh_pass_enabled": False,
+            "ssh_key_enabled": False,
+            "ssh_key_private_path": "",
+            "ssh_key_public_path": "",
+            "ssh_key_auto_bootstrap": False,
+            "ssh_connect_timeout_sec": 8,
+            "ssh_command_timeout_sec": 1800,
+            "software_catalog_path": "software_catalog.json",
             "plink_hostkeys": {},
             # GLPI
             "glpi_api_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_prefix_field": "name", "glpi_verify_ssl": True,
@@ -1332,6 +1339,105 @@ class MainWindow:
             add_variant(name)
 
         return variants
+
+    def get_remote_ops_auth(self):
+        from remote_ops import SSHAuthSettings, SSHKeySettings
+
+        return SSHAuthSettings(
+            username=self.settings.get_setting("ssh_login", "").strip(),
+            password=self.settings.get_setting("ssh_password", ""),
+            key_settings=SSHKeySettings(
+                enabled=bool(self.settings.get_setting("ssh_key_enabled", False)),
+                private_key_path=self.settings.get_setting("ssh_key_private_path", "").strip(),
+                public_key_path=self.settings.get_setting("ssh_key_public_path", "").strip(),
+                auto_bootstrap=bool(self.settings.get_setting("ssh_key_auto_bootstrap", False)),
+            ),
+            connect_timeout_sec=int(self.settings.get_setting("ssh_connect_timeout_sec", 8) or 8),
+            command_timeout_sec=int(self.settings.get_setting("ssh_command_timeout_sec", 1800) or 1800),
+        )
+
+    def build_remote_host(self, user: dict):
+        from remote_ops import RemoteHost
+
+        candidates = self.build_host_candidates(user)
+        fallback_host = (user.get("pc_name") or "").strip()
+        if not candidates and fallback_host:
+            candidates = [fallback_host]
+        return RemoteHost(candidates=candidates, port=22, os_family="ubuntu")
+
+    def ensure_software_catalog_exists(self) -> str:
+        catalog_path = self.settings.get_setting("software_catalog_path", "software_catalog.json") or "software_catalog.json"
+        if not os.path.isabs(catalog_path):
+            catalog_path = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), catalog_path)
+        if os.path.exists(catalog_path):
+            return catalog_path
+
+        template = {
+            "software": [
+                {
+                    "id": "google-chrome",
+                    "title": "Google Chrome",
+                    "os_family": "ubuntu",
+                    "install_type": "deb_url",
+                    "enabled": True,
+                    "description": "Скачивает официальный .deb и устанавливает пакет через apt.",
+                    "package_name": "google-chrome-stable",
+                    "url": "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+                    "requires_sudo": True,
+                    "timeout_sec": 1800,
+                    "tags": ["browser", "chrome", "google"],
+                },
+                {
+                    "id": "vlc",
+                    "title": "VLC",
+                    "os_family": "ubuntu",
+                    "install_type": "apt",
+                    "enabled": True,
+                    "description": "Устанавливает пакет из репозитория Ubuntu.",
+                    "package_name": "vlc",
+                    "requires_sudo": True,
+                    "timeout_sec": 1200,
+                    "tags": ["media", "player"],
+                },
+            ]
+        }
+        os.makedirs(os.path.dirname(catalog_path) or ".", exist_ok=True)
+        with open(catalog_path, "w", encoding="utf-8") as file_obj:
+            json.dump(template, file_obj, ensure_ascii=False, indent=2)
+        log_message(f"Создан шаблон каталога ПО: {catalog_path}")
+        return catalog_path
+
+    def load_software_catalog(self):
+        from remote_ops import SoftwareCatalog
+
+        catalog_path = self.ensure_software_catalog_exists()
+        return SoftwareCatalog.load(catalog_path)
+
+    def open_action_log_window(self, title="Remote Ops Log"):
+        window = tk.Toplevel(self.master)
+        window.title(title)
+        window.geometry("760x420")
+        text_widget = tk.Text(window, wrap="word")
+        text_widget.pack(fill="both", expand=True)
+
+        def append_callback(message: str):
+            def do_append():
+                text_widget.insert("end", f"{message}\n")
+                text_widget.see("end")
+            self.master.after(0, do_append)
+
+        return window, append_callback
+
+    def run_background(self, work, on_success, on_error):
+        def runner():
+            try:
+                result = work()
+            except Exception as exc:
+                self.master.after(0, lambda err=exc: on_error(err))
+                return
+            self.master.after(0, lambda res=result: on_success(res))
+
+        threading.Thread(target=runner, daemon=True).start()
 
     def resolve_ip(self, host: str) -> str:
         try:
@@ -3395,6 +3501,41 @@ $items = foreach ($u in $users) {{
         txt_hostkeys.insert("1.0", json.dumps(self.settings.config.get("plink_hostkeys", {}), ensure_ascii=False, indent=2))
         txt_hostkeys.pack(fill="both", expand=True)
 
+        ssh_key_enabled = tk.BooleanVar(value=self.settings.get_setting("ssh_key_enabled", False))
+        ttk.Checkbutton(tab_ssh, text="Использовать SSH-ключ для automation", variable=ssh_key_enabled).pack(pady=4, anchor="w")
+
+        ttk.Label(tab_ssh, text="Private key path:").pack(pady=4, anchor="w")
+        ssh_key_private_path = tk.StringVar(value=self.settings.get_setting("ssh_key_private_path", ""))
+        private_row = ttk.Frame(tab_ssh)
+        private_row.pack(fill="x")
+        ttk.Entry(private_row, textvariable=ssh_key_private_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(private_row, text="Обзор…", command=lambda: ssh_key_private_path.set(filedialog.askopenfilename(title="Выберите private key") or ssh_key_private_path.get())).pack(side="left", padx=(6, 0))
+
+        ttk.Label(tab_ssh, text="Public key path:").pack(pady=4, anchor="w")
+        ssh_key_public_path = tk.StringVar(value=self.settings.get_setting("ssh_key_public_path", ""))
+        public_row = ttk.Frame(tab_ssh)
+        public_row.pack(fill="x")
+        ttk.Entry(public_row, textvariable=ssh_key_public_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(public_row, text="Обзор…", command=lambda: ssh_key_public_path.set(filedialog.askopenfilename(title="Выберите public key") or ssh_key_public_path.get())).pack(side="left", padx=(6, 0))
+
+        ssh_key_auto_bootstrap = tk.BooleanVar(value=self.settings.get_setting("ssh_key_auto_bootstrap", False))
+        ttk.Checkbutton(tab_ssh, text="Если ключа нет — автоматически пробрасывать через пароль", variable=ssh_key_auto_bootstrap).pack(pady=4, anchor="w")
+
+        ttk.Label(tab_ssh, text="Тайм-аут подключения SSH automation, сек:").pack(pady=4, anchor="w")
+        ssh_connect_timeout_sec = tk.StringVar(value=str(self.settings.get_setting("ssh_connect_timeout_sec", 8)))
+        ttk.Entry(tab_ssh, textvariable=ssh_connect_timeout_sec).pack(fill="x")
+
+        ttk.Label(tab_ssh, text="Тайм-аут команд SSH automation, сек:").pack(pady=4, anchor="w")
+        ssh_command_timeout_sec = tk.StringVar(value=str(self.settings.get_setting("ssh_command_timeout_sec", 1800)))
+        ttk.Entry(tab_ssh, textvariable=ssh_command_timeout_sec).pack(fill="x")
+
+        ttk.Label(tab_ssh, text="Каталог ПО:").pack(pady=4, anchor="w")
+        software_catalog_path = tk.StringVar(value=self.settings.get_setting("software_catalog_path", "software_catalog.json"))
+        catalog_row = ttk.Frame(tab_ssh)
+        catalog_row.pack(fill="x")
+        ttk.Entry(catalog_row, textvariable=software_catalog_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(catalog_row, text="Обзор…", command=lambda: software_catalog_path.set(filedialog.askopenfilename(title="Выберите JSON-каталог ПО", filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")]) or software_catalog_path.get())).pack(side="left", padx=(6, 0))
+
         # Телефония (CallWatcher)
         tab_cw = ttk.Frame(nb); nb.add(tab_cw, text="Телефония")
         add_storage_warning(tab_cw)
@@ -3489,6 +3630,21 @@ $items = foreach ($u in $users) {{
             self.settings.set_setting("ui_board_bg", board_bg.get())
             self.settings.set_setting("ssh_terminal", ssh_term.get())
             self.settings.set_setting("ssh_pass_enabled", ssh_pass_enabled.get())
+            self.settings.set_setting("ssh_key_enabled", ssh_key_enabled.get())
+            self.settings.set_setting("ssh_key_private_path", ssh_key_private_path.get().strip())
+            self.settings.set_setting("ssh_key_public_path", ssh_key_public_path.get().strip())
+            self.settings.set_setting("ssh_key_auto_bootstrap", ssh_key_auto_bootstrap.get())
+            try:
+                connect_timeout = max(1, int(ssh_connect_timeout_sec.get().strip() or "8"))
+            except Exception:
+                connect_timeout = 8
+            try:
+                command_timeout = max(1, int(ssh_command_timeout_sec.get().strip() or "1800"))
+            except Exception:
+                command_timeout = 1800
+            self.settings.set_setting("ssh_connect_timeout_sec", connect_timeout)
+            self.settings.set_setting("ssh_command_timeout_sec", command_timeout)
+            self.settings.set_setting("software_catalog_path", software_catalog_path.get().strip() or "software_catalog.json")
             # hostkeys
             try:
                 hk = json.loads(txt_hostkeys.get("1.0","end").strip() or "{}")
@@ -4455,6 +4611,8 @@ class UserButton(ttk.Frame):
         m.add_command(label="Сброс пароля omg", command=lambda: self.reset_password_ps("omg"))
         m.add_separator()
         m.add_command(label="Подключение по SSH", command=self.open_ssh_connection)
+        m.add_command(label="Пробросить SSH-ключ", command=self.bootstrap_ssh_key)
+        m.add_command(label="Установка ПО", command=self.install_software_dialog)
         m.add_separator()
         m.add_command(label="Редактировать", command=lambda: self.app.open_edit_window(self.user))
         m.add_command(label="Удалить", command=lambda: self.app.delete_user_from_button(self.user))
@@ -4613,7 +4771,94 @@ Write-Output "OK"
             log_message(f"Сброс пароля {which}: исключение {e}")
             messagebox.showerror("Сброс пароля", str(e))
 
+    def _show_action_result(self, result, title="Remote Ops"):
+        if result.success:
+            messagebox.showinfo(title, result.summary)
+            return
+        failed_step = next((step for step in result.steps if not step.success), None)
+        details = result.error_message
+        if failed_step is not None:
+            details = failed_step.stderr or failed_step.stdout or details
+        messagebox.showerror(title, f"{result.summary}\n\n{details or 'Неизвестная ошибка'}")
+
+    def install_software_dialog(self):
+        try:
+            catalog = self.app.load_software_catalog()
+        except Exception as exc:
+            log_message(f"Ошибка загрузки каталога ПО: {exc}")
+            messagebox.showerror("Установка ПО", str(exc))
+            return
+
+        def on_submit(item_id: str, force_reinstall: bool):
+            log_window, append_log = self.app.open_action_log_window(f"Установка ПО — {self.user.get('name', '?')}")
+            append_log(f"Старт установки ПО {item_id} для {self.user.get('name', '?')}")
+
+            def work():
+                from remote_ops import SSHExecutor, UbuntuSoftwareInstaller
+
+                auth = self.app.get_remote_ops_auth()
+                if not auth.username:
+                    raise RuntimeError("Не задан SSH Login в настройках")
+                host = self.app.build_remote_host(self.user)
+                executor = SSHExecutor(auth, logger=append_log)
+                installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
+                return installer.install_software(host, item_id, force_reinstall=force_reinstall)
+
+            def on_success(result):
+                append_log(result.summary)
+                self._log_action(f"Remote install: {item_id} -> {'OK' if result.success else 'ERROR'}")
+                log_action(f"Remote install {self.user.get('name', '?')}: {item_id} ({'OK' if result.success else 'ERROR'})")
+                self._show_action_result(result, title="Установка ПО")
+
+            def on_error(error):
+                append_log(f"Ошибка: {error}")
+                log_message(f"Установка ПО ошибка: {error}")
+                messagebox.showerror("Установка ПО", str(error))
+
+            self.app.run_background(work, on_success, on_error)
+
+        from remote_install_dialog import SoftwareInstallDialog
+        SoftwareInstallDialog(self.app.master, catalog, on_submit)
+
+    def bootstrap_ssh_key(self):
+        log_window, append_log = self.app.open_action_log_window(f"Проброс SSH-ключа — {self.user.get('name', '?')}")
+        append_log(f"Старт проброса SSH-ключа для {self.user.get('name', '?')}")
+
+        def work():
+            from remote_ops import ActionResult, SSHExecutor
+
+            auth = self.app.get_remote_ops_auth()
+            if not auth.username:
+                raise RuntimeError("Не задан SSH Login в настройках")
+            host = self.app.build_remote_host(self.user)
+            executor = SSHExecutor(auth, logger=append_log)
+            result = ActionResult(action_name="Проброс SSH-ключа", success=False)
+            try:
+                resolved_host, _ = executor.resolve_first_reachable(host)
+                result.host_used = resolved_host
+                executor.bootstrap_public_key(resolved_host, host.port)
+                result.success = True
+                result.used_key_auth = False
+                result.key_bootstrapped = True
+                return result
+            except Exception as exc:
+                result.error_message = str(exc)
+                return result
+
+        def on_success(result):
+            append_log(result.summary)
+            self._log_action(f"SSH key bootstrap -> {'OK' if result.success else 'ERROR'}")
+            self._show_action_result(result, title="Пробросить SSH-ключ")
+
+        def on_error(error):
+            append_log(f"Ошибка: {error}")
+            log_message(f"Проброс SSH-ключа ошибка: {error}")
+            messagebox.showerror("Пробросить SSH-ключ", str(error))
+
+        self.app.run_background(work, on_success, on_error)
+
     def open_ssh_connection(self):
+        # Важно: это старый интерактивный SSH-поток через терминал, не automation.
         ssh_login = self.app.settings.get_setting("ssh_login","")
         ssh_password = self.app.settings.get_setting("ssh_password","")
         if not ssh_login:
