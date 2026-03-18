@@ -503,14 +503,18 @@ class UbuntuSoftwareInstaller:
         client = None
         remote_temp_path = "/tmp/90-support-tshelper"
         sudoers_target_path = "/etc/sudoers.d/90-support-tshelper"
-        sudoers_content = """Defaults:support !requiretty
-support ALL=(root) NOPASSWD: /usr/bin/apt
-support ALL=(root) NOPASSWD: /usr/bin/apt-get
-support ALL=(root) NOPASSWD: /usr/bin/dpkg
-support ALL=(root) NOPASSWD: /usr/bin/systemctl
-support ALL=(root) NOPASSWD: /usr/bin/bash /usr/local/tshelper-scripts/*
-support ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*
-"""
+        remote_temp_lf_path = f"{remote_temp_path}.lf"
+        sudoers_content = "\n".join(
+            [
+                "Defaults:support !requiretty",
+                "support ALL=(root) NOPASSWD: /usr/bin/apt",
+                "support ALL=(root) NOPASSWD: /usr/bin/apt-get",
+                "support ALL=(root) NOPASSWD: /usr/bin/dpkg",
+                "support ALL=(root) NOPASSWD: /usr/bin/systemctl",
+                "support ALL=(root) NOPASSWD: /usr/bin/bash /usr/local/tshelper-scripts/*",
+                "support ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*",
+            ]
+        ) + "\n"
         timeout_sec = min(300, self.executor.auth.command_timeout_sec)
         temp_local_path = ""
         try:
@@ -520,7 +524,7 @@ support ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*
             action_result.host_used = used_host
             self._log(f"Подключение к {used_host} установлено для исправления sudoers")
 
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as temp_file:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", delete=False) as temp_file:
                 temp_file.write(sudoers_content)
                 temp_local_path = temp_file.name
 
@@ -537,8 +541,19 @@ support ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*
             self._log("Загружен временный sudoers drop-in")
 
             password_input = f"{sudo_password}\n"
+            normalize_step = self._run_step(
+                action_result,
+                client,
+                f"tr -d '\\r' < {shlex.quote(remote_temp_path)} > {shlex.quote(remote_temp_lf_path)}",
+                "Нормализация переноса строк sudoers drop-in",
+                timeout_sec,
+            )
+            if not normalize_step.success:
+                action_result.error_message = normalize_step.stderr or normalize_step.stdout or "Не удалось нормализовать переводы строк sudoers drop-in"
+                return action_result
+
             install_command = (
-                f"sudo -S -p '' install -o root -g root -m 0440 {shlex.quote(remote_temp_path)} {shlex.quote(sudoers_target_path)}"
+                f"sudo -S -p '' install -o root -g root -m 0440 {shlex.quote(remote_temp_lf_path)} {shlex.quote(sudoers_target_path)}"
             )
             install_step = self._run_step(
                 action_result,
@@ -606,7 +621,7 @@ support ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*
                     pass
             if client is not None:
                 try:
-                    cleanup_result = self.executor.run_command(client, f"rm -f {shlex.quote(remote_temp_path)}", timeout_sec=30, step_name="Очистка временного sudoers")
+                    cleanup_result = self.executor.run_command(client, f"rm -f {shlex.quote(remote_temp_path)} {shlex.quote(remote_temp_lf_path)}", timeout_sec=30, step_name="Очистка временного sudoers")
                     action_result.steps.append(cleanup_result)
                 except Exception as cleanup_error:
                     self._log(f"Не удалось удалить временный sudoers drop-in: {cleanup_error}")
