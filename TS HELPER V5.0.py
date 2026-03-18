@@ -1406,8 +1406,8 @@ class MainWindow:
 
     def _load_single_os_icon(self, os_type: str):
         file_priority = {
-            "windows": ["win.png", "win.ico"],
-            "linux": ["lin.png", "lin.ico"],
+            "windows": ["win.png"],
+            "linux": ["lin.png"],
         }
         for filename in file_priority.get(os_type, []):
             path = self._get_project_asset_path(filename)
@@ -4270,7 +4270,7 @@ class UserButton(ttk.Frame):
             bg=self.app.user_bg, fg=self.app.user_fg,
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg
         )
-        self._render_os_badge(self.app.user_bg, self.app.user_fg)
+        self._update_os_badge(self.app.user_bg, self.app.user_fg)
 
     def set_status(self, status_key: str):
         """Запоминаем статус и перерисовываем только при изменении."""
@@ -4316,14 +4316,34 @@ class UserButton(ttk.Frame):
         elif os_changed:
             self.refresh_text()
         else:
-            self._render_os_badge(self.btn.cget("bg"), self.btn.cget("fg"))
+            self._update_os_badge(self.btn.cget("bg"), self.btn.cget("fg"))
 
 
-    def _render_os_badge(self, bg_color: str, fg_color: str):
+    def _update_os_badge(self, bg_color: str, fg_color: str):
+        if self.os_type == "unknown":
+            self.os_badge.config(image="", text="")
+            self.os_badge.image = None
+            self.os_badge.place_forget()
+            return
+
         if self.os_icon_image is not None:
             self.os_badge.config(bg=bg_color, fg=fg_color, image=self.os_icon_image, text="")
             self.os_badge.image = self.os_icon_image
-            self.os_badge.place(relx=0.0, rely=1.0, x=12, y=-10, anchor="sw")
+            self.os_badge.place(relx=1.0, rely=1.0, x=-6, y=-6, anchor="se")
+            self.os_badge.lift()
+            return
+
+        if self.os_icon:
+            self.os_badge.config(
+                bg=bg_color,
+                fg=fg_color,
+                image="",
+                text=self.os_icon,
+                font=("Segoe UI Emoji", 9, "bold"),
+            )
+            self.os_badge.image = None
+            self.os_badge.place(relx=1.0, rely=1.0, x=-6, y=-6, anchor="se")
+            self.os_badge.lift()
             return
 
         self.os_badge.config(image="", text="")
@@ -4337,7 +4357,7 @@ class UserButton(ttk.Frame):
         ext = (self.user.get("ext") or "").strip()
         label = self._status_label() if self.show_status else ""
         label_prefix = f"{label} " if label else ""
-        pc_line = f"({self.os_icon + ' ' if self.os_icon else ''}{pc_label})"
+        pc_line = f"({pc_label})"
 
         if ext:
             header = f"{label_prefix}• 📞 {ext}" if label_prefix else f"📞 {ext}"
@@ -4385,7 +4405,7 @@ class UserButton(ttk.Frame):
             self.btn.gradient = gradient
             self.btn.image = gradient
             self.status_image = None
-            self._render_os_badge(self.app.caller_bg, self.app.caller_fg)
+            self._update_os_badge(self.app.caller_bg, self.app.caller_fg)
         else:
             # обычный режим — текст и, при поиске, цветной статус-иконкой
             status_image = self._status_image_for_key()
@@ -4410,7 +4430,7 @@ class UserButton(ttk.Frame):
             self.btn.gradient = None
             self.btn.image = status_image
             self.status_image = status_image
-            self._render_os_badge(self.app.user_bg, self.app.user_fg)
+            self._update_os_badge(self.app.user_bg, self.app.user_fg)
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
