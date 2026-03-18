@@ -320,20 +320,47 @@ class SSHExecutor:
         finally:
             self.close_client(client)
 
+    def _emit_output_lines(self, step_name: str, stream_name: str, buffer: bytearray) -> None:
+        while True:
+            newline_index = buffer.find(b"\n")
+            if newline_index < 0:
+                break
+            raw_line = bytes(buffer[:newline_index])
+            del buffer[:newline_index + 1]
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+            if line:
+                self._log(f"[{step_name}] {stream_name}: {line}")
+
+    def _flush_output_buffer(self, step_name: str, stream_name: str, buffer: bytearray) -> None:
+        if not buffer:
+            return
+        line = bytes(buffer).decode("utf-8", errors="replace").rstrip("\r")
+        buffer.clear()
+        if line:
+            self._log(f"[{step_name}] {stream_name}: {line}")
+
     def run_command(self, client, command: str, timeout_sec: int, step_name: str, get_pty: bool = False) -> StepResult:
         started = time.time()
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout_sec, get_pty=get_pty)
         channel = stdout.channel
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
+        stdout_buffer = bytearray()
+        stderr_buffer = bytearray()
         deadline = started + max(1, timeout_sec)
         timed_out = False
 
         while True:
             while channel.recv_ready():
-                stdout_chunks.append(channel.recv(65536))
+                chunk = channel.recv(65536)
+                stdout_chunks.append(chunk)
+                stdout_buffer.extend(chunk)
+                self._emit_output_lines(step_name, "stdout", stdout_buffer)
             while channel.recv_stderr_ready():
-                stderr_chunks.append(channel.recv_stderr(65536))
+                chunk = channel.recv_stderr(65536)
+                stderr_chunks.append(chunk)
+                stderr_buffer.extend(chunk)
+                self._emit_output_lines(step_name, "stderr", stderr_buffer)
 
             if channel.exit_status_ready():
                 if not channel.recv_ready() and not channel.recv_stderr_ready():
@@ -350,9 +377,18 @@ class SSHExecutor:
             time.sleep(0.05)
 
         while channel.recv_ready():
-            stdout_chunks.append(channel.recv(65536))
+            chunk = channel.recv(65536)
+            stdout_chunks.append(chunk)
+            stdout_buffer.extend(chunk)
+            self._emit_output_lines(step_name, "stdout", stdout_buffer)
         while channel.recv_stderr_ready():
-            stderr_chunks.append(channel.recv_stderr(65536))
+            chunk = channel.recv_stderr(65536)
+            stderr_chunks.append(chunk)
+            stderr_buffer.extend(chunk)
+            self._emit_output_lines(step_name, "stderr", stderr_buffer)
+
+        self._flush_output_buffer(step_name, "stdout", stdout_buffer)
+        self._flush_output_buffer(step_name, "stderr", stderr_buffer)
 
         if timed_out:
             return StepResult(
@@ -403,6 +439,29 @@ class UbuntuSoftwareInstaller:
     def _log(self, message: str) -> None:
         self.logger(message)
 
+    def _passwordless_sudo_message(self) -> str:
+        return "На хосте не настроен passwordless sudo для пользователя support"
+
+    def _run_sudo_preflight(self, result: ActionResult, client, timeout_sec: int) -> StepResult:
+        step_result = self._run_step(
+            result,
+            client,
+            "sudo -n true",
+            "Проверка passwordless sudo",
+            timeout_sec,
+            get_pty=False,
+        )
+        if not step_result.success:
+            step_result.stderr = self._passwordless_sudo_message()
+        return step_result
+
+    def _ensure_passwordless_sudo(self, result: ActionResult, client, timeout_sec: int) -> Optional[StepResult]:
+        step_result = self._run_sudo_preflight(result, client, timeout_sec)
+        if step_result.success:
+            return None
+        result.error_message = self._passwordless_sudo_message()
+        return step_result
+
     def _run_step(self, result: ActionResult, client, command: str, step_name: str, timeout_sec: int, get_pty: bool = False) -> StepResult:
         self._log(f"[{step_name}] Выполняю: {command}")
         step_result = self.executor.run_command(client, command, timeout_sec=timeout_sec, step_name=step_name, get_pty=get_pty)
@@ -440,21 +499,36 @@ class UbuntuSoftwareInstaller:
             if install_type == "apt":
                 if not item.package_name:
                     raise CatalogError(f"Для apt-пакета не указано package_name: {item.item_id}")
-                command = (
-                    "sudo DEBIAN_FRONTEND=noninteractive apt-get update && "
-                    f"sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {shlex.quote(item.package_name)}"
+                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec)
+                if preflight_result is not None:
+                    return action_result
+                update_result = self._run_step(action_result, client, "sudo -n apt-get update", "apt-get update", timeout_sec)
+                if not update_result.success:
+                    action_result.error_message = update_result.stderr or update_result.stdout or "Ошибка apt-get update"
+                    return action_result
+                install_command = (
+                    "sudo -n apt-get -o DPkg::Lock::Timeout=60 install -y "
+                    f"{shlex.quote(item.package_name)}"
                 )
-                install_result = self._run_step(action_result, client, command, "Установка apt-пакета", timeout_sec, get_pty=True)
+                install_result = self._run_step(action_result, client, install_command, "Установка apt-пакета", timeout_sec)
             elif install_type == "deb_url":
                 if not item.url:
                     raise CatalogError(f"Для deb_url не указан url: {item.item_id}")
                 remote_deb = f"/tmp/tshelper_{item.item_id}_{int(time.time())}.deb"
                 cleanup_remote_paths.append(remote_deb)
-                command = (
-                    f"wget -O {shlex.quote(remote_deb)} {shlex.quote(item.url)} && "
-                    f"sudo apt-get install -y {shlex.quote(remote_deb)}"
+                download_command = f"wget -O {shlex.quote(remote_deb)} {shlex.quote(item.url)}"
+                download_result = self._run_step(action_result, client, download_command, "Скачивание deb-пакета", timeout_sec)
+                if not download_result.success:
+                    action_result.error_message = download_result.stderr or download_result.stdout or "Ошибка скачивания deb-пакета"
+                    return action_result
+                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec)
+                if preflight_result is not None:
+                    return action_result
+                install_command = (
+                    "sudo -n apt-get -o DPkg::Lock::Timeout=60 install -y "
+                    f"{shlex.quote(remote_deb)}"
                 )
-                install_result = self._run_step(action_result, client, command, "Установка deb-пакета", timeout_sec, get_pty=True)
+                install_result = self._run_step(action_result, client, install_command, "Установка deb-пакета", timeout_sec)
             elif install_type == "local_script":
                 local_path = item.local_path
                 if not local_path:
@@ -471,16 +545,20 @@ class UbuntuSoftwareInstaller:
                 action_result.steps.append(upload_step)
                 chmod_step = self._run_step(action_result, client, f"chmod +x {shlex.quote(temp_remote_path)}", "Подготовка скрипта", timeout_sec)
                 if chmod_step.success:
+                    if item.requires_sudo:
+                        preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec)
+                        if preflight_result is not None:
+                            return action_result
                     script_command = shlex.quote(temp_remote_path)
                     if item.requires_sudo:
-                        script_command = f"sudo {script_command}"
+                        script_command = f"sudo -n {script_command}"
                     install_result = self._run_step(
                         action_result,
                         client,
                         script_command,
                         "Выполнение скрипта",
                         timeout_sec,
-                        get_pty=bool(item.requires_sudo),
+                        get_pty=False,
                     )
                 else:
                     install_result = chmod_step
