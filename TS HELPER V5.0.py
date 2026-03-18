@@ -862,6 +862,7 @@ class SettingsManager:
             # SSH
             "ssh_login":"", "ssh_password":"", "ssh_terminal":"Windows Terminal", "ssh_pass_enabled": False,
             "ssh_key_enabled": False,
+            "ssh_interactive_try_key_first": True,
             "ssh_key_private_path": "",
             "ssh_key_public_path": "",
             "ssh_key_auto_bootstrap": False,
@@ -3625,6 +3626,9 @@ $items = foreach ($u in $users) {{
         ssh_key_enabled = tk.BooleanVar(value=self.settings.get_setting("ssh_key_enabled", False))
         ttk.Checkbutton(tab_ssh, text="Использовать SSH-ключ для automation", variable=ssh_key_enabled).pack(pady=4, anchor="w")
 
+        ssh_interactive_try_key_first = tk.BooleanVar(value=self.settings.get_setting("ssh_interactive_try_key_first", True))
+        ttk.Checkbutton(tab_ssh, text="Для подключения по SSH сначала пробовать ключ", variable=ssh_interactive_try_key_first).pack(pady=4, anchor="w")
+
         ttk.Label(tab_ssh, text="Private key path:").pack(pady=4, anchor="w")
         ssh_key_private_path = tk.StringVar(value=self.settings.get_setting("ssh_key_private_path", ""))
         private_row = ttk.Frame(tab_ssh)
@@ -3752,6 +3756,7 @@ $items = foreach ($u in $users) {{
             self.settings.set_setting("ssh_terminal", ssh_term.get())
             self.settings.set_setting("ssh_pass_enabled", ssh_pass_enabled.get())
             self.settings.set_setting("ssh_key_enabled", ssh_key_enabled.get())
+            self.settings.set_setting("ssh_interactive_try_key_first", ssh_interactive_try_key_first.get())
             self.settings.set_setting("ssh_key_private_path", ssh_key_private_path.get().strip())
             self.settings.set_setting("ssh_key_public_path", ssh_key_public_path.get().strip())
             self.settings.set_setting("ssh_key_auto_bootstrap", ssh_key_auto_bootstrap.get())
@@ -5056,6 +5061,63 @@ Write-Output "OK"
 
         self.app.run_background(work, on_success, on_error)
 
+    def _build_windows_ssh_command(self, ssh_login: str, ssh_target: str, private_key_path: str = ""):
+        command = ["ssh", "-o", "StrictHostKeyChecking=accept-new"]
+        if private_key_path:
+            command.extend(["-i", private_key_path])
+        command.append(f"{ssh_login}@{ssh_target}")
+        return subprocess.list2cmdline(command)
+
+    def _launch_ssh_terminal_command(self, term: str, command: str):
+        if term == "Windows Terminal":
+            subprocess.Popen(["wt.exe", "cmd.exe", "/k", command])
+        elif term == "CMD":
+            subprocess.Popen(["cmd.exe", "/k", command])
+        elif term == "PowerShell":
+            subprocess.Popen(["powershell", "-NoExit", "-Command", command])
+        else:
+            raise RuntimeError("Неизвестный терминал")
+
+    def test_interactive_ssh_key(self, host: str, login: str, key_path: str, timeout_sec: int = 5) -> tuple[bool, str]:
+        log_message(f"SSH interactive: testing key auth for {login}@{host}")
+        ssh_binary = shutil.which("ssh")
+        if not ssh_binary:
+            details = "ssh не найден в PATH"
+            log_message(f"SSH interactive: key auth failed, fallback to password ({details})")
+            return False, details
+        command = [
+            ssh_binary,
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={max(1, int(timeout_sec))}",
+            "-i", key_path,
+            f"{login}@{host}",
+            "true",
+        ]
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(2, int(timeout_sec)) + 2,
+                creationflags=creationflags,
+            )
+        except Exception as exc:
+            details = str(exc)
+            log_message(f"SSH interactive: key precheck error for {login}@{host}: {details}")
+            return False, details
+
+        stderr_text = (result.stderr or "").strip()
+        stdout_text = (result.stdout or "").strip()
+        details = stderr_text or stdout_text or f"rc={result.returncode}"
+        if result.returncode == 0:
+            log_message(f"SSH interactive: key precheck success for {login}@{host}")
+            return True, details
+        log_message(f"SSH interactive: key precheck failed for {login}@{host}: {details}")
+        return False, details
+
     def open_ssh_connection(self):
         # Важно: это старый интерактивный SSH-поток через терминал, не automation.
         ssh_login = self.app.settings.get_setting("ssh_login","")
@@ -5085,8 +5147,26 @@ Write-Output "OK"
             log_message(f"SSH: ни одно из имён ({', '.join(candidates)}) не разрешилось, пробуем {ssh_target}")
         term = self.app.settings.get_setting("ssh_terminal","Windows Terminal")
         auto = self.app.settings.get_setting("ssh_pass_enabled", False)
+        try_key_first = self.app.settings.get_setting("ssh_interactive_try_key_first", True)
+        key_enabled = self.app.settings.get_setting("ssh_key_enabled", False)
+        private_key_path = self.app.settings.get_setting("ssh_key_private_path", "").strip()
 
         try:
+            if try_key_first and key_enabled:
+                if private_key_path and os.path.isfile(private_key_path):
+                    key_ok, _ = self.test_interactive_ssh_key(ssh_target, ssh_login, private_key_path)
+                    if key_ok:
+                        log_message("SSH interactive: key auth OK, opening terminal with private key")
+                        ssh_cmd = self._build_windows_ssh_command(ssh_login, ssh_target, private_key_path=private_key_path)
+                        self._launch_ssh_terminal_command(term, ssh_cmd)
+                        self._log_action(f"Открыт SSH через {term} ({ssh_target})")
+                        return
+                    log_message("SSH interactive: key auth failed, fallback to password")
+                else:
+                    log_message("SSH interactive: private key not configured, using password flow")
+            elif try_key_first:
+                log_message("SSH interactive: private key not configured, using password flow")
+
             if term == "Windows Terminal":
                 if auto: cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{ssh_target}'
                 else:    cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{ssh_target}'
