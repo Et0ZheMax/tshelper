@@ -459,7 +459,15 @@ class UbuntuSoftwareInstaller:
 
     def _sudo_password_required(self, step_result: StepResult) -> bool:
         combined_output = f"{step_result.stdout}\n{step_result.stderr}".lower()
-        return "a password is required" in combined_output
+        password_required_markers = (
+            "a password is required",
+            "password is required",
+            "требуется указать пароль",
+            "необходимо указать пароль",
+        )
+        if any(marker in combined_output for marker in password_required_markers):
+            return True
+        return "sudo:" in combined_output and ("password" in combined_output or "парол" in combined_output)
 
     def _get_sudo_preflight_command(self, item: Optional[SoftwareItem] = None, command_hint: str = "") -> str:
         install_type = (item.install_type.lower() if item else "")
