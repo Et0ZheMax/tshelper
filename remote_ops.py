@@ -461,11 +461,28 @@ class UbuntuSoftwareInstaller:
         combined_output = f"{step_result.stdout}\n{step_result.stderr}".lower()
         return "a password is required" in combined_output
 
-    def _run_sudo_preflight(self, result: ActionResult, client, timeout_sec: int) -> StepResult:
+    def _get_sudo_preflight_command(self, item: Optional[SoftwareItem] = None, command_hint: str = "") -> str:
+        install_type = (item.install_type.lower() if item else "")
+        command_hint = (command_hint or "").lower()
+        if install_type in {"apt", "deb_url"}:
+            return "sudo -n /usr/bin/apt-get --version"
+        if "systemctl" in command_hint:
+            return "sudo -n /usr/bin/systemctl --version"
+        return "sudo -n true"
+
+    def _run_sudo_preflight(
+        self,
+        result: ActionResult,
+        client,
+        timeout_sec: int,
+        item: Optional[SoftwareItem] = None,
+        command_hint: str = "",
+    ) -> StepResult:
+        preflight_command = self._get_sudo_preflight_command(item=item, command_hint=command_hint)
         step_result = self._run_step(
             result,
             client,
-            "sudo -n true",
+            preflight_command,
             "Проверка passwordless sudo",
             timeout_sec,
             get_pty=False,
@@ -478,8 +495,15 @@ class UbuntuSoftwareInstaller:
         result.error_message = self._passwordless_sudo_message()
         self._log("Требуется донастройка sudoers")
 
-    def _ensure_passwordless_sudo(self, result: ActionResult, client, timeout_sec: int) -> Optional[StepResult]:
-        step_result = self._run_sudo_preflight(result, client, timeout_sec)
+    def _ensure_passwordless_sudo(
+        self,
+        result: ActionResult,
+        client,
+        timeout_sec: int,
+        item: Optional[SoftwareItem] = None,
+        command_hint: str = "",
+    ) -> Optional[StepResult]:
+        step_result = self._run_sudo_preflight(result, client, timeout_sec, item=item, command_hint=command_hint)
         if step_result.success:
             return None
         if self._sudo_password_required(step_result):
@@ -588,17 +612,6 @@ class UbuntuSoftwareInstaller:
                 return action_result
             self._log("visudo проверка пройдена")
 
-            preflight_step = self._run_step(
-                action_result,
-                client,
-                "sudo -n true",
-                "Повторная проверка passwordless sudo",
-                timeout_sec,
-            )
-            if not preflight_step.success:
-                action_result.error_message = preflight_step.stderr or preflight_step.stdout or self._passwordless_sudo_message()
-                return action_result
-
             action_result.success = True
             action_result.needs_sudo_repair = False
             action_result.sudo_repair_message = ""
@@ -654,7 +667,7 @@ class UbuntuSoftwareInstaller:
             if install_type == "apt":
                 if not item.package_name:
                     raise CatalogError(f"Для apt-пакета не указано package_name: {item.item_id}")
-                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec)
+                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
                 if preflight_result is not None:
                     return action_result
                 update_result = self._run_step(action_result, client, "sudo -n apt-get update", "apt-get update", timeout_sec)
@@ -676,7 +689,7 @@ class UbuntuSoftwareInstaller:
                 if not download_result.success:
                     action_result.error_message = download_result.stderr or download_result.stdout or "Ошибка скачивания deb-пакета"
                     return action_result
-                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec)
+                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
                 if preflight_result is not None:
                     return action_result
                 install_command = (
