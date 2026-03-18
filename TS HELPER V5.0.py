@@ -18,6 +18,8 @@ STATUS_COLORS_DEFAULT = {
     "offline":  "#9ca3af",
 }
 
+OS_ICON_SIZE = (16, 16)
+
 USE_BOOTSTRAP = False  # <— принудительно выключаем тему, чтобы цвета tk.Button работали
 try:
     import ttkbootstrap as tb
@@ -1176,6 +1178,14 @@ class MainWindow:
 
         # иконки статусов
         self.status_icons = self._build_status_icons()
+        self._os_icon_images = {}
+        self._os_icon_text_fallback = {
+            "windows": ("🪟", "⊞"),
+            "linux": ("🐧", "(L)"),
+            "unknown": ("", ""),
+        }
+        self._os_emoji_enabled = bool(self.settings.get_setting("os_icon_emoji_enabled", True))
+        self._load_os_icon_resources()
 
         # док-панель
         self.dock_items = self._normalize_dock_items(self.settings.get_dock_items([]))
@@ -1366,9 +1376,7 @@ class MainWindow:
             pref_low = pref.lower()
             if host.startswith(pref_low):
                 return pref_low.rstrip("-")
-
-        m = re.match(r"^([a-z0-9]+)-", host)
-        return m.group(1) if m else ""
+        return ""
 
     def detect_os_type_from_host(self, host: str) -> str:
         prefix = self.normalize_host_prefix(host)
@@ -1378,13 +1386,58 @@ class MainWindow:
         }
         return prefix_map.get(prefix, "unknown")
 
-    def get_os_marker(self, os_type: str) -> str:
-        markers = {
-            "windows": "⊞",
-            "linux": "🐧",
-            "unknown": "",
+    def _get_project_asset_path(self, filename: str) -> str:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_dir, filename)
+
+    def _load_and_resize_icon(self, path: str, size: tuple[int, int] = OS_ICON_SIZE):
+        icon = tk.PhotoImage(file=path)
+        width, height = icon.width(), icon.height()
+        target_w, target_h = size
+        if width <= 0 or height <= 0:
+            return None
+        if width <= target_w and height <= target_h:
+            return icon
+
+        step_x = max(1, (width + target_w - 1) // target_w)
+        step_y = max(1, (height + target_h - 1) // target_h)
+        resized = icon.subsample(step_x, step_y)
+        return resized
+
+    def _load_single_os_icon(self, os_type: str):
+        file_priority = {
+            "windows": ["win.png", "win.ico"],
+            "linux": ["lin.png", "lin.ico"],
         }
-        return markers.get((os_type or "unknown").lower(), "")
+        for filename in file_priority.get(os_type, []):
+            path = self._get_project_asset_path(filename)
+            if not os.path.isfile(path):
+                continue
+            try:
+                icon = self._load_and_resize_icon(path, OS_ICON_SIZE)
+                if icon is not None and icon.width() > 0 and icon.height() > 0:
+                    return icon
+            except Exception as e:
+                log_message(f"Не удалось загрузить OS-иконку {filename}: {e}")
+        return None
+
+    def _load_os_icon_resources(self):
+        for os_type in ("windows", "linux"):
+            self._os_icon_images[os_type] = self._load_single_os_icon(os_type)
+
+    def get_os_visual(self, os_type: str) -> dict:
+        normalized = (os_type or "unknown").lower()
+        image = self._os_icon_images.get(normalized)
+        if image is not None:
+            return {"image": image, "text": ""}
+
+        emoji, safe_text = self._os_icon_text_fallback.get(normalized, ("", ""))
+        if self._os_emoji_enabled and emoji:
+            return {"image": None, "text": emoji}
+        return {"image": None, "text": safe_text}
+
+    def _ping_cache_key(self, pc_name: str) -> str:
+        return self.canonical_pc_key(pc_name)
 
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
@@ -2942,7 +2995,8 @@ $items = foreach ($u in $users) {{
                 pc_key = self.canonical_pc_key(pc_name)
                 if not pc_name:
                     continue
-                cached = self.ping_cache.get(pc_name)
+                cache_key = self._ping_cache_key(pc_name)
+                cached = self.ping_cache.get(cache_key)
                 now = time.time()
                 if cached and (now - cached["ts"] <= self.ping_cache_ttl):
                     btn = self.buttons.get(pc_key)
@@ -2967,9 +3021,20 @@ $items = foreach ($u in $users) {{
         pc = user.get("pc_name", "")
         ok, host, ip, os_type = self.check_availability(user)
         if gen != self.ping_generation: return
-        if pc:
-            self.ping_cache[pc] = {"ok": ok, "ts": time.time(), "host": host, "ip": ip, "os_type": os_type}
-        self.master.after(0, self._update_btn_style, pc, ok, os_type)
+        cache_key = self._ping_cache_key(pc)
+        cached = self.ping_cache.get(cache_key, {}) if cache_key else {}
+        resolved_os = (os_type or "unknown").lower()
+        if resolved_os == "unknown":
+            resolved_os = cached.get("os_type", "unknown")
+        if cache_key:
+            self.ping_cache[cache_key] = {
+                "ok": ok,
+                "ts": time.time(),
+                "host": host,
+                "ip": ip,
+                "os_type": resolved_os,
+            }
+        self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
 
     def check_availability(self, user):
         candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
@@ -4181,6 +4246,8 @@ class UserButton(ttk.Frame):
         self.status_image = None
         self.os_type = "unknown"
         self.os_icon = ""
+        self.os_icon_image = None
+
 
         pc_label = self.app.get_display_pc_name(user['pc_name'])
         # создаём tk.Button, чтобы гарантированно красить
@@ -4193,6 +4260,7 @@ class UserButton(ttk.Frame):
             command=self._show_menu
         )
         self.btn.pack(fill="both", expand=True)
+        self.os_badge = tk.Label(self, bd=0, highlightthickness=0, padx=0, pady=0)
         self.set_status(self.status_key)
         self._apply_caller_style()
         self.btn.bind("<Button-3>", self._rclick)
@@ -4202,6 +4270,7 @@ class UserButton(ttk.Frame):
             bg=self.app.user_bg, fg=self.app.user_fg,
             activebackground=self.app.user_bg, activeforeground=self.app.user_fg
         )
+        self._render_os_badge(self.app.user_bg, self.app.user_fg)
 
     def set_status(self, status_key: str):
         """Запоминаем статус и перерисовываем только при изменении."""
@@ -4223,23 +4292,43 @@ class UserButton(ttk.Frame):
         self.caller_info = caller
         self._apply_caller_style()
 
-    def set_availability(self, ok, searching=False, os_type="unknown"):
+    def set_availability(self, ok, os_type="unknown"):
         new_status = "online" if ok else "offline"
         normalized_os = (os_type or "unknown").lower()
+        visual = self.app.get_os_visual(normalized_os)
+        new_text_marker = visual.get("text", "")
+        new_image = visual.get("image")
+
         status_changed = self.status_key != new_status
         os_changed = self.os_type != normalized_os
         avail_changed = self.avail != ok
-        if not (status_changed or os_changed or avail_changed):
+        visual_changed = (self.os_icon != new_text_marker) or (self.os_icon_image is not new_image)
+        if not (status_changed or os_changed or avail_changed or visual_changed):
             return
 
         self.avail = ok
         self.os_type = normalized_os
-        self.os_icon = self.app.get_os_marker(normalized_os)
+        self.os_icon = new_text_marker
+        self.os_icon_image = new_image
+
         if status_changed:
             self.set_status(new_status)
         elif os_changed:
             self.refresh_text()
+        else:
+            self._render_os_badge(self.btn.cget("bg"), self.btn.cget("fg"))
 
+
+    def _render_os_badge(self, bg_color: str, fg_color: str):
+        if self.os_icon_image is not None:
+            self.os_badge.config(bg=bg_color, fg=fg_color, image=self.os_icon_image, text="")
+            self.os_badge.image = self.os_icon_image
+            self.os_badge.place(relx=0.0, rely=1.0, x=12, y=-10, anchor="sw")
+            return
+
+        self.os_badge.config(image="", text="")
+        self.os_badge.image = None
+        self.os_badge.place_forget()
 
     def _status_label(self) -> str:
         return {"online": "Онлайн", "offline": "Оффлайн", "checking": ""}.get(self.status_key, "")
@@ -4248,22 +4337,18 @@ class UserButton(ttk.Frame):
         ext = (self.user.get("ext") or "").strip()
         label = self._status_label() if self.show_status else ""
         label_prefix = f"{label} " if label else ""
-        os_prefix = f"{self.os_icon} " if self.os_icon else ""
+        pc_line = f"({self.os_icon + ' ' if self.os_icon else ''}{pc_label})"
 
         if ext:
-            # первая строка: Онлайн • 📞 4588
             header = f"{label_prefix}• 📞 {ext}" if label_prefix else f"📞 {ext}"
-            base = f"{header}\n{os_prefix}{self.user['name']}\n({pc_label})"
+            base = f"{header}\n{self.user['name']}\n{pc_line}"
         else:
-            # без телефона — Онлайн ФИО
-            header = f"{label_prefix}{os_prefix}{self.user['name']}"
-            base = f"{header}\n({pc_label})"
+            header = f"{label_prefix}{self.user['name']}"
+            base = f"{header}\n{pc_line}"
 
-        # если нет активного звонка — возвращаем обычный текст карточки
         if not self.caller_info:
             return base
 
-        # режим звонка: сверху инфа о звонке, снизу та же карточка со статусом
         num = self.caller_info.get("num") or "unknown"
         name = self.caller_info.get("name") or ""
         ext_target = self.caller_info.get("ext") or "?"
@@ -4300,6 +4385,7 @@ class UserButton(ttk.Frame):
             self.btn.gradient = gradient
             self.btn.image = gradient
             self.status_image = None
+            self._render_os_badge(self.app.caller_bg, self.app.caller_fg)
         else:
             # обычный режим — текст и, при поиске, цветной статус-иконкой
             status_image = self._status_image_for_key()
@@ -4324,6 +4410,7 @@ class UserButton(ttk.Frame):
             self.btn.gradient = None
             self.btn.image = status_image
             self.status_image = status_image
+            self._render_os_badge(self.app.user_bg, self.app.user_fg)
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
