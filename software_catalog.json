@@ -1,0 +1,29 @@
+{
+  "software": [
+    {
+      "id": "google-chrome",
+      "title": "Google Chrome",
+      "os_family": "ubuntu",
+      "install_type": "deb_url",
+      "enabled": true,
+      "description": "Скачивает официальный .deb и устанавливает пакет через apt.",
+      "package_name": "google-chrome-stable",
+      "url": "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+      "requires_sudo": true,
+      "timeout_sec": 1800,
+      "tags": ["browser", "chrome", "google"]
+    },
+    {
+      "id": "vlc",
+      "title": "VLC",
+      "os_family": "ubuntu",
+      "install_type": "apt",
+      "enabled": true,
+      "description": "Устанавливает пакет из репозитория Ubuntu.",
+      "package_name": "vlc",
+      "requires_sudo": true,
+      "timeout_sec": 1200,
+      "tags": ["media", "player"]
+    }
+  ]
+}
