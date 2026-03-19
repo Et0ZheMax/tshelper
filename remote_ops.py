@@ -12,6 +12,34 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 
+TSHELPER_SUDOERS_PATH = "/etc/sudoers.d/90-support-tshelper"
+TSHELPER_SUDOERS_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$")
+
+
+def validate_tshelper_username(username: str) -> str:
+    normalized = (username or "").strip()
+    if not TSHELPER_SUDOERS_USERNAME_RE.fullmatch(normalized):
+        raise RemoteOpsError(
+            "Логин SSH содержит недопустимые символы для sudoers. "
+            "Разрешены только строчные латинские буквы, цифры, '_', '-' и необязательный '$' в конце."
+        )
+    return normalized
+
+
+def build_tshelper_sudoers_content(username: str) -> str:
+    safe_username = validate_tshelper_username(username)
+    lines = [
+        "# Managed by TSHelper",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/apt",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/apt-get",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/dpkg",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/systemctl",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/bash /usr/local/tshelper-scripts/*",
+        f"{safe_username} ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 class RemoteOpsError(Exception):
     """Базовая ошибка remote automation."""
 
@@ -626,6 +654,35 @@ class SSHExecutor:
         finally:
             sftp.close()
 
+    def check_sudo_nopasswd(self, client, timeout_sec: int) -> StepResult:
+        return self.run_command(
+            client,
+            "sudo -n true",
+            timeout_sec=timeout_sec,
+            step_name="Проверка sudo -n true",
+            get_pty=False,
+        )
+
+    def run_remote_sudo_command(
+        self,
+        client,
+        remote_command: str,
+        timeout_sec: int,
+        step_name: str,
+        sudo_password: Optional[str] = None,
+    ) -> StepResult:
+        sudo_prefix = "sudo -n" if sudo_password is None else "sudo -S -p '' -k"
+        wrapped_command = f"{sudo_prefix} /bin/sh -c {shlex.quote(remote_command)}"
+        stdin_data = "" if sudo_password is None else f"{sudo_password}\n"
+        return self.run_command(
+            client,
+            wrapped_command,
+            timeout_sec=timeout_sec,
+            step_name=step_name,
+            get_pty=False,
+            stdin_data=stdin_data,
+        )
+
     def close_client(self, client) -> None:
         try:
             client.close()
@@ -634,7 +691,7 @@ class SSHExecutor:
 
 
 class UbuntuSoftwareInstaller:
-    def __init__(self, executor: SSHExecutor, catalog: SoftwareCatalog, logger: Optional[Callable[[str], None]] = None):
+    def __init__(self, executor: SSHExecutor, catalog: Optional[SoftwareCatalog], logger: Optional[Callable[[str], None]] = None):
         self.executor = executor
         self.catalog = catalog
         self.logger = logger or (lambda _msg: None)
@@ -644,6 +701,9 @@ class UbuntuSoftwareInstaller:
 
     def _passwordless_sudo_message(self) -> str:
         return "На хосте не настроен passwordless sudo для пользователя support"
+
+    def _passwordless_sudo_message_for_user(self, username: str) -> str:
+        return f"На хосте не настроен passwordless sudo для пользователя {username}"
 
     def _sudo_password_required(self, step_result: StepResult) -> bool:
         combined_output = f"{step_result.stdout}\n{step_result.stderr}".lower()
@@ -747,123 +807,228 @@ class UbuntuSoftwareInstaller:
             self._log(f"[{step_name}] ERROR rc={step_result.return_code}: {step_result.stderr or step_result.stdout}")
         return step_result
 
-    def repair_passwordless_sudo(self, host: RemoteHost, sudo_password: str) -> ActionResult:
-        action_result = ActionResult(action_name="Исправление sudoers", success=False)
+    def _resolve_sudo_password(
+        self,
+        action_result: ActionResult,
+        client,
+        username: str,
+        host_name: str,
+        timeout_sec: int,
+        ssh_password_candidate: str = "",
+        sudo_password_prompt: Optional[Callable[[str, str], Optional[str]]] = None,
+    ) -> tuple[bool, Optional[str]]:
+        preflight_step = self.executor.check_sudo_nopasswd(client, timeout_sec)
+        action_result.steps.append(preflight_step)
+        if preflight_step.success:
+            self._log(f"sudo -n true успешно для {username}@{host_name}")
+            return True, None
+
+        if not self._sudo_password_required(preflight_step):
+            action_result.error_message = (
+                preflight_step.stderr
+                or preflight_step.stdout
+                or f"Не удалось проверить sudo для пользователя {username}"
+            )
+            return False, None
+
+        self._log(f"sudo -n true требует пароль для {username}@{host_name}")
+        if ssh_password_candidate:
+            self._log(f"Пробую SSH Password как кандидат sudo для {username}@{host_name}")
+            ssh_password_step = self.executor.run_remote_sudo_command(
+                client,
+                "true",
+                timeout_sec=timeout_sec,
+                step_name="Проверка sudo с SSH Password",
+                sudo_password=ssh_password_candidate,
+            )
+            action_result.steps.append(ssh_password_step)
+            if ssh_password_step.success:
+                self._log(f"SSH Password подошёл для sudo у {username}@{host_name}")
+                return True, ssh_password_candidate
+            self._log(f"SSH Password не подошёл для sudo у {username}@{host_name}")
+
+        if sudo_password_prompt is None:
+            action_result.error_message = f"Для {username}@{host_name} требуется sudo-пароль, но ввод недоступен."
+            return False, None
+
+        manual_password = sudo_password_prompt(host_name, username)
+        if manual_password is None:
+            action_result.error_message = f"Операция отменена: sudo-пароль для {username}@{host_name} не введён."
+            self._log(f"Оператор отменил ввод sudo-пароля для {username}@{host_name}")
+            return False, None
+
+        manual_step = self.executor.run_remote_sudo_command(
+            client,
+            "true",
+            timeout_sec=timeout_sec,
+            step_name="Проверка sudo с введённым паролем",
+            sudo_password=manual_password,
+        )
+        action_result.steps.append(manual_step)
+        if manual_step.success:
+            self._log(f"Ручной sudo-пароль подтверждён для {username}@{host_name}")
+            return True, manual_password
+
+        action_result.error_message = (
+            manual_step.stderr
+            or manual_step.stdout
+            or f"Не удалось аутентифицироваться через sudo для {username}@{host_name}"
+        )
+        self._log(f"Ручной sudo-пароль не подошёл для {username}@{host_name}")
+        return False, None
+
+    def apply_tshelper_sudoers(
+        self,
+        host: RemoteHost,
+        username: str,
+        ssh_password_candidate: str = "",
+        sudo_password_prompt: Optional[Callable[[str, str], Optional[str]]] = None,
+    ) -> ActionResult:
+        safe_username = validate_tshelper_username(username)
+        action_result = ActionResult(action_name="Настройка TSHelper sudoers", success=False)
         client = None
-        remote_temp_path = "/tmp/90-support-tshelper"
-        sudoers_target_path = "/etc/sudoers.d/90-support-tshelper"
-        remote_temp_lf_path = f"{remote_temp_path}.lf"
-        sudoers_content = "\n".join(
-            [
-                "Defaults:support !requiretty",
-                "support ALL=(root) NOPASSWD: /usr/bin/apt",
-                "support ALL=(root) NOPASSWD: /usr/bin/apt-get",
-                "support ALL=(root) NOPASSWD: /usr/bin/dpkg",
-                "support ALL=(root) NOPASSWD: /usr/bin/systemctl",
-                "support ALL=(root) NOPASSWD: /usr/bin/bash /usr/local/tshelper-scripts/*",
-                "support ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*",
-            ]
-        ) + "\n"
+        remote_temp_path = ""
         timeout_sec = min(300, self.executor.auth.command_timeout_sec)
-        temp_local_path = ""
+        self._log(f"Старт настройки TSHelper sudoers: host={','.join(host.candidates)} login={safe_username}")
         try:
             client, used_key_auth, key_bootstrapped, used_host = self.executor.connect_with_fallback(host)
             action_result.used_key_auth = used_key_auth
             action_result.key_bootstrapped = key_bootstrapped
             action_result.host_used = used_host
-            self._log(f"Подключение к {used_host} установлено для исправления sudoers")
+            self._log(f"Подключение к {used_host} установлено для настройки sudoers пользователя {safe_username}")
 
+            auth_ok, sudo_password = self._resolve_sudo_password(
+                action_result,
+                client,
+                username=safe_username,
+                host_name=used_host,
+                timeout_sec=timeout_sec,
+                ssh_password_candidate=ssh_password_candidate,
+                sudo_password_prompt=sudo_password_prompt,
+            )
+            if not auth_ok:
+                if not action_result.error_message:
+                    action_result.error_message = self._passwordless_sudo_message_for_user(safe_username)
+                return action_result
+
+            mktemp_step = self._run_step(
+                action_result,
+                client,
+                "mktemp /tmp/tshelper-sudoers.XXXXXX",
+                "Создание временного sudoers-файла",
+                timeout_sec,
+            )
+            if not mktemp_step.success:
+                action_result.error_message = mktemp_step.stderr or mktemp_step.stdout or "Не удалось создать временный sudoers-файл"
+                return action_result
+            remote_temp_path = (mktemp_step.stdout or "").strip().splitlines()[-1].strip()
+            if not remote_temp_path.startswith("/tmp/"):
+                action_result.error_message = "Удалённая сторона вернула неожиданный путь временного sudoers-файла"
+                return action_result
+
+            sudoers_content = build_tshelper_sudoers_content(safe_username)
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", delete=False) as temp_file:
                 temp_file.write(sudoers_content)
-                temp_local_path = temp_file.name
-
-            self.executor.upload_file(client, temp_local_path, remote_temp_path)
-            upload_step = StepResult(
-                name="Загрузка sudoers drop-in",
-                success=True,
-                return_code=0,
-                stdout=f"Загружен {remote_temp_path}",
-                command=remote_temp_path,
-                host=used_host,
-            )
-            action_result.steps.append(upload_step)
-            self._log("Загружен временный sudoers drop-in")
-
-            password_input = f"{sudo_password}\n"
-            normalize_step = self._run_step(
-                action_result,
-                client,
-                f"tr -d '\\r' < {shlex.quote(remote_temp_path)} > {shlex.quote(remote_temp_lf_path)}",
-                "Нормализация переноса строк sudoers drop-in",
-                timeout_sec,
-            )
-            if not normalize_step.success:
-                action_result.error_message = normalize_step.stderr or normalize_step.stdout or "Не удалось нормализовать переводы строк sudoers drop-in"
-                return action_result
-
-            install_command = (
-                f"sudo -S -p '' install -o root -g root -m 0440 {shlex.quote(remote_temp_lf_path)} {shlex.quote(sudoers_target_path)}"
-            )
-            install_step = self._run_step(
-                action_result,
-                client,
-                install_command,
-                "Установка sudoers drop-in",
-                timeout_sec,
-                stdin_data=password_input,
-            )
-            if not install_step.success:
-                action_result.error_message = install_step.stderr or install_step.stdout or "Не удалось установить sudoers drop-in"
-                return action_result
-
-            visudo_step = self._run_step(
-                action_result,
-                client,
-                f"sudo -S -p '' visudo -cf {shlex.quote(sudoers_target_path)}",
-                "Проверка visudo",
-                timeout_sec,
-                stdin_data=password_input,
-            )
-            if not visudo_step.success:
-                self._run_step(
-                    action_result,
-                    client,
-                    f"sudo -S -p '' rm -f {shlex.quote(sudoers_target_path)}",
-                    "Откат sudoers drop-in",
-                    timeout_sec,
-                    stdin_data=password_input,
+                local_temp_path = temp_file.name
+            try:
+                self.executor.upload_file(client, local_temp_path, remote_temp_path)
+            finally:
+                try:
+                    os.remove(local_temp_path)
+                except OSError:
+                    pass
+            action_result.steps.append(
+                StepResult(
+                    name="Загрузка временного sudoers-файла",
+                    success=True,
+                    return_code=0,
+                    stdout=f"Загружен {remote_temp_path}",
+                    command=remote_temp_path,
+                    host=used_host,
                 )
+            )
+
+            visudo_step = self.executor.run_remote_sudo_command(
+                client,
+                f"visudo -cf {shlex.quote(remote_temp_path)}",
+                timeout_sec=timeout_sec,
+                step_name="Проверка visudo",
+                sudo_password=sudo_password,
+            )
+            action_result.steps.append(visudo_step)
+            if visudo_step.success:
+                self._log(f"visudo -cf успешно для {used_host} ({safe_username})")
+            else:
+                self._log(f"visudo -cf завершился ошибкой для {used_host} ({safe_username})")
                 action_result.error_message = visudo_step.stderr or visudo_step.stdout or "Проверка visudo завершилась ошибкой"
                 return action_result
-            self._log("visudo проверка пройдена")
+
+            move_step = self.executor.run_remote_sudo_command(
+                client,
+                f"mv {shlex.quote(remote_temp_path)} {shlex.quote(TSHELPER_SUDOERS_PATH)}",
+                timeout_sec=timeout_sec,
+                step_name="Установка managed sudoers-файла",
+                sudo_password=sudo_password,
+            )
+            action_result.steps.append(move_step)
+            if not move_step.success:
+                action_result.error_message = move_step.stderr or move_step.stdout or "Не удалось установить managed sudoers-файл"
+                return action_result
+            remote_temp_path = ""
+
+            chown_step = self.executor.run_remote_sudo_command(
+                client,
+                f"chown root:root {shlex.quote(TSHELPER_SUDOERS_PATH)}",
+                timeout_sec=timeout_sec,
+                step_name="Назначение владельца sudoers-файла",
+                sudo_password=sudo_password,
+            )
+            action_result.steps.append(chown_step)
+            if not chown_step.success:
+                action_result.error_message = chown_step.stderr or chown_step.stdout or "Не удалось назначить владельца sudoers-файла"
+                return action_result
+
+            chmod_step = self.executor.run_remote_sudo_command(
+                client,
+                f"chmod 0440 {shlex.quote(TSHELPER_SUDOERS_PATH)}",
+                timeout_sec=timeout_sec,
+                step_name="Назначение прав sudoers-файла",
+                sudo_password=sudo_password,
+            )
+            action_result.steps.append(chmod_step)
+            if not chmod_step.success:
+                action_result.error_message = chmod_step.stderr or chmod_step.stdout or "Не удалось назначить права sudoers-файла"
+                return action_result
 
             action_result.success = True
-            action_result.needs_sudo_repair = False
-            action_result.sudo_repair_message = ""
             action_result.error_message = ""
-            self._log("passwordless sudo настроен")
+            self._log(f"TSHelper sudoers успешно обновлён на {used_host} для {safe_username}")
             return action_result
         except RemoteOpsError as exc:
             action_result.error_message = str(exc)
-            self._log(f"Ошибка исправления sudoers: {exc}")
+            self._log(f"Ошибка настройки TSHelper sudoers: {exc}")
             return action_result
         except Exception as exc:
             action_result.error_message = str(exc)
-            self._log(f"Непредвиденная ошибка исправления sudoers: {exc}")
+            self._log(f"Непредвиденная ошибка настройки TSHelper sudoers: {exc}")
             return action_result
         finally:
-            if temp_local_path:
+            if client is not None and remote_temp_path:
                 try:
-                    os.remove(temp_local_path)
-                except OSError:
-                    pass
-            if client is not None:
-                try:
-                    cleanup_result = self.executor.run_command(client, f"rm -f {shlex.quote(remote_temp_path)} {shlex.quote(remote_temp_lf_path)}", timeout_sec=30, step_name="Очистка временного sudoers")
-                    action_result.steps.append(cleanup_result)
+                    cleanup_step = self.executor.run_command(
+                        client,
+                        f"rm -f {shlex.quote(remote_temp_path)}",
+                        timeout_sec=30,
+                        step_name="Очистка временного sudoers-файла",
+                    )
+                    action_result.steps.append(cleanup_step)
                 except Exception as cleanup_error:
-                    self._log(f"Не удалось удалить временный sudoers drop-in: {cleanup_error}")
+                    self._log(f"Не удалось удалить временный sudoers-файл: {cleanup_error}")
+            if client is not None:
                 self.executor.close_client(client)
+
+    def repair_passwordless_sudo(self, host: RemoteHost, sudo_password: str) -> ActionResult:
+        return self.apply_tshelper_sudoers(host, username="support", ssh_password_candidate=sudo_password)
 
     def install_software(
         self,
@@ -872,6 +1037,8 @@ class UbuntuSoftwareInstaller:
         force_reinstall: bool = False,
         prompt_callback: Optional[Callable[[str, str, str], Optional[str]]] = None,
     ) -> ActionResult:
+        if self.catalog is None:
+            raise CatalogError("Каталог ПО не загружен")
         item = self.catalog.get(item_id)
         action_result = ActionResult(action_name=f"Установка ПО: {item.title}", success=False)
         client = None
