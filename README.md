@@ -37,7 +37,7 @@ python "TS HELPER V4.1.py"
 - `pbx_debug_dump` — включение записи технических дампов FreePBX (`_pbx_debug`). По умолчанию отключено, чтобы не создавать лишнюю дисковую нагрузку в рабочем режиме.
 - `cw_login` — учётные данные FreePBX (пароль хранится в keyring).
 - `ssh_login`, `ssh_terminal` — запуск удалённых сессий (пароль хранится в keyring).
-- `ssh_key_enabled`, `ssh_key_private_path`, `ssh_key_public_path`, `ssh_key_auto_bootstrap` — отдельные настройки automation-слоя для Ubuntu по SSH-ключу.
+- `ssh_key_enabled`, `ssh_key_private_path`, `ssh_key_public_path`, `ssh_key_auto_bootstrap`, `ssh_key_push_nopasswd` — отдельные настройки automation-слоя для Ubuntu по SSH-ключу. Опция `ssh_key_push_nopasswd` позволяет после успешного проброса ключа по отдельному подтверждению создать managed-файл `/etc/sudoers.d/90-support-tshelper` для пользователя из `ssh_login`; перед применением выполняются проверка логина, проверка `sudo -n true`, попытка использовать `SSH Password` как sudo-пароль и безопасная валидация через `visudo -cf`.
 - `software_catalog_path` — путь к JSON-каталогу ПО для окна «Установка ПО». Если файла нет, приложение создаст шаблон автоматически.
 - `glpi_api_url`, `glpi_app_token`, `glpi_user_token`, `glpi_prefix_field` — доступ к GLPI API (apirest.php) для получения закреплённых ПК и префиксов. Токены сохраняются в защищённом хранилище. Поле `glpi_prefix_field` задаёт имя поля в ответе GLPI, откуда брать префикс/тип ОС (например, `name` или пользовательское поле). В списке устройств игнорируются хосты с префиксами `wr-` и `lr-`.
 - `glpi_verify_ssl` — проверять SSL-сертификат при обращении к GLPI. Для самоподписанных сертификатов снимите галочку в настройках или укажите путь к доверенному сертификату через системное хранилище.

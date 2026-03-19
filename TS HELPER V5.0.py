@@ -701,8 +701,8 @@ class SudoRepairPasswordDialog:
         frame = ttk.Frame(self.window, padding=12)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text=f"Host: {host_name}").pack(anchor="w")
-        ttk.Label(frame, text=f"User: {username}").pack(anchor="w", pady=(4, 0))
+        ttk.Label(frame, text=f"Хост: {host_name}").pack(anchor="w")
+        ttk.Label(frame, text=f"Пользователь: {username}").pack(anchor="w", pady=(4, 0))
         ttk.Label(
             frame,
             text="Пароль будет использован только для текущей операции и не будет сохранён.",
@@ -723,8 +723,8 @@ class SudoRepairPasswordDialog:
 
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x", pady=(12, 0))
-        ttk.Button(buttons, text="OK", command=self._confirm).pack(side="left")
-        ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Подтвердить", command=self._confirm).pack(side="left")
+        ttk.Button(buttons, text="Отмена", command=self._cancel).pack(side="left", padx=(8, 0))
 
         self.window.bind("<Return>", lambda _event: self._confirm())
         self.window.bind("<Escape>", lambda _event: self._cancel())
@@ -736,7 +736,7 @@ class SudoRepairPasswordDialog:
     def _confirm(self):
         password = self.password_var.get()
         if not password:
-            messagebox.showerror("Подтверждение sudo", "Введите пароль пользователя support.", parent=self.window)
+            messagebox.showerror("Подтверждение sudo", "Введите sudo-пароль пользователя.", parent=self.window)
             return
         self.result = password
         self.window.destroy()
@@ -866,6 +866,7 @@ class SettingsManager:
             "ssh_key_private_path": "",
             "ssh_key_public_path": "",
             "ssh_key_auto_bootstrap": False,
+            "ssh_key_push_nopasswd": False,
             "ssh_connect_timeout_sec": 8,
             "ssh_command_timeout_sec": 1800,
             "software_catalog_path": "software_catalog.json",
@@ -3645,6 +3646,8 @@ $items = foreach ($u in $users) {{
 
         ssh_key_auto_bootstrap = tk.BooleanVar(value=self.settings.get_setting("ssh_key_auto_bootstrap", False))
         ttk.Checkbutton(tab_ssh, text="Если ключа нет — автоматически пробрасывать через пароль", variable=ssh_key_auto_bootstrap).pack(pady=4, anchor="w")
+        ssh_key_push_nopasswd = tk.BooleanVar(value=self.settings.get_setting("ssh_key_push_nopasswd", False))
+        ttk.Checkbutton(tab_ssh, text="Пробрасывать NOPASSWD вместе с SSH", variable=ssh_key_push_nopasswd).pack(pady=4, anchor="w")
 
         ttk.Label(tab_ssh, text="Тайм-аут подключения SSH automation, сек:").pack(pady=4, anchor="w")
         ssh_connect_timeout_sec = tk.StringVar(value=str(self.settings.get_setting("ssh_connect_timeout_sec", 8)))
@@ -3760,6 +3763,7 @@ $items = foreach ($u in $users) {{
             self.settings.set_setting("ssh_key_private_path", ssh_key_private_path.get().strip())
             self.settings.set_setting("ssh_key_public_path", ssh_key_public_path.get().strip())
             self.settings.set_setting("ssh_key_auto_bootstrap", ssh_key_auto_bootstrap.get())
+            self.settings.set_setting("ssh_key_push_nopasswd", ssh_key_push_nopasswd.get())
             try:
                 connect_timeout = max(1, int(ssh_connect_timeout_sec.get().strip() or "8"))
             except Exception:
@@ -5024,6 +5028,75 @@ Write-Output "OK"
 
         self.app.run_background(work, on_success, on_error)
 
+    def _request_sudo_password(self, host_name: str, username: str):
+        response_queue = queue.Queue(maxsize=1)
+
+        def show_dialog():
+            dialog = SudoRepairPasswordDialog(self.app.master, host_name, username)
+            response_queue.put(dialog.show())
+
+        self.app.master.after(0, show_dialog)
+        return response_queue.get()
+
+    def _maybe_apply_ssh_key_nopasswd(self, bootstrap_result, append_log):
+        if not bootstrap_result.success:
+            return
+        if not self.app.settings.get_setting("ssh_key_push_nopasswd", False):
+            append_log("Опция NOPASSWD при пробросе SSH выключена")
+            return
+
+        ssh_login = self.app.settings.get_setting("ssh_login", "").strip()
+        if not ssh_login:
+            append_log("SSH login пустой: настройка NOPASSWD пропущена")
+            return
+
+        from remote_ops import RemoteOpsError, SSHExecutor, UbuntuSoftwareInstaller, validate_tshelper_username
+
+        try:
+            validated_login = validate_tshelper_username(ssh_login)
+        except RemoteOpsError as exc:
+            append_log(f"Ошибка валидации SSH login: {exc}")
+            messagebox.showerror("Пробросить SSH-ключ", str(exc), parent=self.app.master)
+            return
+
+        target_host = bootstrap_result.host_used or self.user.get("pc_name", "") or "неизвестный хост"
+        confirmed = messagebox.askokcancel(
+            "Настройка NOPASSWD",
+            f"Создать NOPASSWD sudoers для пользователя {validated_login} на хосте {target_host}?",
+            parent=self.app.master,
+        )
+        if not confirmed:
+            append_log("Создание NOPASSWD sudoers отменено оператором")
+            return
+
+        append_log(f"Запуск настройки NOPASSWD sudoers: host={target_host}, login={validated_login}")
+
+        def work():
+            auth = self.app.get_remote_ops_auth()
+            host = self.app.build_remote_host(self.user)
+            executor = SSHExecutor(auth, logger=append_log)
+            installer = UbuntuSoftwareInstaller(executor, None, logger=append_log)
+            return installer.apply_tshelper_sudoers(
+                host,
+                username=validated_login,
+                ssh_password_candidate=self.app.settings.get_setting("ssh_password", ""),
+                sudo_password_prompt=lambda host_name, username: self._request_sudo_password(host_name, username),
+            )
+
+        def on_success(sudoers_result):
+            append_log(sudoers_result.summary)
+            if sudoers_result.success:
+                messagebox.showinfo("NOPASSWD sudoers", sudoers_result.summary, parent=self.app.master)
+                return
+            self._show_action_result(sudoers_result, title="NOPASSWD sudoers")
+
+        def on_error(error):
+            append_log(f"Ошибка: {error}")
+            log_message(f"NOPASSWD sudoers ошибка: {error}")
+            messagebox.showerror("NOPASSWD sudoers", str(error), parent=self.app.master)
+
+        self.app.run_background(work, on_success, on_error)
+
     def bootstrap_ssh_key(self):
         log_window, append_log = self.app.open_action_log_window(f"Проброс SSH-ключа — {self.user.get('name', '?')}")
         append_log(f"Старт проброса SSH-ключа для {self.user.get('name', '?')}")
@@ -5053,6 +5126,7 @@ Write-Output "OK"
             append_log(result.summary)
             self._log_action(f"SSH key bootstrap -> {'OK' if result.success else 'ERROR'}")
             self._show_action_result(result, title="Пробросить SSH-ключ")
+            self._maybe_apply_ssh_key_nopasswd(result, append_log)
 
         def on_error(error):
             append_log(f"Ошибка: {error}")
