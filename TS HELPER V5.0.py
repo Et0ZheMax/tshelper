@@ -5118,6 +5118,17 @@ Write-Output "OK"
         log_message(f"SSH interactive: key precheck failed for {login}@{host}: {details}")
         return False, details
 
+    def _quote_posix_shell_literal(self, value: str) -> str:
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def _build_wsl_sshpass_command(self, ssh_login: str, ssh_target: str, ssh_password: str) -> str:
+        safe_password = self._quote_posix_shell_literal(ssh_password)
+        return (
+            f"sshpass -p {safe_password} ssh "
+            f"-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            f"{ssh_login}@{ssh_target}"
+        )
+
     def open_ssh_connection(self):
         # Важно: это старый интерактивный SSH-поток через терминал, не automation.
         ssh_login = self.app.settings.get_setting("ssh_login","")
@@ -5168,8 +5179,11 @@ Write-Output "OK"
                 log_message("SSH interactive: private key not configured, using password flow")
 
             if term == "Windows Terminal":
-                if auto: cmd = f'sshpass -p "{ssh_password}" ssh {ssh_login}@{ssh_target}'
-                else:    cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{ssh_target}'
+                if auto:
+                    log_message(f"SSH interactive: using sshpass flow for {ssh_login}@{ssh_target}")
+                    cmd = self._build_wsl_sshpass_command(ssh_login, ssh_target, ssh_password)
+                else:
+                    cmd = f'ssh -o StrictHostKeyChecking=accept-new {ssh_login}@{ssh_target}'
                 subprocess.Popen(["wt.exe","-p","Ubuntu","ubuntu.exe","-c",cmd])
             elif term in ("CMD","PowerShell"):
                 if auto:
