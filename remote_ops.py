@@ -56,6 +56,10 @@ class CatalogError(RemoteOpsError):
     """Ошибка каталога ПО."""
 
 
+class CatalogValidationError(CatalogError):
+    """Ошибка валидации записи каталога ПО."""
+
+
 class InteractivePromptTimeout(RemoteOpsError):
     """Не получен ответ оператора на интерактивный запрос."""
 
@@ -140,6 +144,7 @@ class SoftwareItem:
     enabled: bool = True
     description: str = ""
     package_name: str = ""
+    packages: list[str] = field(default_factory=list)
     url: str = ""
     local_path: str = ""
     install_cmd: str = ""
@@ -158,43 +163,21 @@ class SoftwareCatalog:
 
     @classmethod
     def load(cls, json_path: str) -> "SoftwareCatalog":
-        try:
-            with open(json_path, "r", encoding="utf-8") as file_obj:
-                payload = json.load(file_obj)
-        except FileNotFoundError as exc:
-            raise CatalogError(f"Файл каталога не найден: {json_path}") from exc
-        except json.JSONDecodeError as exc:
-            raise CatalogError(f"Каталог ПО содержит невалидный JSON: {exc}") from exc
-        except OSError as exc:
-            raise CatalogError(f"Не удалось прочитать каталог ПО: {exc}") from exc
-
-        software = payload.get("software")
-        if not isinstance(software, list):
-            raise CatalogError("Каталог ПО должен содержать список software")
-
+        payload = load_software_catalog(json_path)
+        software = payload["software"]
         items: list[SoftwareItem] = []
-        seen_ids: set[str] = set()
-        for index, raw_item in enumerate(software, start=1):
-            if not isinstance(raw_item, dict):
-                raise CatalogError(f"Элемент каталога #{index} должен быть объектом")
-            item_id = str(raw_item.get("id", "")).strip()
-            title = str(raw_item.get("title", "")).strip()
-            os_family = str(raw_item.get("os_family", "")).strip().lower()
-            install_type = str(raw_item.get("install_type", "")).strip().lower()
-            if not item_id or not title or not os_family or not install_type:
-                raise CatalogError(f"Элемент каталога #{index} содержит пустые обязательные поля")
-            if item_id in seen_ids:
-                raise CatalogError(f"Дублирующийся id в каталоге ПО: {item_id}")
-            seen_ids.add(item_id)
+        for raw_item in software:
+            packages = _extract_packages_from_entry(raw_item)
             items.append(
                 SoftwareItem(
-                    item_id=item_id,
-                    title=title,
-                    os_family=os_family,
-                    install_type=install_type,
+                    item_id=str(raw_item.get("id", "")).strip(),
+                    title=str(raw_item.get("title", "")).strip(),
+                    os_family=str(raw_item.get("os_family", "")).strip().lower(),
+                    install_type=str(raw_item.get("install_type", "")).strip().lower(),
                     enabled=bool(raw_item.get("enabled", True)),
                     description=str(raw_item.get("description", "")).strip(),
                     package_name=str(raw_item.get("package_name", "")).strip(),
+                    packages=packages,
                     url=str(raw_item.get("url", "")).strip(),
                     local_path=str(raw_item.get("local_path", "")).strip(),
                     install_cmd=str(raw_item.get("install_cmd", "")).strip(),
@@ -227,6 +210,219 @@ class SoftwareCatalog:
         if not item:
             raise CatalogError(f"Элемент ПО не найден: {item_id}")
         return item
+
+    def all_items(self) -> list[SoftwareItem]:
+        return list(self._items.values())
+
+
+APT_DANGEROUS_PATTERNS = (";", "&&", "||", "|", "`", "$(")
+APT_INSTALL_TYPES = {"apt", "deb_file", "deb_url"}
+APT_PACKAGE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._:-]*(=[A-Za-z0-9+._:~\\-]+)?$")
+
+
+def slugify_software_id(value: str) -> str:
+    text = (value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text or f"software-{int(time.time())}"
+
+
+def _extract_packages_from_entry(raw_item: dict) -> list[str]:
+    raw_packages = raw_item.get("packages")
+    if isinstance(raw_packages, list):
+        return [str(package).strip() for package in raw_packages if str(package).strip()]
+    package_name = str(raw_item.get("package_name", "")).strip()
+    return [package_name] if package_name else []
+
+
+def normalize_apt_input(user_input: str) -> list[str]:
+    source = (user_input or "").strip()
+    if not source:
+        return []
+    for pattern in APT_DANGEROUS_PATTERNS:
+        if pattern in source:
+            raise CatalogValidationError(
+                f"Обнаружена потенциально опасная конструкция в apt-вводе: {pattern}"
+            )
+    try:
+        tokens = shlex.split(source, posix=True)
+    except ValueError as exc:
+        raise CatalogValidationError(f"Не удалось разобрать apt-ввод: {exc}") from exc
+    if not tokens:
+        return []
+
+    lowered = [token.lower() for token in tokens]
+    start_index = 0
+    if lowered and lowered[0] == "sudo":
+        start_index = 1
+    if len(tokens) > start_index and lowered[start_index] in {"apt", "apt-get"}:
+        start_index += 1
+        if len(tokens) > start_index and lowered[start_index] == "install":
+            start_index += 1
+
+    packages: list[str] = []
+    for token in tokens[start_index:]:
+        if token.startswith("-"):
+            continue
+        if token == "--":
+            continue
+        if not APT_PACKAGE_TOKEN_RE.fullmatch(token):
+            raise CatalogValidationError(f"Некорректное имя apt-пакета: {token}")
+        packages.append(token)
+    return packages
+
+
+def load_software_catalog(json_path: str) -> dict:
+    try:
+        with open(json_path, "r", encoding="utf-8") as file_obj:
+            payload = json.load(file_obj)
+    except FileNotFoundError as exc:
+        raise CatalogError(f"Файл каталога не найден: {json_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise CatalogError(f"Каталог ПО содержит невалидный JSON: {exc}") from exc
+    except OSError as exc:
+        raise CatalogError(f"Не удалось прочитать каталог ПО: {exc}") from exc
+
+    software = payload.get("software")
+    if not isinstance(software, list):
+        raise CatalogError("Каталог ПО должен содержать список software")
+
+    seen_ids: set[str] = set()
+    for index, raw_item in enumerate(software, start=1):
+        if not isinstance(raw_item, dict):
+            raise CatalogError(f"Элемент каталога #{index} должен быть объектом")
+        entry_id = str(raw_item.get("id", "")).strip()
+        title = str(raw_item.get("title", "")).strip()
+        os_family = str(raw_item.get("os_family", "")).strip().lower()
+        install_type = str(raw_item.get("install_type", "")).strip().lower()
+        if not entry_id or not title or not os_family or not install_type:
+            raise CatalogError(f"Элемент каталога #{index} содержит пустые обязательные поля")
+        if entry_id in seen_ids:
+            raise CatalogError(f"Дублирующийся id в каталоге ПО: {entry_id}")
+        seen_ids.add(entry_id)
+    return payload
+
+
+def validate_software_entry(entry: dict, existing_ids: set[str] | None = None, current_id: str = "") -> dict:
+    candidate = dict(entry)
+    candidate["title"] = str(candidate.get("title", "")).strip()
+    candidate["id"] = str(candidate.get("id", "")).strip() or slugify_software_id(candidate["title"])
+    candidate["os_family"] = str(candidate.get("os_family", "")).strip().lower()
+    candidate["install_type"] = str(candidate.get("install_type", "")).strip().lower()
+    candidate["description"] = str(candidate.get("description", "")).strip()
+    candidate["timeout_sec"] = max(1, int(candidate.get("timeout_sec", 1800)))
+    candidate["requires_sudo"] = bool(candidate.get("requires_sudo", False))
+    candidate["enabled"] = bool(candidate.get("enabled", True))
+
+    tags = candidate.get("tags", [])
+    if isinstance(tags, str):
+        tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+    elif isinstance(tags, list):
+        tags = [str(tag).strip() for tag in tags if str(tag).strip()]
+    else:
+        tags = []
+    candidate["tags"] = tags
+
+    if not candidate["id"] or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", candidate["id"]):
+        raise CatalogValidationError("Поле id должно содержать только a-z, 0-9, '_' и '-'")
+    if not candidate["title"] or not candidate["os_family"] or not candidate["install_type"]:
+        raise CatalogValidationError("Поля title, os_family и install_type обязательны")
+    if candidate["install_type"] not in APT_INSTALL_TYPES:
+        raise CatalogValidationError("Поддерживаются install_type: apt, deb_file, deb_url")
+
+    ids_pool = existing_ids or set()
+    if candidate["id"] != current_id and candidate["id"] in ids_pool:
+        raise CatalogValidationError(f"id уже существует: {candidate['id']}")
+
+    if candidate["install_type"] == "apt":
+        apt_input = str(candidate.get("apt_input", "")).strip()
+        if not apt_input:
+            apt_input = " ".join(candidate.get("packages") or []) or str(candidate.get("package_name", "")).strip()
+        packages = normalize_apt_input(apt_input)
+        if not packages:
+            raise CatalogValidationError("Для apt требуется минимум один пакет")
+        candidate["packages"] = packages
+        candidate["package_name"] = packages[0]
+        candidate["url"] = ""
+        candidate["local_path"] = ""
+    elif candidate["install_type"] == "deb_file":
+        local_path = str(candidate.get("local_path", "")).strip()
+        if not local_path:
+            raise CatalogValidationError("Для deb_file укажите путь к локальному файлу")
+        if not os.path.isfile(local_path):
+            raise CatalogValidationError(f"Файл .deb не найден: {local_path}")
+        candidate["local_path"] = local_path
+        candidate["url"] = ""
+        candidate["packages"] = []
+        candidate["package_name"] = ""
+    elif candidate["install_type"] == "deb_url":
+        url = str(candidate.get("url", "")).strip()
+        if not url:
+            raise CatalogValidationError("Для deb_url укажите URL")
+        candidate["url"] = url
+        candidate["local_path"] = ""
+        candidate["packages"] = []
+        candidate["package_name"] = ""
+    return candidate
+
+
+def save_software_catalog(json_path: str, payload: dict) -> None:
+    backup_path = f"{json_path}.bak"
+    if os.path.exists(json_path):
+        with open(json_path, "rb") as src, open(backup_path, "wb") as dst:
+            dst.write(src.read())
+    folder = os.path.dirname(os.path.abspath(json_path)) or "."
+    fd, temp_path = tempfile.mkstemp(prefix="software_catalog_", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file_obj:
+            json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        os.replace(temp_path, json_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def upsert_software_entry(json_path: str, entry: dict, current_id: str = "") -> dict:
+    payload = load_software_catalog(json_path)
+    software = payload.get("software", [])
+    existing_ids = {str(item.get("id", "")).strip() for item in software if isinstance(item, dict)}
+    validated = validate_software_entry(entry, existing_ids=existing_ids, current_id=current_id)
+
+    target_id = current_id or validated["id"]
+    updated = False
+    for index, item in enumerate(software):
+        if isinstance(item, dict) and str(item.get("id", "")).strip() == target_id:
+            software[index] = {**item, **validated}
+            updated = True
+            break
+    if not updated:
+        software.append(validated)
+
+    save_software_catalog(json_path, payload)
+    return validated
+
+
+def disable_software_entry(json_path: str, entry_id: str) -> None:
+    payload = load_software_catalog(json_path)
+    software = payload.get("software", [])
+    for item in software:
+        if isinstance(item, dict) and str(item.get("id", "")).strip() == entry_id:
+            item["enabled"] = False
+            save_software_catalog(json_path, payload)
+            return
+    raise CatalogError(f"Элемент ПО не найден: {entry_id}")
+
+
+def delete_software_entry(json_path: str, entry_id: str) -> None:
+    payload = load_software_catalog(json_path)
+    software = payload.get("software", [])
+    filtered = [item for item in software if not (isinstance(item, dict) and str(item.get("id", "")).strip() == entry_id)]
+    if len(filtered) == len(software):
+        raise CatalogError(f"Элемент ПО не найден: {entry_id}")
+    payload["software"] = filtered
+    save_software_catalog(json_path, payload)
 
 
 class SSHExecutor:
@@ -720,7 +916,7 @@ class UbuntuSoftwareInstaller:
     def _get_sudo_preflight_command(self, item: Optional[SoftwareItem] = None, command_hint: str = "") -> str:
         install_type = (item.install_type.lower() if item else "")
         command_hint = (command_hint or "").lower()
-        if install_type in {"apt", "deb_url"}:
+        if install_type in {"apt", "deb_url", "deb_file"}:
             return "sudo -n /usr/bin/apt-get --version"
         if "systemctl" in command_hint:
             return "sudo -n /usr/bin/systemctl --version"
@@ -1068,20 +1264,57 @@ class UbuntuSoftwareInstaller:
                 return prompt_callback(action_result.host_used or "", item.title, prompt_text)
 
             if install_type == "apt":
-                if not item.package_name:
-                    raise CatalogError(f"Для apt-пакета не указано package_name: {item.item_id}")
-                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
-                if preflight_result is not None:
-                    return action_result
-                update_result = self._run_step(action_result, client, "sudo -n apt-get update", "apt-get update", timeout_sec)
+                apt_packages = item.packages or ([item.package_name] if item.package_name else [])
+                if not apt_packages:
+                    raise CatalogError(f"Для apt-пакета не указано package_name/packages: {item.item_id}")
+                sudo_prefix = "sudo -n " if item.requires_sudo else ""
+                if item.requires_sudo:
+                    preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
+                    if preflight_result is not None:
+                        return action_result
+                update_result = self._run_step(action_result, client, f"{sudo_prefix}apt-get update", "apt-get update", timeout_sec)
                 if not update_result.success:
                     action_result.error_message = update_result.stderr or update_result.stdout or "Ошибка apt-get update"
                     return action_result
+                quoted_packages = " ".join(shlex.quote(package) for package in apt_packages)
                 install_command = (
-                    "sudo -n apt-get -o DPkg::Lock::Timeout=60 install -y "
-                    f"{shlex.quote(item.package_name)}"
+                    f"{sudo_prefix}apt-get -o DPkg::Lock::Timeout=60 install -y "
+                    f"{quoted_packages}"
                 )
                 install_result = self._run_step(action_result, client, install_command, "Установка apt-пакета", timeout_sec)
+            elif install_type == "deb_file":
+                local_path = item.local_path
+                if not local_path:
+                    raise CatalogError(f"Для deb_file не указан local_path: {item.item_id}")
+                if not os.path.isabs(local_path):
+                    local_path = os.path.join(os.path.dirname(os.path.abspath(self.catalog.source_path)), local_path)
+                if not os.path.isfile(local_path):
+                    raise CatalogError(f"Файл .deb не найден: {local_path}")
+                remote_deb = f"/tmp/tshelper_{item.item_id}_{int(time.time())}.deb"
+                cleanup_remote_paths.append(remote_deb)
+                self._log(f"Загружаю deb-файл {local_path} -> {remote_deb}")
+                self.executor.upload_file(client, local_path, remote_deb)
+                upload_step = StepResult(name="Загрузка deb-файла", success=True, return_code=0, stdout=f"Загружен {remote_deb}", command=local_path)
+                action_result.steps.append(upload_step)
+                sudo_prefix = "sudo -n " if item.requires_sudo else ""
+                if item.requires_sudo:
+                    preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
+                    if preflight_result is not None:
+                        return action_result
+                install_command = (
+                    f"{sudo_prefix}apt-get -o DPkg::Lock::Timeout=60 install -y "
+                    f"{shlex.quote(remote_deb)}"
+                )
+                install_result = self._run_step(
+                    action_result,
+                    client,
+                    install_command,
+                    "Установка локального deb-пакета",
+                    timeout_sec,
+                    get_pty=item.requires_sudo,
+                    interactive_responses=item.interactive_responses,
+                    prompt_callback=item_prompt_callback,
+                )
             elif install_type == "deb_url":
                 if not item.url:
                     raise CatalogError(f"Для deb_url не указан url: {item.item_id}")
@@ -1092,11 +1325,13 @@ class UbuntuSoftwareInstaller:
                 if not download_result.success:
                     action_result.error_message = download_result.stderr or download_result.stdout or "Ошибка скачивания deb-пакета"
                     return action_result
-                preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
-                if preflight_result is not None:
-                    return action_result
+                sudo_prefix = "sudo -n " if item.requires_sudo else ""
+                if item.requires_sudo:
+                    preflight_result = self._ensure_passwordless_sudo(action_result, client, timeout_sec, item=item)
+                    if preflight_result is not None:
+                        return action_result
                 install_command = (
-                    "sudo -n apt-get -o DPkg::Lock::Timeout=60 install -y "
+                    f"{sudo_prefix}apt-get -o DPkg::Lock::Timeout=60 install -y "
                     f"{shlex.quote(remote_deb)}"
                 )
                 install_result = self._run_step(
@@ -1105,7 +1340,7 @@ class UbuntuSoftwareInstaller:
                     install_command,
                     "Установка deb-пакета",
                     timeout_sec,
-                    get_pty=True,
+                    get_pty=item.requires_sudo,
                     interactive_responses=item.interactive_responses,
                     prompt_callback=item_prompt_callback,
                 )
