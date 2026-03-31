@@ -12,6 +12,17 @@ from windows_catalog_models import BackendContext, DetectionResult, ExecutionRes
 from windows_detection import run_detection_with_executor
 
 
+class BackendError(RuntimeError):
+    def __init__(self, message: str, error_kind: str):
+        super().__init__(message)
+        self.error_kind = error_kind
+
+
+class InvalidTargetError(BackendError):
+    def __init__(self, message: str):
+        super().__init__(message, error_kind="invalid_target")
+
+
 @dataclass(slots=True)
 class _StagedPayload:
     local_source: str
@@ -56,7 +67,7 @@ class LocalSubprocessBackend(WindowsExecutionBackend):
 
     def validate_context(self, context: BackendContext) -> None:
         if context.target_host.lower() not in {"", "localhost", ".", "127.0.0.1"}:
-            raise RuntimeError("Локальный backend поддерживает только localhost")
+            raise InvalidTargetError("Локальный backend поддерживает только localhost")
 
     def prepare_payload(self, package: WindowsPackage, context: BackendContext) -> str:
         source = package.source
@@ -192,9 +203,9 @@ class PsExecBackend(LocalSubprocessBackend):
     def validate_context(self, context: BackendContext) -> None:
         host = (context.target_host or "").strip()
         if not host or host.lower() in {"localhost", ".", "127.0.0.1"}:
-            raise RuntimeError("invalid_target: для psexec требуется явный удалённый target host")
+            raise InvalidTargetError("Для psexec требуется явный удалённый target host")
         if not os.path.isfile(self.psexec_path):
-            raise RuntimeError(f"Не найден PsExec64.exe: {self.psexec_path}")
+            raise BackendError(f"Не найден PsExec64.exe: {self.psexec_path}", error_kind="transport_failed")
 
     def prepare_payload(self, package: WindowsPackage, context: BackendContext) -> str:
         self.validate_context(context)
@@ -245,7 +256,7 @@ class PsExecBackend(LocalSubprocessBackend):
                 prefer_system_context=context.prefer_system_context,
                 remote_temp_dir=context.remote_temp_dir,
             )
-            return self._execute_remote(command, local_context, requires_admin=False)
+            return self._execute_remote(command, local_context, requires_admin=context.requires_admin)
 
         result = run_detection_with_executor(config=package.detection, executor=remote_executor, timeout_sec=context.timeout_sec)
         if result.error_kind == "execution_failed" and result.error is None:

@@ -4,7 +4,7 @@ import time
 from typing import Callable
 
 from windows_catalog_models import BackendContext, DeployOptions, DeployResult, DetectionResult, ExecutionResult, WindowsPackage
-from windows_execution_backends import WindowsExecutionBackend
+from windows_execution_backends import BackendError, WindowsExecutionBackend
 
 SUCCESS_CODES = {0}
 REBOOT_CODES = {3010, 1641}
@@ -30,15 +30,27 @@ class WindowsDeployEngine:
         )
         try:
             self.backend.validate_context(context)
+        except BackendError as exc:
+            err = str(exc)
+            return self._build_result(
+                package=package,
+                context=context,
+                started_at=started_at,
+                status=exc.error_kind if exc.error_kind in {"invalid_target", "transport_failed"} else "transport_failed",
+                pre=DetectionResult(False, "not_run", error=err, error_kind=exc.error_kind),
+                post=DetectionResult(False, "not_run", error=err, error_kind=exc.error_kind),
+                exec_result=None,
+                installer_error=err,
+            )
         except Exception as exc:
             err = str(exc)
             return self._build_result(
                 package=package,
                 context=context,
                 started_at=started_at,
-                status="invalid_target" if "invalid_target" in err else "transport_failed",
-                pre=DetectionResult(False, "not_run", error=err, error_kind="invalid_target"),
-                post=DetectionResult(False, "not_run", error=err, error_kind="invalid_target"),
+                status="transport_failed",
+                pre=DetectionResult(False, "not_run", error=err, error_kind="transport_failed"),
+                post=DetectionResult(False, "not_run", error=err, error_kind="transport_failed"),
                 exec_result=None,
                 installer_error=err,
             )

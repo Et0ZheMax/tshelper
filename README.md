@@ -164,10 +164,13 @@ TS HELPER поддерживает SSH-сценарии как для интер
 - backend-абстракция включает подготовку payload, detection, install и cleanup;
 - для `psexec` используется явный staging в admin-share (`\HOST\C$...`) без неявного fallback на localhost;
 - UI-диалог показывает актуальный backend/target/mode и блокирует install/check, если для `psexec` не задан target host.
+- в карточке Windows-пакета добавлен помощник автозаполнения: кнопки `Автозаполнить по файлу`, `Подобрать detection`, `Сгенерировать id` и блок «Предложения помощника» с объяснениями;
+- помощник автоматически определяет `install_type`, `source`, базовые `id/title/version/architecture`, подсказывает detection-кандидаты и показывает прозрачный normalized preview перед сохранением.
 
 Ограничения первой версии (честно):
 
 - `msix`, `winget` и `powershell_script` в remote+SYSTEM сценариях зависят от окружения целевого хоста и прав, поэтому требуют предварительной проверки в вашей инфраструктуре;
+- помощник лучше всего работает для MSI: при доступных метаданных предлагает `product_code` detection и версию/название из MSI Property; для EXE эвристики ограничены и требуют ручной проверки оператором;
 - записи каталога считаются доверенными (trusted admin catalog), поэтому любые custom command/script должны проходить внутренний review;
 - модуль не делает «магический» fallback при ошибках transport/доступа, а возвращает диагностический статус (`invalid_target`, `transport_failed`, `source_unavailable`, `detection_failed`, `elevation_required`, `timeout`).
 
