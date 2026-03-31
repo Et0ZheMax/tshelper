@@ -151,6 +151,34 @@ TS HELPER поддерживает SSH-сценарии как для интер
 
 ---
 
+### 11. Windows Software Deployment (новый модуль)
+
+В `v5.0` добавлен отдельный production-oriented модуль развёртывания ПО для Windows, который не смешивает Linux и Windows каталог.
+
+Что реализовано:
+
+- отдельный каталог `software_catalog_windows.json` с валидацией и атомарным сохранением;
+- отдельные слои: каталог, detection engine, execution backends, deploy engine, UI;
+- поддержка типов установки `exe`, `msi`, `msix`, `powershell`, `cmd`, `winget`;
+- pre/post detection c типами `file_exists`, `registry_exists`, `registry_value`, `uninstall_display_name`, `product_code`, `command_success`, `powershell_script`;
+- backend-абстракция с двумя реализациями:
+  - `local_subprocess`,
+  - `psexec` (конфигурируемый путь к PsExec);
+- отдельный диалог Windows Deployment с поиском, фильтрами, карточкой пакета и операциями Add/Edit/Disable/Delete;
+- фоновое выполнение без freeze UI и подробные логи результата.
+
+Новые настройки (Settings → SSH):
+
+- путь к Windows-каталогу;
+- backend по умолчанию (`local_subprocess` / `psexec`);
+- путь к `PsExec64.exe`;
+- timeout по умолчанию;
+- флаг пропуска установки, если пакет уже обнаружен;
+- флаг предпочтения SYSTEM-контекста;
+- remote temp directory.
+
+---
+
 ### 9. Работа с интерактивными установщиками
 
 Если установщик на удалённой машине требует ответ оператора, TS HELPER не зависает и не ломает процесс.

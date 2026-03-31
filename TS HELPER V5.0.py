@@ -870,6 +870,13 @@ class SettingsManager:
             "ssh_connect_timeout_sec": 8,
             "ssh_command_timeout_sec": 1800,
             "software_catalog_path": "software_catalog.json",
+            "windows_software_catalog_path": "software_catalog_windows.json",
+            "windows_default_backend": "local_subprocess",
+            "windows_psexec_path": "C:\\\\Tools\\\\PsExec64.exe",
+            "windows_default_timeout_sec": 1200,
+            "windows_skip_if_detected": True,
+            "windows_prefer_system_context": False,
+            "windows_remote_temp_dir": "C:\\\\Windows\\\\Temp\\\\tshelper_deploy",
             "plink_hostkeys": {},
             # GLPI
             "glpi_api_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_prefix_field": "name", "glpi_verify_ssl": True,
@@ -1535,6 +1542,23 @@ class MainWindow:
 
         catalog_path = self.ensure_software_catalog_exists()
         return SoftwareCatalog.load(catalog_path)
+
+    def ensure_windows_software_catalog_exists(self) -> str:
+        catalog_path = self.settings.get_setting("windows_software_catalog_path", "software_catalog_windows.json") or "software_catalog_windows.json"
+        if not os.path.isabs(catalog_path):
+            catalog_path = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), catalog_path)
+        if os.path.exists(catalog_path):
+            return catalog_path
+
+        template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "software_catalog_windows.json")
+        os.makedirs(os.path.dirname(catalog_path) or ".", exist_ok=True)
+        if os.path.exists(template_path):
+            shutil.copy2(template_path, catalog_path)
+        else:
+            with open(catalog_path, "w", encoding="utf-8") as file_obj:
+                json.dump({"software": []}, file_obj, ensure_ascii=False, indent=2)
+        log_message(f"Создан Windows-каталог ПО: {catalog_path}")
+        return catalog_path
 
     def open_action_log_window(self, title="Remote Ops Log"):
         window = tk.Toplevel(self.master)
@@ -3664,6 +3688,35 @@ $items = foreach ($u in $users) {{
         ttk.Entry(catalog_row, textvariable=software_catalog_path).pack(side="left", fill="x", expand=True)
         ttk.Button(catalog_row, text="Обзор…", command=lambda: software_catalog_path.set(filedialog.askopenfilename(title="Выберите JSON-каталог ПО", filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")]) or software_catalog_path.get())).pack(side="left", padx=(6, 0))
 
+        ttk.Label(tab_ssh, text="Windows каталог ПО:").pack(pady=4, anchor="w")
+        windows_software_catalog_path = tk.StringVar(value=self.settings.get_setting("windows_software_catalog_path", "software_catalog_windows.json"))
+        windows_catalog_row = ttk.Frame(tab_ssh)
+        windows_catalog_row.pack(fill="x")
+        ttk.Entry(windows_catalog_row, textvariable=windows_software_catalog_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(windows_catalog_row, text="Обзор…", command=lambda: windows_software_catalog_path.set(filedialog.askopenfilename(title="Выберите Windows JSON-каталог ПО", filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")]) or windows_software_catalog_path.get())).pack(side="left", padx=(6, 0))
+
+        ttk.Label(tab_ssh, text="Windows backend по умолчанию:").pack(pady=4, anchor="w")
+        windows_default_backend = tk.StringVar(value=self.settings.get_setting("windows_default_backend", "local_subprocess"))
+        ttk.Combobox(tab_ssh, textvariable=windows_default_backend, values=("local_subprocess", "psexec"), state="readonly").pack(fill="x")
+
+        ttk.Label(tab_ssh, text="Путь к PsExec64.exe:").pack(pady=4, anchor="w")
+        windows_psexec_path = tk.StringVar(value=self.settings.get_setting("windows_psexec_path", "C:\\\\Tools\\\\PsExec64.exe"))
+        psexec_row = ttk.Frame(tab_ssh)
+        psexec_row.pack(fill="x")
+        ttk.Entry(psexec_row, textvariable=windows_psexec_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(psexec_row, text="Обзор…", command=lambda: windows_psexec_path.set(filedialog.askopenfilename(title="Выберите PsExec64.exe", filetypes=[("Executable", "*.exe"), ("Все файлы", "*.*")]) or windows_psexec_path.get())).pack(side="left", padx=(6, 0))
+
+        ttk.Label(tab_ssh, text="Windows timeout по умолчанию, сек:").pack(pady=4, anchor="w")
+        windows_default_timeout_sec = tk.StringVar(value=str(self.settings.get_setting("windows_default_timeout_sec", 1200)))
+        ttk.Entry(tab_ssh, textvariable=windows_default_timeout_sec).pack(fill="x")
+        windows_skip_if_detected = tk.BooleanVar(value=self.settings.get_setting("windows_skip_if_detected", True))
+        ttk.Checkbutton(tab_ssh, text="Windows: пропускать установку, если пакет уже обнаружен", variable=windows_skip_if_detected).pack(anchor="w", pady=4)
+        windows_prefer_system_context = tk.BooleanVar(value=self.settings.get_setting("windows_prefer_system_context", False))
+        ttk.Checkbutton(tab_ssh, text="Windows: предпочитать SYSTEM-контекст для удалённого запуска", variable=windows_prefer_system_context).pack(anchor="w", pady=4)
+        ttk.Label(tab_ssh, text="Windows remote temp directory:").pack(pady=4, anchor="w")
+        windows_remote_temp_dir = tk.StringVar(value=self.settings.get_setting("windows_remote_temp_dir", "C:\\\\Windows\\\\Temp\\\\tshelper_deploy"))
+        ttk.Entry(tab_ssh, textvariable=windows_remote_temp_dir).pack(fill="x")
+
         # Телефония (CallWatcher)
         tab_cw = ttk.Frame(nb); nb.add(tab_cw, text="Телефония")
         add_storage_warning(tab_cw)
@@ -3775,6 +3828,17 @@ $items = foreach ($u in $users) {{
             self.settings.set_setting("ssh_connect_timeout_sec", connect_timeout)
             self.settings.set_setting("ssh_command_timeout_sec", command_timeout)
             self.settings.set_setting("software_catalog_path", software_catalog_path.get().strip() or "software_catalog.json")
+            self.settings.set_setting("windows_software_catalog_path", windows_software_catalog_path.get().strip() or "software_catalog_windows.json")
+            self.settings.set_setting("windows_default_backend", windows_default_backend.get().strip() or "local_subprocess")
+            self.settings.set_setting("windows_psexec_path", windows_psexec_path.get().strip() or "C:\\\\Tools\\\\PsExec64.exe")
+            try:
+                windows_timeout = max(30, int(windows_default_timeout_sec.get().strip() or "1200"))
+            except Exception:
+                windows_timeout = 1200
+            self.settings.set_setting("windows_default_timeout_sec", windows_timeout)
+            self.settings.set_setting("windows_skip_if_detected", windows_skip_if_detected.get())
+            self.settings.set_setting("windows_prefer_system_context", windows_prefer_system_context.get())
+            self.settings.set_setting("windows_remote_temp_dir", windows_remote_temp_dir.get().strip() or "C:\\\\Windows\\\\Temp\\\\tshelper_deploy")
             # hostkeys
             try:
                 hk = json.loads(txt_hostkeys.get("1.0","end").strip() or "{}")
@@ -4743,6 +4807,7 @@ class UserButton(ttk.Frame):
         m.add_command(label="Подключение по SSH", command=self.open_ssh_connection)
         m.add_command(label="Пробросить SSH-ключ", command=self.bootstrap_ssh_key)
         m.add_command(label="Установка ПО", command=self.install_software_dialog)
+        m.add_command(label="Windows Deployment", command=self.install_windows_software_dialog)
         m.add_separator()
         m.add_command(label="Редактировать", command=lambda: self.app.open_edit_window(self.user))
         m.add_command(label="Удалить", command=lambda: self.app.delete_user_from_button(self.user))
@@ -4980,6 +5045,89 @@ Write-Output "OK"
 
         from remote_install_dialog import SoftwareInstallDialog
         SoftwareInstallDialog(self.app.master, catalog, on_submit)
+
+    def install_windows_software_dialog(self):
+        try:
+            catalog_path = self.app.ensure_windows_software_catalog_exists()
+        except Exception as exc:
+            log_message(f"Ошибка загрузки Windows-каталога ПО: {exc}")
+            messagebox.showerror("Windows Deployment", str(exc))
+            return
+
+        def on_open_log():
+            self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
+
+        def on_check(package_id: str):
+            try:
+                from windows_catalog import WindowsSoftwareCatalog
+                from windows_detection import run_detection
+
+                catalog = WindowsSoftwareCatalog.load(catalog_path)
+                package = catalog.get(package_id)
+                result = run_detection(package.detection, timeout_sec=60)
+                state = "обнаружен" if result.detected else "не обнаружен"
+                details = result.details
+                if result.error:
+                    details += f"\nОшибка: {result.error}"
+                messagebox.showinfo("Windows Detection", f"Пакет {package_id}: {state}\n{details}", parent=self.app.master)
+            except Exception as exc:
+                messagebox.showerror("Windows Detection", str(exc), parent=self.app.master)
+
+        def on_install(package_id: str, force_reinstall: bool):
+            log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
+            append_log(f"Старт Windows deployment: {package_id}")
+
+            def work():
+                from windows_catalog import WindowsSoftwareCatalog
+                from windows_deploy_engine import WindowsDeployEngine
+                from windows_execution_backends import LocalSubprocessBackend, PsExecBackend
+
+                catalog = WindowsSoftwareCatalog.load(catalog_path)
+                package = catalog.get(package_id)
+                package.timeout_sec = max(30, int(self.app.settings.get_setting("windows_default_timeout_sec", package.timeout_sec) or package.timeout_sec))
+
+                backend_name = self.app.settings.get_setting("windows_default_backend", "local_subprocess")
+                if backend_name == "psexec":
+                    backend = PsExecBackend(self.app.settings.get_setting("windows_psexec_path", "C:\\\\Tools\\\\PsExec64.exe"), logger=append_log)
+                    target_host = (self.user.get("pc_name") or "").strip() or "localhost"
+                else:
+                    backend = LocalSubprocessBackend(logger=append_log)
+                    target_host = "localhost"
+
+                engine = WindowsDeployEngine(backend, logger=append_log)
+                return engine.deploy(
+                    package=package,
+                    target_host=target_host,
+                    skip_if_detected=(not force_reinstall) and bool(self.app.settings.get_setting("windows_skip_if_detected", True)),
+                    prefer_system_context=bool(self.app.settings.get_setting("windows_prefer_system_context", False)),
+                )
+
+            def on_success(result):
+                append_log(f"Финальный статус: {result.status}")
+                append_log(f"Exit code: {result.installer_exit_code}")
+                append_log(f"Detection до: {result.detection_details_before}")
+                append_log(f"Detection после: {result.detection_details_after}")
+                log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
+                if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "installed_success_with_warnings"}:
+                    messagebox.showinfo("Windows Deployment", f"Статус: {result.status}\nХост: {result.target_host}", parent=self.app.master)
+                else:
+                    messagebox.showerror("Windows Deployment", f"Статус: {result.status}\nОшибка: {result.installer_error or result.transport_error or result.stderr}", parent=self.app.master)
+
+            def on_error(error):
+                append_log(f"Ошибка: {error}")
+                log_message(f"Windows deployment ошибка: {error}")
+                messagebox.showerror("Windows Deployment", str(error), parent=self.app.master)
+
+            self.app.run_background(work, on_success, on_error)
+
+        from windows_install_dialog import WindowsInstallDialog
+        WindowsInstallDialog(
+            self.app.master,
+            catalog_path=catalog_path,
+            on_install=on_install,
+            on_check=on_check,
+            on_open_log=on_open_log,
+        )
 
     def _handle_sudo_repair_flow(self, result, catalog, item_id: str, force_reinstall: bool, append_log, retry_install_callback):
         host_name = result.host_used or self.user.get("pc_name", "") or "неизвестный хост"
