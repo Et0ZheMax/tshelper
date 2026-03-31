@@ -60,24 +60,47 @@ def run_detection_with_executor(config: DetectionConfig, executor: CommandExecut
             return _detect_registry_value(config=config, executor=executor, timeout_sec=timeout_sec)
 
         if config.type == DetectionType.UNINSTALL_DISPLAY_NAME:
-            cp = executor([
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                (
-                    "Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* ,"
-                    "HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* "
-                    "| Select-Object -ExpandProperty DisplayName"
-                ),
-            ], timeout_sec)
+            cp = executor(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "$target = $args[0]; "
+                        "$paths = @("
+                        "'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
+                        "'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'"
+                        "); "
+                        "$found = $false; "
+                        "foreach ($path in $paths) { "
+                        "Get-ItemProperty -Path $path -ErrorAction SilentlyContinue | ForEach-Object { "
+                        "try { "
+                        "$displayName = $_.DisplayName; "
+                        "if ($displayName -is [string] -and "
+                        "$displayName.IndexOf($target, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { "
+                        "$found = $true "
+                        "} "
+                        "} catch { } "
+                        "} "
+                        "} "
+                        "if ($found) { Write-Output '__TSH_MATCH_FOUND__' } "
+                        "else { Write-Output '__TSH_MATCH_NOT_FOUND__' }"
+                    ),
+                    config.value,
+                ],
+                timeout_sec,
+            )
             text = (cp.stdout or "") + (cp.stderr or "")
-            detected = cp.returncode == 0 and config.value.lower() in text.lower()
+            stdout_text = cp.stdout or ""
+            detected = cp.returncode == 0 and "__TSH_MATCH_FOUND__" in stdout_text
+            not_found = cp.returncode == 0 and "__TSH_MATCH_NOT_FOUND__" in stdout_text
+            execution_failed = cp.returncode != 0 or (not detected and not not_found)
             return DetectionResult(
                 detected=detected,
                 details="uninstall_display_name",
                 raw_output=text,
-                error=None if cp.returncode == 0 else f"Код выхода {cp.returncode}",
-                error_kind="execution_failed" if cp.returncode != 0 else ("not_found" if not detected else ""),
+                error=None if not execution_failed else f"Код выхода {cp.returncode}",
+                error_kind="execution_failed" if execution_failed else ("not_found" if not detected else ""),
                 expected_value=config.value,
             )
 
