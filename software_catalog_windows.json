@@ -1,0 +1,117 @@
+{
+  "software": [
+    {
+      "id": "google_chrome",
+      "title": "Google Chrome",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "Google Chrome browser",
+      "tags": ["browser", "common"],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "architecture": "x64",
+      "source": {
+        "kind": "unc_path",
+        "value": "\\\\srv-backupdata\\packages\\chrome\\123.0.0\\ChromeSetup.exe"
+      },
+      "silent_args": ["/silent", "/install"],
+      "detection": {
+        "type": "file_exists",
+        "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+      },
+      "reboot_behavior": "auto_detect"
+    },
+    {
+      "id": "seven_zip",
+      "title": "7-Zip",
+      "os_family": "windows",
+      "install_type": "msi",
+      "description": "Архиватор 7-Zip",
+      "tags": ["utility", "archive"],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 900,
+      "architecture": "x64",
+      "source": {
+        "kind": "file_path",
+        "value": "C:\\Installers\\7zip\\7z2409-x64.msi"
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "registry_value",
+        "path": "HKLM\\Software\\7-Zip",
+        "value_name": "Path",
+        "operator": "!=",
+        "value": ""
+      },
+      "reboot_behavior": "never"
+    },
+    {
+      "id": "vcredist_2022",
+      "title": "VC++ Redistributable 2022",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "Microsoft Visual C++ Redistributable",
+      "tags": ["runtime", "microsoft"],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "architecture": "x64",
+      "source": {
+        "kind": "file_path",
+        "value": "C:\\Installers\\VC_redist.x64.exe"
+      },
+      "silent_args": ["/install", "/quiet", "/norestart"],
+      "detection": {
+        "type": "uninstall_display_name",
+        "value": "Microsoft Visual C++"
+      },
+      "reboot_behavior": "auto_detect"
+    },
+    {
+      "id": "notepadpp",
+      "title": "Notepad++",
+      "os_family": "windows",
+      "install_type": "winget",
+      "description": "Notepad++ через winget",
+      "tags": ["editor", "common"],
+      "enabled": true,
+      "requires_admin": false,
+      "timeout_sec": 900,
+      "architecture": "any",
+      "source": {
+        "kind": "winget_id",
+        "value": "Notepad++.Notepad++"
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "command_success",
+        "command": ["where", "notepad++.exe"]
+      },
+      "reboot_behavior": "never"
+    },
+    {
+      "id": "custom_driver_script",
+      "title": "Скрипт установки драйвера",
+      "os_family": "windows",
+      "install_type": "powershell",
+      "description": "Кастомный скрипт установки драйвера",
+      "tags": ["driver", "custom"],
+      "enabled": false,
+      "requires_admin": true,
+      "timeout_sec": 1800,
+      "architecture": "x64",
+      "source": {
+        "kind": "file_path",
+        "value": "C:\\Installers\\Drivers\\install_driver.ps1"
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "powershell_script",
+        "script": "Test-Path 'C:\\Program Files\\Vendor\\driver\\driver.exe'"
+      },
+      "reboot_behavior": "auto_detect"
+    }
+  ]
+}
