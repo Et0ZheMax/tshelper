@@ -155,12 +155,23 @@ class WindowsDeployEngine:
     def _resolve_status(self, exec_result: ExecutionResult | None, post: DetectionResult) -> str:
         if exec_result is None:
             return "install_failed"
-        if post.detected and exec_result.exit_code in REBOOT_CODES:
+
+        installer_exit_code = exec_result.exit_code
+        installer_success = installer_exit_code in SUCCESS_CODES
+        installer_reboot = installer_exit_code in REBOOT_CODES
+
+        if post.detected and installer_reboot:
             return "installed_success_reboot_required"
-        if post.detected and exec_result.exit_code in SUCCESS_CODES:
+        if post.detected and installer_success:
             return "installed_success"
         if post.detected:
             return "installed_success_with_warnings"
+
+        if installer_reboot:
+            return "installed_success_reboot_required"
+        if installer_success:
+            return "installed_success_with_warnings"
+
         if exec_result.error_kind == "elevation_required":
             return "elevation_required"
         if exec_result.timed_out:
@@ -169,8 +180,6 @@ class WindowsDeployEngine:
             return "transport_failed"
         if post.error and post.error_kind not in {"not_found", "compare_failed"}:
             return "detection_failed"
-        if exec_result.exit_code in REBOOT_CODES:
-            return "installed_success_reboot_required" if post.detected else "install_failed"
         return "install_failed"
 
     def _build_result(
