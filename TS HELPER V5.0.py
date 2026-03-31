@@ -2631,12 +2631,18 @@ $items = foreach ($u in $users) {{
             return
 
         win = tk.Toplevel(self.master); win.title("Настройка док-панели")
-        geom = self.settings.get_setting("dock_settings_geometry", "")
-        if geom:
-            win.geometry(geom)
+        apply_persisted_geometry(
+            win,
+            self.settings,
+            "dock_settings_geometry",
+            "980x640+220+100",
+            min_width=900,
+            min_height=560,
+        )
+        _save_dock_geo = bind_geometry_persistence(win, self.settings, "dock_settings_geometry")
         win.transient(self.master)
         win.grab_set()
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"dock_settings_geometry"))
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "dock_settings_geometry", saver=_save_dock_geo))
         self.dock_settings_window = win
 
         temp_items = [dict(item) for item in self.dock_items]
@@ -2781,7 +2787,7 @@ $items = foreach ($u in $users) {{
             self.dock_items = self._normalize_dock_items(temp_items)
             self._save_dock_items()
             self._update_dock_layout()
-            self._close_save_geo(win,"dock_settings_geometry")
+            self._close_save_geo(win, "dock_settings_geometry", saver=_save_dock_geo)
 
         ttk.Label(frm, text="Имя кнопки:").grid(row=0, column=1, sticky="w")
         ttk.Entry(frm, textvariable=name_var).grid(row=1, column=1, sticky="ew", pady=(0,6))
@@ -3399,23 +3405,37 @@ $items = foreach ($u in $users) {{
     # --------- Users CRUD ----------
     def add_user(self):
         win = tk.Toplevel(self.master); win.title("Добавить пользователя")
-        geom = self.settings.get_setting("edit_window_geometry");
-        if geom: win.geometry(geom)
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"edit_window_geometry"))
+        apply_persisted_geometry(
+            win,
+            self.settings,
+            "edit_window_geometry",
+            "520x240+360+180",
+            min_width=460,
+            min_height=220,
+        )
+        _save_edit_geo = bind_geometry_persistence(win, self.settings, "edit_window_geometry")
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "edit_window_geometry", saver=_save_edit_geo))
         ttk.Label(win, text="ФИО:").pack(pady=4, anchor="w"); e_name = ttk.Entry(win); e_name.pack(fill="x", padx=4)
         ttk.Label(win, text="Имя ПК:").pack(pady=4, anchor="w"); e_pc = ttk.Entry(win); e_pc.pack(fill="x", padx=4)
         ttk.Label(win, text="Внутренний номер:").pack(pady=4, anchor="w"); e_ext = ttk.Entry(win); e_ext.pack(fill="x", padx=4)
         def save():
             n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.add_user({"name":n,"pc_name":p,"ext":ext}); self.refresh_current_view(); self._close_save_geo(win,"edit_window_geometry")
+            self.users.add_user({"name":n,"pc_name":p,"ext":ext}); self.refresh_current_view(); self._close_save_geo(win, "edit_window_geometry", saver=_save_edit_geo)
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def open_edit_window(self, user):
         win = tk.Toplevel(self.master); win.title("Редактировать пользователя")
-        geom = self.settings.get_setting("edit_window_geometry");
-        if geom: win.geometry(geom)
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"edit_window_geometry"))
+        apply_persisted_geometry(
+            win,
+            self.settings,
+            "edit_window_geometry",
+            "520x240+360+180",
+            min_width=460,
+            min_height=220,
+        )
+        _save_edit_geo = bind_geometry_persistence(win, self.settings, "edit_window_geometry")
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "edit_window_geometry", saver=_save_edit_geo))
         ttk.Label(win, text="ФИО:").pack(pady=4, anchor="w"); e_name = ttk.Entry(win); e_name.insert(0,user["name"]); e_name.pack(fill="x", padx=4)
         ttk.Label(win, text="Имя ПК:").pack(pady=4, anchor="w"); e_pc = ttk.Entry(win); e_pc.insert(0,user["pc_name"]); e_pc.pack(fill="x", padx=4)
         ttk.Label(win, text="Внутренний номер:").pack(pady=4, anchor="w"); e_ext = ttk.Entry(win); e_ext.insert(0,user.get("ext","")); e_ext.pack(fill="x", padx=4)
@@ -3443,7 +3463,7 @@ $items = foreach ($u in $users) {{
 
             user.update(new_user)
             self.refresh_current_view()
-            self._close_save_geo(win,"edit_window_geometry")
+            self._close_save_geo(win, "edit_window_geometry", saver=_save_edit_geo)
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def delete_user_from_button(self, user):
@@ -3591,9 +3611,16 @@ $items = foreach ($u in $users) {{
 
     def show_ad_sync_selection(self, new_users, merged_map):
         win = tk.Toplevel(self.master); win.title("Новые пользователи AD")
-        geom = self.settings.get_setting("ad_sync_select_geometry")
-        if geom: win.geometry(geom)
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"ad_sync_select_geometry"))
+        apply_persisted_geometry(
+            win,
+            self.settings,
+            "ad_sync_select_geometry",
+            "760x560+280+120",
+            min_width=640,
+            min_height=480,
+        )
+        _save_ad_sync_geo = bind_geometry_persistence(win, self.settings, "ad_sync_select_geometry")
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "ad_sync_select_geometry", saver=_save_ad_sync_geo))
         vars = {}
         frm = ttk.Frame(win); frm.pack(fill="both", expand=True)
         canvas = tk.Canvas(frm, highlightthickness=0)
@@ -3613,7 +3640,7 @@ $items = foreach ($u in $users) {{
                 merged_map[norm_name(u["name"])] = u
             self.users.users = list(merged_map.values()); self.users.save()
             self.populate_buttons()
-            self._close_save_geo(win,"ad_sync_select_geometry")
+            self._close_save_geo(win, "ad_sync_select_geometry", saver=_save_ad_sync_geo)
         ttk.Button(win, text="Добавить выбранных", command=apply_sel).pack(pady=8)
 
     def glpi_prefix_sync(self):
@@ -4069,9 +4096,16 @@ $items = foreach ($u in $users) {{
     # --------- Вспомогательные окна ----------
     def show_ip_window(self, ip):
         win = tk.Toplevel(self.master); win.title("IP адрес")
-        geom = self.settings.get_setting("ip_window_geometry")
-        if geom: win.geometry(geom)
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"ip_window_geometry"))
+        apply_persisted_geometry(
+            win,
+            self.settings,
+            "ip_window_geometry",
+            "320x120+460+240",
+            min_width=300,
+            min_height=110,
+        )
+        _save_ip_geo = bind_geometry_persistence(win, self.settings, "ip_window_geometry")
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "ip_window_geometry", saver=_save_ip_geo))
         ttk.Label(win, text="IP адрес: "+ip).pack(pady=10)
         ttk.Button(win, text="Скопировать", command=lambda:self._copy(ip)).pack(pady=6)
 

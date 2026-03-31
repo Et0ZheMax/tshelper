@@ -368,6 +368,7 @@ class SoftwareInstallDialog(tk.Toplevel):
         if item is None:
             messagebox.showwarning("Установка ПО", "Выберите элемент ПО для установки.", parent=self)
             return
+        self._save_geometry()
         self.destroy()
         self.on_submit(item.item_id, bool(self.force_reinstall_var.get()))
 

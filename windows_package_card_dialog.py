@@ -71,7 +71,6 @@ class WindowsPackageCardDialog(tk.Toplevel):
         container = ttk.Frame(self, padding=12)
         container.pack(fill="both", expand=True)
         container.columnconfigure(1, weight=1)
-        container.rowconfigure(1000, weight=1)
 
         def row(label: str, key: str, values: list[str] | None = None):
             idx = row.counter
@@ -156,7 +155,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
         buttons = ttk.Frame(container)
         buttons.grid(row=row.counter, column=0, columnspan=3, sticky="e", pady=(12, 0))
         ttk.Button(buttons, text="Сохранить", command=self._save).pack(side="right")
-        ttk.Button(buttons, text="Отмена", command=self.destroy).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="Отмена", command=self._on_close).pack(side="right", padx=(0, 8))
 
     def _pick_source(self):
         selected = filedialog.askopenfilename(parent=self, title="Выберите инсталлятор")
