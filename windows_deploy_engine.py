@@ -3,7 +3,16 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from windows_catalog_models import BackendContext, DeployOptions, DeployResult, DetectionResult, ExecutionResult, WindowsInstallType, WindowsPackage
+from windows_catalog_models import (
+    BackendContext,
+    DeployOptions,
+    DeployResult,
+    DetectionResult,
+    ExecutionResult,
+    WindowsExecutionMode,
+    WindowsInstallType,
+    WindowsPackage,
+)
 from windows_execution_backends import BackendError, WindowsExecutionBackend
 
 SUCCESS_CODES = {0}
@@ -33,6 +42,7 @@ class WindowsDeployEngine:
             timeout_sec=max(30, int(options.timeout_sec or package.timeout_sec)),
             requires_admin=package.requires_admin,
             prefer_system_context=options.prefer_system_context,
+            remote_temp_dir=options.delivery_folder or "C:\\Installers\\TSHelper",
         )
         try:
             self.backend.validate_context(context)
@@ -61,7 +71,17 @@ class WindowsDeployEngine:
                 installer_error=err,
             )
 
-        if options.skip_pre_detection:
+        if options.execution_mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE:
+            self.stage_logger("Pre-check")
+            pre = DetectionResult(
+                detected=False,
+                details="skipped_for_delivery_mode",
+                error_kind="skipped",
+                expected_value="pre_detection",
+                current_value="skipped",
+            )
+            self.logger(f"[deploy] pre-detection {package.package_id}: SKIPPED для delivery режима")
+        elif options.skip_pre_detection:
             self.stage_logger("Pre-check")
             pre = DetectionResult(
                 detected=False,
@@ -100,14 +120,62 @@ class WindowsDeployEngine:
         payload_path = ""
         exec_result: ExecutionResult | None = None
         installer_error = ""
+        session_username = ""
+        session_id = ""
+        session_state = ""
+        delivery_verified = False
         try:
             self.stage_logger("Копирование payload")
             payload_path = self.backend.prepare_payload(package, context)
             self.logger(f"[deploy] resolved payload: {payload_path}")
-            self.stage_logger("Запуск установки")
-            self.stage_logger("Ожидание завершения установщика")
-            exec_result = self.backend.run_install(package, context, payload_path)
-            self.logger(f"[deploy] installer exit={exec_result.exit_code} timeout={exec_result.timed_out}")
+            if options.execution_mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION:
+                self.stage_logger("Поиск сессии пользователя")
+                session = self.backend.find_user_session(context)
+                session_username = session.username
+                session_id = session.session_id
+                session_state = session.state
+                self.logger(f"[deploy] найдена сессия: user={session_username}, session_id={session_id}, state={session_state}")
+                self.stage_logger("Запуск в сессии пользователя")
+                exec_result = self.backend.run_install_in_user_session(package, context, payload_path, session)
+                self.stage_logger("Ожидание реакции пользователя")
+                self.logger(f"[deploy] interactive launch exit={exec_result.exit_code} timeout={exec_result.timed_out}")
+            elif options.execution_mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE:
+                self.stage_logger("Проверка доставки")
+                delivery_verified, delivery_message = self.backend.verify_payload_delivery(package, context, payload_path)
+                self.logger(f"[deploy] delivery verification: ok={delivery_verified}, details={delivery_message}")
+                if not delivery_verified:
+                    return self._build_result(
+                        package=package,
+                        context=context,
+                        started_at=started_at,
+                        status="delivery_failed",
+                        pre=pre,
+                        post=pre,
+                        exec_result=None,
+                        installer_error=delivery_message,
+                        delivery_verified=False,
+                    )
+                return self._build_result(
+                    package=package,
+                    context=context,
+                    started_at=started_at,
+                    status="delivery_success",
+                    pre=pre,
+                    post=pre,
+                    exec_result=ExecutionResult(
+                        exit_code=0,
+                        stdout=delivery_message,
+                        stderr="",
+                        payload_path_used=payload_path,
+                        command_preview="deliver_only",
+                    ),
+                    delivery_verified=True,
+                )
+            else:
+                self.stage_logger("Запуск установки")
+                self.stage_logger("Ожидание завершения установщика")
+                exec_result = self.backend.run_install(package, context, payload_path)
+                self.logger(f"[deploy] installer exit={exec_result.exit_code} timeout={exec_result.timed_out}")
         except FileNotFoundError as exc:
             installer_error = str(exc)
             return self._build_result(
@@ -118,6 +186,19 @@ class WindowsDeployEngine:
                 pre=pre,
                 post=pre,
                 exec_result=None,
+                installer_error=installer_error,
+            )
+        except BackendError as exc:
+            installer_error = str(exc)
+            status = exc.error_kind if exc.error_kind in {"interactive_session_not_found", "session_query_failed", "unsupported_mode"} else "transport_failed"
+            return self._build_result(
+                package=package,
+                context=context,
+                started_at=started_at,
+                status=status,
+                pre=pre,
+                post=pre,
+                exec_result=exec_result,
                 installer_error=installer_error,
             )
         except Exception as exc:
@@ -133,8 +214,37 @@ class WindowsDeployEngine:
                 installer_error=installer_error,
             )
         finally:
-            if payload_path:
+            should_cleanup = options.execution_mode != WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE
+            if should_cleanup and payload_path:
                 self.backend.cleanup(payload_path, context)
+        
+        if options.execution_mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION:
+            status = self._resolve_interactive_status(exec_result)
+            return self._build_result(
+                package=package,
+                context=context,
+                started_at=started_at,
+                status=status,
+                pre=pre,
+                post=pre,
+                exec_result=exec_result,
+                installer_error=installer_error,
+                session_username=session_username,
+                session_id=session_id,
+                session_state=session_state,
+            )
+
+        if not payload_path:
+            return self._build_result(
+                package=package,
+                context=context,
+                started_at=started_at,
+                status="install_failed",
+                pre=pre,
+                post=pre,
+                exec_result=exec_result,
+                installer_error=installer_error or "payload path не определён",
+            )
 
         post = self.backend.run_detection(package, context)
         self.stage_logger("Post-check")
@@ -151,6 +261,17 @@ class WindowsDeployEngine:
             exec_result=exec_result,
             installer_error=installer_error,
         )
+
+    def _resolve_interactive_status(self, exec_result: ExecutionResult | None) -> str:
+        if exec_result is None:
+            return "interactive_launch_failed"
+        if exec_result.timed_out:
+            return "interactive_launch_timeout"
+        if exec_result.transport_error:
+            return "transport_failed"
+        if exec_result.exit_code in SUCCESS_CODES:
+            return "interactive_launch_success"
+        return "interactive_launch_failed"
 
     def _resolve_status(self, exec_result: ExecutionResult | None, post: DetectionResult) -> str:
         if exec_result is None:
@@ -192,6 +313,11 @@ class WindowsDeployEngine:
         post: DetectionResult,
         exec_result: ExecutionResult | None,
         installer_error: str = "",
+        session_username: str = "",
+        session_id: str = "",
+        session_state: str = "",
+        remote_assistance_opened: bool = False,
+        delivery_verified: bool = False,
     ) -> DeployResult:
         ended = time.time()
         exit_code = exec_result.exit_code if exec_result else None
@@ -227,6 +353,11 @@ class WindowsDeployEngine:
             detection_details_after=f"{post.details}; error={post.error or '-'}; current={post.current_value or '-'}",
             payload_path_used=exec_result.payload_path_used if exec_result else "",
             executed_command_preview=exec_result.command_preview if exec_result else "",
+            session_username=session_username,
+            session_id=session_id,
+            session_state=session_state,
+            remote_assistance_opened=remote_assistance_opened,
+            delivery_verified=delivery_verified,
             pre_detection=pre.to_dict(),
             post_detection=post.to_dict(),
         )

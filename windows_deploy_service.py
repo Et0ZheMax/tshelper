@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from windows_catalog import WindowsSoftwareCatalog
-from windows_catalog_models import BackendContext, DeployOptions, DetectionResult
+from windows_catalog_models import BackendContext, DeployOptions, DetectionResult, WindowsExecutionMode
 from windows_deploy_engine import WindowsDeployEngine
 from windows_execution_backends import LocalSubprocessBackend, PsExecBackend, WindowsExecutionBackend
 
@@ -18,6 +18,8 @@ class WindowsDeployRuntime:
     skip_pre_detection: bool
     prefer_system_context: bool
     psexec_path: str
+    execution_mode: WindowsExecutionMode = WindowsExecutionMode.STANDARD_INSTALL
+    delivery_folder: str = "C:\\Installers\\TSHelper"
 
 
 class WindowsDeployService:
@@ -45,6 +47,7 @@ class WindowsDeployService:
             timeout_sec=max(30, int(runtime.timeout_sec or package.timeout_sec)),
             requires_admin=package.requires_admin,
             prefer_system_context=runtime.prefer_system_context,
+            remote_temp_dir=runtime.delivery_folder or "C:\\Installers\\TSHelper",
         )
         backend.validate_context(context)
         detection = backend.run_detection(package, context)
@@ -60,5 +63,7 @@ class WindowsDeployService:
             skip_if_detected=(not force_reinstall) and runtime.skip_if_detected,
             skip_pre_detection=runtime.skip_pre_detection,
             prefer_system_context=runtime.prefer_system_context,
+            execution_mode=runtime.execution_mode,
+            delivery_folder=runtime.delivery_folder or "C:\\Installers\\TSHelper",
         )
         return engine.deploy(package=package, target_host=runtime.target_host, options=options)

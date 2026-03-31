@@ -5201,12 +5201,13 @@ Write-Output "OK"
             messagebox.showerror("Windows Deployment", str(exc))
             return
 
-        def _resolve_windows_runtime(skip_pre_detection: bool = False):
+        def _resolve_windows_runtime(skip_pre_detection: bool = False, execution_mode: str = "standard_install"):
             backend_name = str(self.app.settings.get_setting("windows_default_backend", "local_subprocess") or "local_subprocess").strip()
             prefer_system_context = bool(self.app.settings.get_setting("windows_prefer_system_context", False))
             timeout_sec = max(30, int(self.app.settings.get_setting("windows_default_timeout_sec", 1200) or 1200))
             skip_if_detected = bool(self.app.settings.get_setting("windows_skip_if_detected", True))
             psexec_path = str(self.app.settings.get_setting("windows_psexec_path", "C:\\Tools\\PsExec64.exe") or "").strip()
+            delivery_folder = str(self.app.settings.get_setting("windows_delivery_folder", "C:\\Installers\\TSHelper") or "C:\\Installers\\TSHelper").strip()
             if backend_name == "psexec":
                 target_host = (self.user.get("pc_name") or "").strip()
                 mode = "remote / psexec"
@@ -5221,6 +5222,8 @@ Write-Output "OK"
                 "skip_if_detected": skip_if_detected,
                 "skip_pre_detection": bool(skip_pre_detection),
                 "psexec_path": psexec_path,
+                "execution_mode": execution_mode,
+                "delivery_folder": delivery_folder,
                 "mode": mode,
             }
 
@@ -5278,18 +5281,27 @@ Write-Output "OK"
 
             self.app.run_background(work, on_success, on_error)
 
-        def on_install(package_id: str, force_reinstall: bool, skip_pre_detection: bool):
+        def on_install(package_id: str, force_reinstall: bool, skip_pre_detection: bool, execution_mode: str):
             _log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
             append_log("Подготовка", stage="Подготовка")
             append_log(f"Старт Windows deployment: {package_id}")
-            append_log("Pre-check", stage="Pre-check")
-            if skip_pre_detection:
+            from windows_catalog_models import WindowsExecutionMode
+
+            mode = WindowsExecutionMode(execution_mode)
+            if mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION:
+                append_log("Поиск сессии пользователя", stage="Поиск сессии пользователя")
+            elif mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE:
+                append_log("Копирование payload", stage="Копирование payload")
+            else:
+                append_log("Pre-check", stage="Pre-check")
+            if skip_pre_detection and mode == WindowsExecutionMode.STANDARD_INSTALL:
                 append_log("Оператор включил пропуск pre-detection перед установкой.")
 
             def work():
+                from windows_catalog_models import WindowsExecutionMode
                 from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
-                runtime_raw = _resolve_windows_runtime(skip_pre_detection=skip_pre_detection)
+                runtime_raw = _resolve_windows_runtime(skip_pre_detection=skip_pre_detection, execution_mode=execution_mode)
                 runtime = WindowsDeployRuntime(
                     backend_name=runtime_raw["backend_name"],
                     target_host=runtime_raw["target_host"],
@@ -5298,6 +5310,8 @@ Write-Output "OK"
                     skip_pre_detection=runtime_raw["skip_pre_detection"],
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
+                    execution_mode=WindowsExecutionMode(runtime_raw["execution_mode"]),
+                    delivery_folder=runtime_raw["delivery_folder"],
                 )
                 service = WindowsDeployService(
                     catalog_path=catalog_path,
@@ -5307,14 +5321,31 @@ Write-Output "OK"
                 return service.install_package(package_id=package_id, force_reinstall=force_reinstall, runtime=runtime)
 
             def on_success(result):
-                append_log("Post-check", stage="Post-check")
+                if result.status.startswith("interactive_"):
+                    append_log("Ожидание реакции пользователя", stage="Ожидание реакции пользователя")
+                elif result.status.startswith("delivery_"):
+                    append_log("Запуск удалённого помощника", stage="Запуск удалённого помощника")
+                else:
+                    append_log("Post-check", stage="Post-check")
                 append_log(f"Финальный статус: {result.status}")
                 append_log(f"Exit code: {result.installer_exit_code}")
                 append_log(f"Detection до: {result.detection_details_before}")
                 append_log(f"Detection после: {result.detection_details_after}")
+                if result.session_id:
+                    append_log(f"Сессия пользователя: {result.session_username} (id={result.session_id}, state={result.session_state})")
+                if result.payload_path_used:
+                    append_log(f"Payload: {result.payload_path_used}")
+                if result.status == "delivery_success":
+                    try:
+                        self.remote_assistance()
+                        append_log("Удалённый помощник успешно открыт.")
+                        result.status = "delivery_success_remote_assistance_opened"
+                    except Exception as assist_exc:
+                        append_log(f"Не удалось открыть удалённый помощник: {assist_exc}")
+                        result.status = "delivery_success_remote_assistance_failed"
                 append_log("Завершено", stage="Завершено")
                 log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
-                if result.status in {"installed_success", "installed_success_reboot_required", "already_installed"}:
+                if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "interactive_launch_success", "delivery_success_remote_assistance_opened"}:
                     messagebox.showinfo("Windows Deployment", f"Статус: {result.status}\nХост: {result.target_host}", parent=self.app.master)
                 elif result.status == "installed_success_with_warnings":
                     messagebox.showwarning(

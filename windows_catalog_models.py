@@ -43,6 +43,12 @@ class DetectionType(str, Enum):
     POWERSHELL_SCRIPT = "powershell_script"
 
 
+class WindowsExecutionMode(str, Enum):
+    STANDARD_INSTALL = "standard_install"
+    INTERACTIVE_USER_SESSION = "interactive_user_session"
+    DELIVER_AND_OPEN_REMOTE_ASSISTANCE = "deliver_and_open_remote_assistance"
+
+
 @dataclass(slots=True)
 class SourceConfig:
     kind: SourceKind
@@ -124,6 +130,8 @@ class DeployOptions:
     skip_if_detected: bool = True
     skip_pre_detection: bool = False
     prefer_system_context: bool = False
+    execution_mode: WindowsExecutionMode = WindowsExecutionMode.STANDARD_INSTALL
+    delivery_folder: str = "C:\\Installers\\TSHelper"
 
 
 @dataclass(slots=True)
@@ -147,6 +155,11 @@ class DeployResult:
     detection_details_after: str
     payload_path_used: str
     executed_command_preview: str
+    session_username: str = ""
+    session_id: str = ""
+    session_state: str = ""
+    remote_assistance_opened: bool = False
+    delivery_verified: bool = False
     pre_detection: dict[str, Any] = field(default_factory=dict)
     post_detection: dict[str, Any] = field(default_factory=dict)
 
@@ -171,6 +184,11 @@ class DeployResult:
             "detection_details_after": self.detection_details_after,
             "payload_path_used": self.payload_path_used,
             "executed_command_preview": self.executed_command_preview,
+            "session_username": self.session_username,
+            "session_id": self.session_id,
+            "session_state": self.session_state,
+            "remote_assistance_opened": self.remote_assistance_opened,
+            "delivery_verified": self.delivery_verified,
             "pre_detection": self.pre_detection,
             "post_detection": self.post_detection,
         }
