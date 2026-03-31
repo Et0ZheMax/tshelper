@@ -5207,6 +5207,7 @@ Write-Output "OK"
             timeout_sec = max(30, int(self.app.settings.get_setting("windows_default_timeout_sec", 1200) or 1200))
             skip_if_detected = bool(self.app.settings.get_setting("windows_skip_if_detected", True))
             psexec_path = str(self.app.settings.get_setting("windows_psexec_path", "C:\\Tools\\PsExec64.exe") or "").strip()
+            remote_temp_dir = str(self.app.settings.get_setting("windows_remote_temp_dir", "C:\\Windows\\Temp\\tshelper_deploy") or "C:\\Windows\\Temp\\tshelper_deploy").strip()
             delivery_folder = str(self.app.settings.get_setting("windows_delivery_folder", "C:\\Installers\\TSHelper") or "C:\\Installers\\TSHelper").strip()
             if backend_name == "psexec":
                 target_host = (self.user.get("pc_name") or "").strip()
@@ -5222,6 +5223,7 @@ Write-Output "OK"
                 "skip_if_detected": skip_if_detected,
                 "skip_pre_detection": bool(skip_pre_detection),
                 "psexec_path": psexec_path,
+                "remote_temp_dir": remote_temp_dir,
                 "execution_mode": execution_mode,
                 "delivery_folder": delivery_folder,
                 "mode": mode,
@@ -5255,6 +5257,7 @@ Write-Output "OK"
                     skip_pre_detection=runtime_raw["skip_pre_detection"],
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
+                    remote_temp_dir=runtime_raw["remote_temp_dir"],
                 )
                 service = WindowsDeployService(catalog_path=catalog_path, logger=append_log)
                 result, backend_name = service.check_package(package_id=package_id, runtime=runtime)
@@ -5311,6 +5314,7 @@ Write-Output "OK"
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
                     execution_mode=WindowsExecutionMode(runtime_raw["execution_mode"]),
+                    remote_temp_dir=runtime_raw["remote_temp_dir"],
                     delivery_folder=runtime_raw["delivery_folder"],
                 )
                 service = WindowsDeployService(
@@ -5327,7 +5331,6 @@ Write-Output "OK"
                     append_log("Запуск удалённого помощника", stage="Запуск удалённого помощника")
                 else:
                     append_log("Post-check", stage="Post-check")
-                append_log(f"Финальный статус: {result.status}")
                 append_log(f"Exit code: {result.installer_exit_code}")
                 append_log(f"Detection до: {result.detection_details_before}")
                 append_log(f"Detection после: {result.detection_details_after}")
@@ -5343,6 +5346,7 @@ Write-Output "OK"
                     except Exception as assist_exc:
                         append_log(f"Не удалось открыть удалённый помощник: {assist_exc}")
                         result.status = "delivery_success_remote_assistance_failed"
+                append_log(f"Финальный статус: {result.status}")
                 append_log("Завершено", stage="Завершено")
                 log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
                 if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "interactive_launch_success", "delivery_success_remote_assistance_opened"}:

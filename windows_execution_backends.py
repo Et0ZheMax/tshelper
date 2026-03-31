@@ -438,6 +438,15 @@ class PsExecBackend(LocalSubprocessBackend):
         self.validate_context(context)
         staged = self._staged_payloads.get((payload_path or "").lower())
         expected_size = os.path.getsize(staged.local_source) if staged and os.path.exists(staged.local_source) else -1
+        if staged and staged.admin_share_path:
+            if not os.path.exists(staged.admin_share_path):
+                return False, f"Файл не найден по admin-share пути: {staged.admin_share_path}"
+            remote_size = os.path.getsize(staged.admin_share_path)
+            if remote_size <= 0:
+                return False, "Файл найден по admin-share, но размер некорректный (<= 0)"
+            if expected_size > 0 and remote_size != expected_size:
+                return False, f"Размер не совпадает: local={expected_size}, remote={remote_size}"
+            return True, f"Доставка подтверждена через admin-share (размер {remote_size} байт)"
         ps_script = (
             "$p = '{path}';"
             "if (-not (Test-Path -LiteralPath $p)) {{ Write-Output 'missing'; exit 2 }};"

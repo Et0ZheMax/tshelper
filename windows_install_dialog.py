@@ -141,23 +141,27 @@ class WindowsInstallDialog(tk.Toplevel):
         ).pack(anchor="w", padx=8, pady=(2, 4))
         ttk.Label(mode_frame, textvariable=self.execution_mode_hint_var, foreground="#555555").pack(anchor="w", padx=8, pady=(0, 6))
         ttk.Checkbutton(container, text="Принудительная переустановка", variable=self.force_var).pack(anchor="w", pady=(8, 0))
-        ttk.Checkbutton(
+        self.skip_pre_detection_check = ttk.Checkbutton(
             container,
             text="Пропустить проверку перед установкой",
             variable=self.skip_pre_detection_var,
-        ).pack(anchor="w", pady=(4, 0))
+        )
+        self.skip_pre_detection_check.pack(anchor="w", pady=(4, 0))
         self._on_mode_changed()
 
     def _on_mode_changed(self):
         mode = self.execution_mode_var.get()
         if mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION.value:
-            self.execution_mode_hint_var.set("Требуется активная пользовательская сессия на целевом ПК.")
+            self.execution_mode_hint_var.set("Требуется активная пользовательская сессия на целевом ПК. Флаг пропуска pre-check в этом режиме не влияет.")
             self.skip_pre_detection_var.set(True)
+            self.skip_pre_detection_check.state(["disabled"])
         elif mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE.value:
-            self.execution_mode_hint_var.set("Режим доставки: установка не запускается автоматически.")
+            self.execution_mode_hint_var.set("Режим доставки: установка не запускается автоматически. Флаг пропуска pre-check в этом режиме не влияет.")
             self.skip_pre_detection_var.set(True)
+            self.skip_pre_detection_check.state(["disabled"])
         else:
             self.execution_mode_hint_var.set("Стандартная unattended-установка с pre/post detection.")
+            self.skip_pre_detection_check.state(["!disabled"])
 
     def _refresh_runtime_info(self):
         info = self.runtime_info_provider() or {}
