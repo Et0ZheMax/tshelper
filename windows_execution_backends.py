@@ -4,6 +4,7 @@ import ctypes
 import os
 import shutil
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Sequence
@@ -140,23 +141,28 @@ class LocalSubprocessBackend(WindowsExecutionBackend):
         command = self._build_install_command(package, payload_path)
         self.logger(f"[deploy] cmd={command}")
         try:
-            cp = self._execute(command, context.timeout_sec)
+            cp, timed_out = _run_command_with_heartbeat(
+                command=command,
+                timeout_sec=context.timeout_sec,
+                host_label=context.target_host or "localhost",
+                logger=self.logger,
+            )
+            if timed_out:
+                return ExecutionResult(
+                    exit_code=-1,
+                    stdout=cp.stdout or "",
+                    stderr=cp.stderr or "",
+                    timed_out=True,
+                    payload_path_used=payload_path,
+                    command_preview=_command_preview(command),
+                    error_kind="timeout",
+                )
             return ExecutionResult(
                 exit_code=cp.returncode,
                 stdout=cp.stdout or "",
                 stderr=cp.stderr or "",
                 payload_path_used=payload_path,
                 command_preview=_command_preview(command),
-            )
-        except subprocess.TimeoutExpired as exc:
-            return ExecutionResult(
-                exit_code=-1,
-                stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
-                stderr=(exc.stderr or "") if isinstance(exc.stderr, str) else "",
-                timed_out=True,
-                payload_path_used=payload_path,
-                command_preview=_command_preview(command),
-                error_kind="timeout",
             )
         except FileNotFoundError as exc:
             return ExecutionResult(
@@ -267,8 +273,34 @@ class PsExecBackend(LocalSubprocessBackend):
         self.validate_context(context)
         command = self._build_install_command(package, payload_path)
         self.logger(f"[psexec] target={context.target_host} cmd={_command_preview(command)}")
+        psexec_cmd = [
+            self.psexec_path,
+            f"\\\\{context.target_host}",
+            "-accepteula",
+            "-nobanner",
+        ]
+        if package.requires_admin:
+            psexec_cmd.append("-h")
+        if context.prefer_system_context:
+            psexec_cmd.append("-s")
+        remote_cmd = subprocess.list2cmdline(list(command))
+        psexec_cmd.extend(["cmd", "/c", remote_cmd])
         try:
-            cp = self._execute_remote(command, context, requires_admin=package.requires_admin)
+            cp, timed_out = _run_command_with_heartbeat(
+                command=psexec_cmd,
+                timeout_sec=context.timeout_sec,
+                host_label=context.target_host,
+                logger=self.logger,
+            )
+            if timed_out:
+                return ExecutionResult(
+                    exit_code=-1,
+                    stdout=cp.stdout or "",
+                    stderr=(cp.stderr or "") or "Таймаут выполнения psexec",
+                    timed_out=True,
+                    payload_path_used=payload_path,
+                    error_kind="timeout",
+                )
             stderr_text = cp.stderr or ""
             if cp.returncode != 0 and "access is denied" in (stderr_text.lower() + (cp.stdout or "").lower()):
                 return ExecutionResult(
@@ -285,15 +317,6 @@ class PsExecBackend(LocalSubprocessBackend):
                 stderr=stderr_text,
                 payload_path_used=payload_path,
                 command_preview=_command_preview(command),
-            )
-        except subprocess.TimeoutExpired:
-            return ExecutionResult(
-                exit_code=-1,
-                stdout="",
-                stderr="Таймаут выполнения psexec",
-                timed_out=True,
-                payload_path_used=payload_path,
-                error_kind="timeout",
             )
         except Exception as exc:
             return ExecutionResult(
@@ -358,3 +381,32 @@ def _command_preview(command: Sequence[str]) -> str:
     quoted = [subprocess.list2cmdline([part]) for part in command[:8]]
     preview = " ".join(quoted)
     return f"{preview} ..." if len(command) > 8 else preview
+
+
+def _run_command_with_heartbeat(
+    command: Sequence[str],
+    timeout_sec: int,
+    host_label: str,
+    logger: Callable[[str], None],
+    heartbeat_sec: int = 7,
+) -> tuple[subprocess.CompletedProcess[str], bool]:
+    process = subprocess.Popen(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    started_at = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - started_at
+        remaining = timeout_sec - elapsed
+        if remaining <= 0:
+            process.kill()
+            stdout_text, stderr_text = process.communicate()
+            return subprocess.CompletedProcess(list(command), -1, stdout_text or "", stderr_text or ""), True
+        try:
+            stdout_text, stderr_text = process.communicate(timeout=min(heartbeat_sec, max(1, int(remaining))))
+            return subprocess.CompletedProcess(list(command), process.returncode, stdout_text or "", stderr_text or ""), False
+        except subprocess.TimeoutExpired:
+            logger(f"[deploy] Ожидание завершения установщика на хосте {host_label}...")

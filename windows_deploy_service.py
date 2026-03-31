@@ -21,9 +21,15 @@ class WindowsDeployRuntime:
 
 
 class WindowsDeployService:
-    def __init__(self, catalog_path: str, logger: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        catalog_path: str,
+        logger: Callable[[str], None] | None = None,
+        stage_logger: Callable[[str], None] | None = None,
+    ):
         self.catalog_path = catalog_path
         self.logger = logger or (lambda _msg: None)
+        self.stage_logger = stage_logger or (lambda _stage: None)
 
     def _build_backend(self, runtime: WindowsDeployRuntime) -> WindowsExecutionBackend:
         if runtime.backend_name == "psexec":
@@ -48,7 +54,7 @@ class WindowsDeployService:
         catalog = WindowsSoftwareCatalog.load(self.catalog_path)
         package = catalog.get(package_id)
         backend = self._build_backend(runtime)
-        engine = WindowsDeployEngine(backend=backend, logger=self.logger)
+        engine = WindowsDeployEngine(backend=backend, logger=self.logger, stage_logger=self.stage_logger)
         options = DeployOptions(
             timeout_sec=max(30, int(runtime.timeout_sec or package.timeout_sec)),
             skip_if_detected=(not force_reinstall) and runtime.skip_if_detected,
