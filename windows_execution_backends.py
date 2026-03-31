@@ -31,6 +31,13 @@ class _StagedPayload:
     admin_share_path: str
 
 
+@dataclass(slots=True)
+class UserSessionInfo:
+    username: str
+    session_id: str
+    state: str
+
+
 class WindowsExecutionBackend(ABC):
     def __init__(self, logger: Callable[[str], None] | None = None):
         self.logger = logger or (lambda _msg: None)
@@ -59,6 +66,21 @@ class WindowsExecutionBackend(ABC):
     @abstractmethod
     def cleanup(self, payload_path: str, context: BackendContext) -> None:
         raise NotImplementedError
+
+    def find_user_session(self, context: BackendContext) -> UserSessionInfo:
+        raise BackendError("Интерактивный режим поддерживается только для backend psexec", error_kind="unsupported_mode")
+
+    def run_install_in_user_session(
+        self,
+        package: WindowsPackage,
+        context: BackendContext,
+        payload_path: str,
+        session: UserSessionInfo,
+    ) -> ExecutionResult:
+        raise BackendError("Интерактивный запуск доступен только для backend psexec", error_kind="unsupported_mode")
+
+    def verify_payload_delivery(self, package: WindowsPackage, context: BackendContext, payload_path: str) -> tuple[bool, str]:
+        return True, "verification_not_required"
 
 
 class LocalSubprocessBackend(WindowsExecutionBackend):
@@ -328,6 +350,131 @@ class PsExecBackend(LocalSubprocessBackend):
                 error_kind="transport_failed",
             )
 
+    def find_user_session(self, context: BackendContext) -> UserSessionInfo:
+        self.validate_context(context)
+        command = ["quser", f"/server:{context.target_host}"]
+        try:
+            cp = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=max(20, min(context.timeout_sec, 120)),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            raise BackendError(f"Не удалось выполнить quser: {exc}", error_kind="session_query_failed") from exc
+        output = f"{cp.stdout or ''}\n{cp.stderr or ''}".strip()
+        if cp.returncode != 0:
+            raise BackendError(
+                f"Команда quser завершилась с кодом {cp.returncode}: {output or 'нет вывода'}",
+                error_kind="session_query_failed",
+            )
+        parsed_sessions = _parse_quser_output(output)
+        if not parsed_sessions:
+            raise BackendError("На целевом хосте не найдены пользовательские сессии", error_kind="interactive_session_not_found")
+        for session in parsed_sessions:
+            if session.state.upper() == "ACTIVE":
+                return session
+        return parsed_sessions[0]
+
+    def run_install_in_user_session(
+        self,
+        package: WindowsPackage,
+        context: BackendContext,
+        payload_path: str,
+        session: UserSessionInfo,
+    ) -> ExecutionResult:
+        self.validate_context(context)
+        command = self._build_install_command(package, payload_path)
+        psexec_cmd = [
+            self.psexec_path,
+            f"\\\\{context.target_host}",
+            "-accepteula",
+            "-nobanner",
+            "-i",
+            str(session.session_id),
+        ]
+        if package.requires_admin:
+            psexec_cmd.append("-h")
+        if context.prefer_system_context:
+            psexec_cmd.append("-s")
+        psexec_cmd.extend(["cmd", "/c", subprocess.list2cmdline(list(command))])
+        self.logger(f"[interactive] target={context.target_host}, session_id={session.session_id}, user={session.username}")
+        try:
+            cp, timed_out = _run_command_with_heartbeat(
+                command=psexec_cmd,
+                timeout_sec=context.timeout_sec,
+                host_label=context.target_host,
+                logger=self.logger,
+            )
+            if timed_out:
+                return ExecutionResult(
+                    exit_code=-1,
+                    stdout=cp.stdout or "",
+                    stderr=(cp.stderr or "") or "Таймаут интерактивного запуска через psexec",
+                    timed_out=True,
+                    payload_path_used=payload_path,
+                    command_preview=_command_preview(command),
+                    error_kind="timeout",
+                )
+            return ExecutionResult(
+                exit_code=cp.returncode,
+                stdout=cp.stdout or "",
+                stderr=cp.stderr or "",
+                payload_path_used=payload_path,
+                command_preview=_command_preview(command),
+            )
+        except Exception as exc:
+            return ExecutionResult(
+                exit_code=-2,
+                stdout="",
+                stderr=str(exc),
+                transport_error=str(exc),
+                payload_path_used=payload_path,
+                error_kind="transport_failed",
+            )
+
+    def verify_payload_delivery(self, package: WindowsPackage, context: BackendContext, payload_path: str) -> tuple[bool, str]:
+        self.validate_context(context)
+        staged = self._staged_payloads.get((payload_path or "").lower())
+        expected_size = os.path.getsize(staged.local_source) if staged and os.path.exists(staged.local_source) else -1
+        ps_script = (
+            "$p = '{path}';"
+            "if (-not (Test-Path -LiteralPath $p)) {{ Write-Output 'missing'; exit 2 }};"
+            "$i = Get-Item -LiteralPath $p;"
+            "Write-Output ('size=' + $i.Length);"
+            "if ($i.Length -le 0) {{ exit 3 }};"
+            "exit 0"
+        ).format(path=payload_path.replace("'", "''"))
+        command = [
+            self.psexec_path,
+            f"\\\\{context.target_host}",
+            "-accepteula",
+            "-nobanner",
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ps_script,
+        ]
+        cp = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(20, min(context.timeout_sec, 180)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        output = f"{cp.stdout or ''}\n{cp.stderr or ''}".strip()
+        if cp.returncode != 0:
+            return False, output or "Не удалось подтвердить доставку файла"
+        remote_size = _extract_remote_size(output)
+        if remote_size <= 0:
+            return False, "Файл найден, но размер некорректный (<= 0)"
+        if expected_size > 0 and remote_size != expected_size:
+            return False, f"Размер не совпадает: local={expected_size}, remote={remote_size}"
+        return True, f"Доставка подтверждена (размер {remote_size} байт)"
+
     def cleanup(self, payload_path: str, context: BackendContext) -> None:
         staged = self._staged_payloads.pop((payload_path or "").lower(), None)
         if not staged:
@@ -410,3 +557,40 @@ def _run_command_with_heartbeat(
             return subprocess.CompletedProcess(list(command), process.returncode, stdout_text or "", stderr_text or ""), False
         except subprocess.TimeoutExpired:
             logger(f"[deploy] Ожидание завершения установщика на хосте {host_label}...")
+
+
+def _parse_quser_output(output: str) -> list[UserSessionInfo]:
+    sessions: list[UserSessionInfo] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "USERNAME" in line.upper() and "SESSIONNAME" in line.upper():
+            continue
+        line = line.lstrip(">")
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        username = parts[0]
+        state_index = None
+        for idx, token in enumerate(parts):
+            if token.upper() in {"ACTIVE", "DISC", "DISCONNECTED", "IDLE"} and idx > 0:
+                state_index = idx
+                break
+        if state_index is None or state_index < 2:
+            continue
+        session_id = parts[state_index - 1]
+        if not session_id.isdigit():
+            continue
+        sessions.append(UserSessionInfo(username=username, session_id=session_id, state=parts[state_index]))
+    return sessions
+
+
+def _extract_remote_size(text: str) -> int:
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if normalized.startswith("size="):
+            value = normalized.split("=", 1)[1].strip()
+            if value.isdigit():
+                return int(value)
+    return -1

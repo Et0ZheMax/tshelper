@@ -6,6 +6,7 @@ from typing import Callable
 
 from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from windows_catalog import WindowsCatalogError, delete_windows_package, disable_windows_package, load_catalog_payload
+from windows_catalog_models import WindowsExecutionMode
 from windows_package_card_dialog import WindowsPackageCardDialog
 
 
@@ -14,7 +15,7 @@ class WindowsInstallDialog(tk.Toplevel):
         self,
         master,
         catalog_path: str,
-        on_install: Callable[[str, bool, bool], None],
+        on_install: Callable[[str, bool, bool, str], None],
         on_check: Callable[[str], None],
         on_open_log: Callable[[], None],
         runtime_info_provider: Callable[[], dict[str, str]] | None = None,
@@ -51,6 +52,8 @@ class WindowsInstallDialog(tk.Toplevel):
         self.tag_var = tk.StringVar(value="all")
         self.force_var = tk.BooleanVar(value=False)
         self.skip_pre_detection_var = tk.BooleanVar(value=False)
+        self.execution_mode_var = tk.StringVar(value=WindowsExecutionMode.STANDARD_INSTALL.value)
+        self.execution_mode_hint_var = tk.StringVar(value="")
         self._raw_items: list[dict] = []
         self._filtered_items: list[dict] = []
         self._build_ui()
@@ -113,12 +116,48 @@ class WindowsInstallDialog(tk.Toplevel):
 
         self.card_text = tk.Text(right, wrap="word", state="disabled")
         self.card_text.pack(fill="both", expand=True)
+        mode_frame = ttk.LabelFrame(container, text="Режим выполнения")
+        mode_frame.pack(fill="x", pady=(8, 0))
+        ttk.Radiobutton(
+            mode_frame,
+            text="Обычная тихая установка",
+            value=WindowsExecutionMode.STANDARD_INSTALL.value,
+            variable=self.execution_mode_var,
+            command=self._on_mode_changed,
+        ).pack(anchor="w", padx=8, pady=(4, 2))
+        ttk.Radiobutton(
+            mode_frame,
+            text="Запустить в сессии пользователя",
+            value=WindowsExecutionMode.INTERACTIVE_USER_SESSION.value,
+            variable=self.execution_mode_var,
+            command=self._on_mode_changed,
+        ).pack(anchor="w", padx=8, pady=2)
+        ttk.Radiobutton(
+            mode_frame,
+            text="Только доставить файл и открыть Удалённый помощник",
+            value=WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE.value,
+            variable=self.execution_mode_var,
+            command=self._on_mode_changed,
+        ).pack(anchor="w", padx=8, pady=(2, 4))
+        ttk.Label(mode_frame, textvariable=self.execution_mode_hint_var, foreground="#555555").pack(anchor="w", padx=8, pady=(0, 6))
         ttk.Checkbutton(container, text="Принудительная переустановка", variable=self.force_var).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(
             container,
             text="Пропустить проверку перед установкой",
             variable=self.skip_pre_detection_var,
         ).pack(anchor="w", pady=(4, 0))
+        self._on_mode_changed()
+
+    def _on_mode_changed(self):
+        mode = self.execution_mode_var.get()
+        if mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION.value:
+            self.execution_mode_hint_var.set("Требуется активная пользовательская сессия на целевом ПК.")
+            self.skip_pre_detection_var.set(True)
+        elif mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE.value:
+            self.execution_mode_hint_var.set("Режим доставки: установка не запускается автоматически.")
+            self.skip_pre_detection_var.set(True)
+        else:
+            self.execution_mode_hint_var.set("Стандартная unattended-установка с pre/post detection.")
 
     def _refresh_runtime_info(self):
         info = self.runtime_info_provider() or {}
@@ -261,6 +300,7 @@ class WindowsInstallDialog(tk.Toplevel):
             str(item.get("id", "")),
             bool(self.force_var.get()),
             bool(self.skip_pre_detection_var.get()),
+            self.execution_mode_var.get(),
         )
 
     def _check(self):
