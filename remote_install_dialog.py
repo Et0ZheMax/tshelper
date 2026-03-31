@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from remote_ops import (
     CatalogError,
     CatalogValidationError,
@@ -25,7 +26,22 @@ class SoftwareCardDialog(tk.Toplevel):
         self.transient(master)
         self.grab_set()
         self.resizable(True, True)
-        self.geometry("620x520")
+        self.settings = getattr(master, "settings", None)
+        if self.settings is not None:
+            apply_persisted_geometry(
+                self,
+                self.settings,
+                "software_card_dialog_geometry",
+                "620x520+300+120",
+                min_width=600,
+                min_height=480,
+            )
+            self._save_geometry = bind_geometry_persistence(self, self.settings, "software_card_dialog_geometry")
+        else:
+            self.geometry("620x520")
+            self.minsize(600, 480)
+            self._save_geometry = lambda: None
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.title_var = tk.StringVar(value=getattr(item, "title", ""))
         self.id_var = tk.StringVar(value=getattr(item, "item_id", ""))
@@ -110,7 +126,7 @@ class SoftwareCardDialog(tk.Toplevel):
         buttons = ttk.Frame(container)
         buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(buttons, text="Сохранить", command=self._save).pack(side="right")
-        ttk.Button(buttons, text="Отмена", command=self.destroy).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="Отмена", command=self._on_close).pack(side="right", padx=(0, 8))
 
     def _switch_install_type_ui(self) -> None:
         for child in self.install_specific_frame.winfo_children():
@@ -163,11 +179,15 @@ class SoftwareCardDialog(tk.Toplevel):
         except (CatalogError, CatalogValidationError, ValueError) as exc:
             messagebox.showerror("Карточка ПО", str(exc), parent=self)
             return
+        self._on_close()
+
+    def _on_close(self):
+        self._save_geometry()
         self.destroy()
 
 
 class SoftwareInstallDialog(tk.Toplevel):
-    def __init__(self, master, catalog: SoftwareCatalog, on_submit: Callable[[str, bool], None]):
+    def __init__(self, master, catalog: SoftwareCatalog, on_submit: Callable[[str, bool], None], settings=None):
         super().__init__(master)
         self.catalog = catalog
         self.on_submit = on_submit
@@ -175,7 +195,21 @@ class SoftwareInstallDialog(tk.Toplevel):
         self.transient(master)
         self.grab_set()
         self.resizable(True, True)
-        self.geometry("840x520")
+        self.settings = settings or getattr(master, "settings", None)
+        if self.settings is not None:
+            apply_persisted_geometry(
+                self,
+                self.settings,
+                "software_install_dialog_geometry",
+                "840x520+240+120",
+                min_width=800,
+                min_height=500,
+            )
+            self._save_geometry = bind_geometry_persistence(self, self.settings, "software_install_dialog_geometry")
+        else:
+            self.geometry("840x520")
+            self.minsize(800, 500)
+            self._save_geometry = lambda: None
 
         self.search_var = tk.StringVar()
         self.force_reinstall_var = tk.BooleanVar(value=False)
@@ -338,4 +372,5 @@ class SoftwareInstallDialog(tk.Toplevel):
         self.on_submit(item.item_id, bool(self.force_reinstall_var.get()))
 
     def _cancel(self) -> None:
+        self._save_geometry()
         self.destroy()

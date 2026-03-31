@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from windows_catalog import WindowsCatalogError, WindowsCatalogValidationError, upsert_windows_package
 from windows_package_assistant import DetectionSuggestion, analyze_installer, normalize_package_id, suggest_detection_from_payload
 
@@ -21,7 +23,22 @@ class WindowsPackageCardDialog(tk.Toplevel):
         self.title("Карточка Windows-пакета")
         self.transient(master)
         self.grab_set()
-        self.geometry("880x860")
+        self.settings = getattr(master, "settings", None)
+        if self.settings is not None:
+            apply_persisted_geometry(
+                self,
+                self.settings,
+                "windows_package_card_dialog_geometry",
+                "880x860+260+80",
+                min_width=860,
+                min_height=720,
+            )
+            self._save_geometry = bind_geometry_persistence(self, self.settings, "windows_package_card_dialog_geometry")
+        else:
+            self.geometry("880x860")
+            self.minsize(860, 720)
+            self._save_geometry = lambda: None
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         silent_args = self.item.get("silent_args", [])
         detection_command = self.item.get("detection", {}).get("command", [])
@@ -54,6 +71,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
         container = ttk.Frame(self, padding=12)
         container.pack(fill="both", expand=True)
         container.columnconfigure(1, weight=1)
+        container.rowconfigure(1000, weight=1)
 
         def row(label: str, key: str, values: list[str] | None = None):
             idx = row.counter
@@ -80,7 +98,8 @@ class WindowsPackageCardDialog(tk.Toplevel):
         src_actions = ttk.Frame(container)
         src_actions.grid(row=src_row, column=2, sticky="w", padx=(6, 0))
         ttk.Button(src_actions, text="Файл…", command=self._pick_source).pack(side="left")
-        ttk.Button(src_actions, text="Автозаполнить по файлу", command=self._autofill_by_source).pack(side="left", padx=(6, 0))
+        self.autofill_btn = ttk.Button(src_actions, text="Автозаполнить по файлу", command=self._autofill_by_source)
+        self.autofill_btn.pack(side="left", padx=(6, 0))
         row.counter += 1
 
         helper_row = row.counter
@@ -122,8 +141,10 @@ class WindowsPackageCardDialog(tk.Toplevel):
         preview_frame = ttk.LabelFrame(container, text="Нормализованный preview")
         preview_frame.grid(row=row.counter, column=0, columnspan=3, sticky="nsew", pady=(8, 4))
         preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
         self.preview = tk.Text(preview_frame, height=12, wrap="word", state="disabled")
         self.preview.grid(row=0, column=0, sticky="nsew")
+        container.rowconfigure(row.counter, weight=1)
         row.counter += 1
 
         for key, var in self.vars.items():
@@ -150,14 +171,34 @@ class WindowsPackageCardDialog(tk.Toplevel):
                 return
             self.vars["source_value"].set(selected)
             source_value = selected
-        result = analyze_installer(source_value)
+        self.autofill_btn.configure(state="disabled")
+        self.warning_label.config(text="Идёт анализ инсталлятора…")
+
+        def worker():
+            try:
+                result = analyze_installer(source_value)
+            except Exception as exc:
+                self.after(0, lambda: self._on_autofill_error(exc))
+                return
+            self.after(0, lambda: self._on_autofill_success(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_autofill_success(self, result):
+        self.autofill_btn.configure(state="normal")
         self._assistant_notes = list(result.notes)
         self._apply_autofill_fields(result.fields)
         self._detection_suggestions = result.detection_suggestions
         self._refresh_detection_combo()
         if self._detection_suggestions:
             self._apply_detection_suggestion(self._detection_suggestions[0])
+        self.warning_label.config(text="")
         self._refresh_preview()
+
+    def _on_autofill_error(self, error: Exception):
+        self.autofill_btn.configure(state="normal")
+        self.warning_label.config(text="")
+        messagebox.showerror("Карточка Windows-пакета", f"Не удалось проанализировать инсталлятор: {error}", parent=self)
 
     def _generate_id_from_title(self):
         base_text = self.vars["title"].get().strip() or self.vars["source_value"].get().strip()
@@ -291,4 +332,8 @@ class WindowsPackageCardDialog(tk.Toplevel):
         except (WindowsCatalogError, WindowsCatalogValidationError, ValueError) as exc:
             messagebox.showerror("Карточка Windows-пакета", str(exc), parent=self)
             return
+        self._on_close()
+
+    def _on_close(self):
+        self._save_geometry()
         self.destroy()
