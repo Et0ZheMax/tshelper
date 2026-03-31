@@ -1336,14 +1336,20 @@ class OperationLogWindow(tk.Toplevel):
     def append_line(self, message: str):
         self.text_widget.insert("end", f"{message}\n")
         self.text_widget.see("end")
+
+    def set_stage(self, stage: str):
+        if stage == "Завершено":
+            self.status_strip.mark_done()
+            return
+        if stage == "Ошибка":
+            self.status_strip.mark_error()
+            return
+        self.status_strip.set_stage(stage or "Подготовка")
+
+    def sync_stage_from_message(self, message: str):
         stage = self._extract_stage(message)
         if stage:
-            if stage == "Завершено":
-                self.status_strip.mark_done()
-            elif stage == "Ошибка":
-                self.status_strip.mark_error()
-            else:
-                self.status_strip.set_stage(stage)
+            self.set_stage(stage)
 
     def _extract_stage(self, message: str):
         lower = (message or "").lower()
@@ -1655,10 +1661,14 @@ class MainWindow:
     def open_action_log_window(self, title="Remote Ops Log"):
         window = OperationLogWindow(self.master, self.settings, title=title)
 
-        def append_callback(message: str):
+        def append_callback(message: str, *, stage: str | None = None, infer_stage: bool = True):
             def do_append():
                 if window.winfo_exists():
                     window.append_line(message)
+                    if stage:
+                        window.set_stage(stage)
+                    elif infer_stage:
+                        window.sync_stage_from_message(message)
             self.master.after(0, do_append)
 
         return window, append_callback
@@ -5270,9 +5280,9 @@ Write-Output "OK"
 
         def on_install(package_id: str, force_reinstall: bool, skip_pre_detection: bool):
             _log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
-            append_log("Подготовка")
+            append_log("Подготовка", stage="Подготовка")
             append_log(f"Старт Windows deployment: {package_id}")
-            append_log("Pre-check")
+            append_log("Pre-check", stage="Pre-check")
             if skip_pre_detection:
                 append_log("Оператор включил пропуск pre-detection перед установкой.")
 
@@ -5289,18 +5299,20 @@ Write-Output "OK"
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
                 )
-                service = WindowsDeployService(catalog_path=catalog_path, logger=append_log)
-                append_log("Копирование payload")
-                append_log("Запуск установки")
+                service = WindowsDeployService(
+                    catalog_path=catalog_path,
+                    logger=append_log,
+                    stage_logger=lambda stage_name: append_log(f"[stage] {stage_name}", stage=stage_name, infer_stage=False),
+                )
                 return service.install_package(package_id=package_id, force_reinstall=force_reinstall, runtime=runtime)
 
             def on_success(result):
-                append_log("Post-check")
+                append_log("Post-check", stage="Post-check")
                 append_log(f"Финальный статус: {result.status}")
                 append_log(f"Exit code: {result.installer_exit_code}")
                 append_log(f"Detection до: {result.detection_details_before}")
                 append_log(f"Detection после: {result.detection_details_after}")
-                append_log("Завершено")
+                append_log("Завершено", stage="Завершено")
                 log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
                 if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "installed_success_with_warnings"}:
                     messagebox.showinfo("Windows Deployment", f"Статус: {result.status}\nХост: {result.target_host}", parent=self.app.master)
@@ -5309,7 +5321,7 @@ Write-Output "OK"
 
             def on_error(error):
                 append_log(f"Ошибка: {error}")
-                append_log("Ошибка")
+                append_log("Ошибка", stage="Ошибка")
                 log_message(f"Windows deployment ошибка: {error}")
                 messagebox.showerror("Windows Deployment", str(error), parent=self.app.master)
 

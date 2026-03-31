@@ -11,9 +11,15 @@ REBOOT_CODES = {3010, 1641}
 
 
 class WindowsDeployEngine:
-    def __init__(self, backend: WindowsExecutionBackend, logger: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        backend: WindowsExecutionBackend,
+        logger: Callable[[str], None] | None = None,
+        stage_logger: Callable[[str], None] | None = None,
+    ):
         self.backend = backend
         self.logger = logger or (lambda _msg: None)
+        self.stage_logger = stage_logger or (lambda _stage: None)
 
     def deploy(
         self,
@@ -56,6 +62,7 @@ class WindowsDeployEngine:
             )
 
         if options.skip_pre_detection:
+            self.stage_logger("Pre-check")
             pre = DetectionResult(
                 detected=False,
                 details="skipped_by_operator",
@@ -65,6 +72,7 @@ class WindowsDeployEngine:
             )
             self.logger(f"[deploy] pre-detection {package.package_id}: SKIPPED оператором (skip_pre_detection=true)")
         else:
+            self.stage_logger("Pre-check")
             pre = self.backend.run_detection(package, context)
             self.logger(f"[deploy] pre-detection {package.package_id}: detected={pre.detected}, details={pre.details}, error={pre.error or '-'}")
             if pre.error and pre.error_kind not in {"not_found", "compare_failed"}:
@@ -93,8 +101,11 @@ class WindowsDeployEngine:
         exec_result: ExecutionResult | None = None
         installer_error = ""
         try:
+            self.stage_logger("Копирование payload")
             payload_path = self.backend.prepare_payload(package, context)
             self.logger(f"[deploy] resolved payload: {payload_path}")
+            self.stage_logger("Запуск установки")
+            self.stage_logger("Ожидание завершения установщика")
             exec_result = self.backend.run_install(package, context, payload_path)
             self.logger(f"[deploy] installer exit={exec_result.exit_code} timeout={exec_result.timed_out}")
         except FileNotFoundError as exc:
@@ -126,6 +137,7 @@ class WindowsDeployEngine:
                 self.backend.cleanup(payload_path, context)
 
         post = self.backend.run_detection(package, context)
+        self.stage_logger("Post-check")
         self.logger(f"[deploy] post-detection {package.package_id}: detected={post.detected}, details={post.details}, error={post.error or '-'}")
         status = self._resolve_status(exec_result, post)
 
@@ -143,6 +155,12 @@ class WindowsDeployEngine:
     def _resolve_status(self, exec_result: ExecutionResult | None, post: DetectionResult) -> str:
         if exec_result is None:
             return "install_failed"
+        if post.detected and exec_result.exit_code in REBOOT_CODES:
+            return "installed_success_reboot_required"
+        if post.detected and exec_result.exit_code in SUCCESS_CODES:
+            return "installed_success"
+        if post.detected:
+            return "installed_success_with_warnings"
         if exec_result.error_kind == "elevation_required":
             return "elevation_required"
         if exec_result.timed_out:
@@ -151,12 +169,6 @@ class WindowsDeployEngine:
             return "transport_failed"
         if post.error and post.error_kind not in {"not_found", "compare_failed"}:
             return "detection_failed"
-        if post.detected and exec_result.exit_code in REBOOT_CODES:
-            return "installed_success_reboot_required"
-        if post.detected and exec_result.exit_code in SUCCESS_CODES:
-            return "installed_success"
-        if post.detected and exec_result.exit_code not in SUCCESS_CODES | REBOOT_CODES:
-            return "installed_success_with_warnings"
         if exec_result.exit_code in REBOOT_CODES:
             return "installed_success_reboot_required" if post.detected else "install_failed"
         return "install_failed"
