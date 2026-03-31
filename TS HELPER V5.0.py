@@ -5314,8 +5314,15 @@ Write-Output "OK"
                 append_log(f"Detection после: {result.detection_details_after}")
                 append_log("Завершено", stage="Завершено")
                 log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
-                if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "installed_success_with_warnings"}:
+                if result.status in {"installed_success", "installed_success_reboot_required", "already_installed"}:
                     messagebox.showinfo("Windows Deployment", f"Статус: {result.status}\nХост: {result.target_host}", parent=self.app.master)
+                elif result.status == "installed_success_with_warnings":
+                    messagebox.showwarning(
+                        "Windows Deployment",
+                        f"Статус: {result.status}\nХост: {result.target_host}\n"
+                        f"Проверка установки требует внимания: {result.detection_details_after}",
+                        parent=self.app.master,
+                    )
                 else:
                     messagebox.showerror("Windows Deployment", f"Статус: {result.status}\nОшибка: {result.installer_error or result.transport_error or result.stderr}", parent=self.app.master)
 
