@@ -34,6 +34,8 @@ _SUPPORTED_ARCH = {item.value for item in Architecture}
 _SUPPORTED_REBOOT = {item.value for item in RebootBehavior}
 _SUPPORTED_DETECTION = {item.value for item in DetectionType}
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
+_SUPPORTED_OPERATORS = {"==", "!=", ">", "<", ">=", "<="}
+_MAX_BACKUPS = 10
 
 
 def _normalize_tags(tags: Any) -> list[str]:
@@ -78,6 +80,8 @@ def _validate_detection(raw: Any) -> DetectionConfig:
         raise WindowsCatalogValidationError("Для detection требуется поле path")
     if config.type == DetectionType.REGISTRY_VALUE and not config.value_name:
         raise WindowsCatalogValidationError("Для registry_value требуется value_name")
+    if config.type == DetectionType.REGISTRY_VALUE and config.operator not in _SUPPORTED_OPERATORS:
+        raise WindowsCatalogValidationError(f"Для registry_value operator должен быть одним из: {sorted(_SUPPORTED_OPERATORS)}")
     if config.type in {DetectionType.UNINSTALL_DISPLAY_NAME, DetectionType.PRODUCT_CODE} and not config.value:
         raise WindowsCatalogValidationError("Для uninstall/product_code требуется value")
     if config.type == DetectionType.COMMAND_SUCCESS and not config.command:
@@ -193,6 +197,7 @@ def save_catalog_payload(catalog_path: str, payload: dict[str, Any]) -> None:
     if os.path.exists(catalog_path):
         with open(catalog_path, "rb") as source, open(backup_path, "wb") as backup:
             backup.write(source.read())
+        _rotate_backups(catalog_path, keep_last=_MAX_BACKUPS)
     fd, temp_path = tempfile.mkstemp(prefix="software_catalog_windows_", suffix=".tmp", dir=folder)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file_obj:

@@ -151,23 +151,27 @@ TS HELPER поддерживает SSH-сценарии как для интер
 
 ---
 
-### 11. Windows Software Deployment (новый модуль)
+### 11. Windows Software Deployment (модуль v5.x)
 
-В `v5.0` добавлен отдельный production-oriented модуль развёртывания ПО для Windows, который не смешивает Linux и Windows каталог.
+В `v5.x` Windows deployment выделен в отдельный модуль и доведён до предсказуемого support-flow без смешивания с Linux-логикой.
 
-Что реализовано:
+Что поддерживается сейчас:
 
-- отдельный каталог `software_catalog_windows.json` с валидацией и атомарным сохранением;
-- отдельные слои: каталог, detection engine, execution backends, deploy engine, UI;
-- поддержка типов установки `exe`, `msi`, `msix`, `powershell`, `cmd`, `winget`;
-- pre/post detection c типами `file_exists`, `registry_exists`, `registry_value`, `uninstall_display_name`, `product_code`, `command_success`, `powershell_script`;
-- backend-абстракция с двумя реализациями:
-  - `local_subprocess`,
-  - `psexec` (конфигурируемый путь к PsExec);
-- отдельный диалог Windows Deployment с поиском, фильтрами, карточкой пакета и операциями Add/Edit/Disable/Delete;
-- фоновое выполнение без freeze UI и подробные логи результата.
+- отдельный каталог `software_catalog_windows.json` с валидацией, атомарным сохранением и ротацией backup-файлов;
+- backend-aware detection: проверки выполняются в том же контексте, что и установка (`local_subprocess` локально, `psexec` на целевом хосте);
+- pre/post detection с типами `file_exists`, `registry_exists`, `registry_value`, `uninstall_display_name`, `product_code`, `command_success`, `powershell_script`;
+- для `registry_value` реализованы операторы `==`, `!=`, `>`, `<`, `>=`, `<=` с диагностикой текущего и ожидаемого значения;
+- backend-абстракция включает подготовку payload, detection, install и cleanup;
+- для `psexec` используется явный staging в admin-share (`\HOST\C$...`) без неявного fallback на localhost;
+- UI-диалог показывает актуальный backend/target/mode и блокирует install/check, если для `psexec` не задан target host.
 
-Новые настройки (Settings → SSH):
+Ограничения первой версии (честно):
+
+- `msix`, `winget` и `powershell_script` в remote+SYSTEM сценариях зависят от окружения целевого хоста и прав, поэтому требуют предварительной проверки в вашей инфраструктуре;
+- записи каталога считаются доверенными (trusted admin catalog), поэтому любые custom command/script должны проходить внутренний review;
+- модуль не делает «магический» fallback при ошибках transport/доступа, а возвращает диагностический статус (`invalid_target`, `transport_failed`, `source_unavailable`, `detection_failed`, `elevation_required`, `timeout`).
+
+Новые/обновлённые настройки (Settings → SSH):
 
 - путь к Windows-каталогу;
 - backend по умолчанию (`local_subprocess` / `psexec`);

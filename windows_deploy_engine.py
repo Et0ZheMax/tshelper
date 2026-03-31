@@ -3,8 +3,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from windows_catalog_models import BackendContext, DeployResult, ExecutionResult, WindowsPackage
-from windows_detection import run_detection
+from windows_catalog_models import BackendContext, DeployOptions, DeployResult, DetectionResult, ExecutionResult, WindowsPackage
 from windows_execution_backends import WindowsExecutionBackend
 
 SUCCESS_CODES = {0}
@@ -19,21 +18,34 @@ class WindowsDeployEngine:
     def deploy(
         self,
         package: WindowsPackage,
-        target_host: str = "localhost",
-        skip_if_detected: bool = True,
-        prefer_system_context: bool = False,
+        target_host: str,
+        options: DeployOptions,
     ) -> DeployResult:
         started_at = time.time()
         context = BackendContext(
             target_host=target_host,
-            timeout_sec=package.timeout_sec,
+            timeout_sec=max(30, int(options.timeout_sec or package.timeout_sec)),
             requires_admin=package.requires_admin,
-            prefer_system_context=prefer_system_context,
+            prefer_system_context=options.prefer_system_context,
         )
+        try:
+            self.backend.validate_context(context)
+        except Exception as exc:
+            err = str(exc)
+            return self._build_result(
+                package=package,
+                context=context,
+                started_at=started_at,
+                status="invalid_target" if "invalid_target" in err else "transport_failed",
+                pre=DetectionResult(False, "not_run", error=err, error_kind="invalid_target"),
+                post=DetectionResult(False, "not_run", error=err, error_kind="invalid_target"),
+                exec_result=None,
+                installer_error=err,
+            )
 
-        pre = run_detection(package.detection)
+        pre = self.backend.run_detection(package, context)
         self.logger(f"[deploy] pre-detection {package.package_id}: detected={pre.detected}, details={pre.details}, error={pre.error or '-'}")
-        if pre.error:
+        if pre.error and pre.error_kind not in {"not_found", "compare_failed"}:
             return self._build_result(
                 package=package,
                 context=context,
@@ -44,7 +56,7 @@ class WindowsDeployEngine:
                 exec_result=None,
                 installer_error=pre.error,
             )
-        if pre.detected and skip_if_detected:
+        if pre.detected and options.skip_if_detected:
             return self._build_result(
                 package=package,
                 context=context,
@@ -91,9 +103,9 @@ class WindowsDeployEngine:
             if payload_path:
                 self.backend.cleanup(payload_path, context)
 
-        post = run_detection(package.detection)
+        post = self.backend.run_detection(package, context)
         self.logger(f"[deploy] post-detection {package.package_id}: detected={post.detected}, details={post.details}, error={post.error or '-'}")
-        status = self._resolve_status(exec_result, pre.detected, post.detected, bool(post.error))
+        status = self._resolve_status(exec_result, post)
 
         return self._build_result(
             package=package,
@@ -106,25 +118,25 @@ class WindowsDeployEngine:
             installer_error=installer_error,
         )
 
-    def _resolve_status(self, exec_result: ExecutionResult | None, pre_detected: bool, post_detected: bool, post_error: bool) -> str:
+    def _resolve_status(self, exec_result: ExecutionResult | None, post: DetectionResult) -> str:
         if exec_result is None:
             return "install_failed"
+        if exec_result.error_kind == "elevation_required":
+            return "elevation_required"
         if exec_result.timed_out:
             return "timeout"
         if exec_result.transport_error:
             return "transport_failed"
-        if post_error:
+        if post.error and post.error_kind not in {"not_found", "compare_failed"}:
             return "detection_failed"
-        if post_detected and exec_result.exit_code in REBOOT_CODES:
+        if post.detected and exec_result.exit_code in REBOOT_CODES:
             return "installed_success_reboot_required"
-        if post_detected and exec_result.exit_code in SUCCESS_CODES:
+        if post.detected and exec_result.exit_code in SUCCESS_CODES:
             return "installed_success"
-        if post_detected and exec_result.exit_code not in SUCCESS_CODES | REBOOT_CODES:
+        if post.detected and exec_result.exit_code not in SUCCESS_CODES | REBOOT_CODES:
             return "installed_success_with_warnings"
-        if not post_detected and pre_detected:
-            return "install_failed"
         if exec_result.exit_code in REBOOT_CODES:
-            return "installed_success_reboot_required" if post_detected else "install_failed"
+            return "installed_success_reboot_required" if post.detected else "install_failed"
         return "install_failed"
 
     def _build_result(
@@ -133,8 +145,8 @@ class WindowsDeployEngine:
         context: BackendContext,
         started_at: float,
         status: str,
-        pre,
-        post,
+        pre: DetectionResult,
+        post: DetectionResult,
         exec_result: ExecutionResult | None,
         installer_error: str = "",
     ) -> DeployResult:
@@ -157,8 +169,10 @@ class WindowsDeployEngine:
             stderr=exec_result.stderr if exec_result else "",
             transport_error=exec_result.transport_error if exec_result else "",
             installer_error=installer_error,
-            detection_details_before=f"{pre.details}; error={pre.error or '-'}",
-            detection_details_after=f"{post.details}; error={post.error or '-'}",
+            detection_details_before=f"{pre.details}; error={pre.error or '-'}; current={pre.current_value or '-'}",
+            detection_details_after=f"{post.details}; error={post.error or '-'}; current={post.current_value or '-'}",
             payload_path_used=exec_result.payload_path_used if exec_result else "",
             executed_command_preview=exec_result.command_preview if exec_result else "",
+            pre_detection=pre.to_dict(),
+            post_detection=post.to_dict(),
         )

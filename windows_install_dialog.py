@@ -4,20 +4,29 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from windows_catalog import WindowsCatalogError, WindowsSoftwareCatalog, delete_windows_package, disable_windows_package, load_catalog_payload
+from windows_catalog import WindowsCatalogError, delete_windows_package, disable_windows_package, load_catalog_payload
 from windows_package_card_dialog import WindowsPackageCardDialog
 
 
 class WindowsInstallDialog(tk.Toplevel):
-    def __init__(self, master, catalog_path: str, on_install: Callable[[str, bool], None], on_check: Callable[[str], None], on_open_log: Callable[[], None]):
+    def __init__(
+        self,
+        master,
+        catalog_path: str,
+        on_install: Callable[[str, bool], None],
+        on_check: Callable[[str], None],
+        on_open_log: Callable[[], None],
+        runtime_info_provider: Callable[[], dict[str, str]] | None = None,
+    ):
         super().__init__(master)
         self.catalog_path = catalog_path
         self.on_install = on_install
         self.on_check = on_check
         self.on_open_log = on_open_log
+        self.runtime_info_provider = runtime_info_provider or (lambda: {})
 
-        self.title("Windows Deployment")
-        self.geometry("980x580")
+        self.title("Установка ПО Windows")
+        self.geometry("1000x620")
         self.transient(master)
         self.grab_set()
 
@@ -28,10 +37,25 @@ class WindowsInstallDialog(tk.Toplevel):
         self._filtered_items: list[dict] = []
         self._build_ui()
         self._reload_catalog()
+        self._refresh_runtime_info()
 
     def _build_ui(self):
         container = ttk.Frame(self, padding=12)
         container.pack(fill="both", expand=True)
+
+        runtime_frame = ttk.LabelFrame(container, text="Контекст выполнения")
+        runtime_frame.pack(fill="x", pady=(0, 8))
+        runtime_frame.columnconfigure(1, weight=1)
+        self.backend_label = ttk.Label(runtime_frame, text="-")
+        self.target_label = ttk.Label(runtime_frame, text="-")
+        self.mode_label = ttk.Label(runtime_frame, text="-")
+        ttk.Label(runtime_frame, text="Backend:").grid(row=0, column=0, sticky="w", padx=(8, 4), pady=3)
+        self.backend_label.grid(row=0, column=1, sticky="w", pady=3)
+        ttk.Label(runtime_frame, text="Target host:").grid(row=1, column=0, sticky="w", padx=(8, 4), pady=3)
+        self.target_label.grid(row=1, column=1, sticky="w", pady=3)
+        ttk.Label(runtime_frame, text="Режим:").grid(row=2, column=0, sticky="w", padx=(8, 4), pady=3)
+        self.mode_label.grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Button(runtime_frame, text="Обновить", command=self._refresh_runtime_info).grid(row=0, column=2, rowspan=3, padx=(6, 8), pady=3)
 
         top = ttk.Frame(container)
         top.pack(fill="x")
@@ -45,8 +69,10 @@ class WindowsInstallDialog(tk.Toplevel):
 
         actions = ttk.Frame(container)
         actions.pack(fill="x", pady=(8, 8))
-        ttk.Button(actions, text="Установить", command=self._install).pack(side="left")
-        ttk.Button(actions, text="Проверить наличие", command=self._check).pack(side="left", padx=(8, 0))
+        self.install_btn = ttk.Button(actions, text="Установить", command=self._install)
+        self.install_btn.pack(side="left")
+        self.check_btn = ttk.Button(actions, text="Проверить наличие", command=self._check)
+        self.check_btn.pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Добавить", command=self._add).pack(side="left", padx=(16, 0))
         ttk.Button(actions, text="Редактировать", command=self._edit).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Отключить/Удалить", command=self._disable_delete).pack(side="left", padx=(8, 0))
@@ -70,6 +96,19 @@ class WindowsInstallDialog(tk.Toplevel):
         self.card_text = tk.Text(right, wrap="word", state="disabled")
         self.card_text.pack(fill="both", expand=True)
         ttk.Checkbutton(container, text="Принудительная переустановка", variable=self.force_var).pack(anchor="w", pady=(8, 0))
+
+    def _refresh_runtime_info(self):
+        info = self.runtime_info_provider() or {}
+        backend = info.get("backend", "local_subprocess")
+        target_host = info.get("target_host", "localhost")
+        mode = info.get("mode", "local")
+        self.backend_label.config(text=backend)
+        self.target_label.config(text=target_host)
+        self.mode_label.config(text=mode)
+        invalid_remote = backend == "psexec" and not target_host.strip()
+        state = "disabled" if invalid_remote else "normal"
+        self.install_btn.config(state=state)
+        self.check_btn.config(state=state)
 
     def _reload_catalog(self, selected_id: str = ""):
         payload = load_catalog_payload(self.catalog_path)
@@ -157,7 +196,7 @@ class WindowsInstallDialog(tk.Toplevel):
     def _edit(self):
         item = self._selected_item()
         if not item:
-            messagebox.showwarning("Windows Deployment", "Выберите запись для редактирования", parent=self)
+            messagebox.showwarning("Установка ПО Windows", "Выберите запись для редактирования", parent=self)
             return
         dialog = WindowsPackageCardDialog(self, self.catalog_path, item=item)
         self.wait_window(dialog)
@@ -182,21 +221,23 @@ class WindowsInstallDialog(tk.Toplevel):
             else:
                 disable_windows_package(self.catalog_path, package_id)
         except WindowsCatalogError as exc:
-            messagebox.showerror("Windows Deployment", str(exc), parent=self)
+            messagebox.showerror("Установка ПО Windows", str(exc), parent=self)
             return
         self._reload_catalog()
 
     def _install(self):
+        self._refresh_runtime_info()
         item = self._selected_item()
         if not item:
-            messagebox.showwarning("Windows Deployment", "Выберите пакет", parent=self)
+            messagebox.showwarning("Установка ПО Windows", "Выберите пакет", parent=self)
             return
         if not item.get("enabled", True):
-            messagebox.showwarning("Windows Deployment", "Пакет отключён и не может быть установлен", parent=self)
+            messagebox.showwarning("Установка ПО Windows", "Пакет отключён и не может быть установлен", parent=self)
             return
         self.on_install(str(item.get("id", "")), bool(self.force_var.get()))
 
     def _check(self):
+        self._refresh_runtime_info()
         item = self._selected_item()
         if not item:
             return
