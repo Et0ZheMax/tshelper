@@ -15,6 +15,7 @@ class WindowsDeployRuntime:
     target_host: str
     timeout_sec: int
     skip_if_detected: bool
+    skip_pre_detection: bool
     prefer_system_context: bool
     psexec_path: str
 
@@ -51,6 +52,7 @@ class WindowsDeployService:
         options = DeployOptions(
             timeout_sec=max(30, int(runtime.timeout_sec or package.timeout_sec)),
             skip_if_detected=(not force_reinstall) and runtime.skip_if_detected,
+            skip_pre_detection=runtime.skip_pre_detection,
             prefer_system_context=runtime.prefer_system_context,
         )
         return engine.deploy(package=package, target_host=runtime.target_host, options=options)

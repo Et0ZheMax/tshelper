@@ -55,29 +55,39 @@ class WindowsDeployEngine:
                 installer_error=err,
             )
 
-        pre = self.backend.run_detection(package, context)
-        self.logger(f"[deploy] pre-detection {package.package_id}: detected={pre.detected}, details={pre.details}, error={pre.error or '-'}")
-        if pre.error and pre.error_kind not in {"not_found", "compare_failed"}:
-            return self._build_result(
-                package=package,
-                context=context,
-                started_at=started_at,
-                status="detection_failed",
-                pre=pre,
-                post=pre,
-                exec_result=None,
-                installer_error=pre.error,
+        if options.skip_pre_detection:
+            pre = DetectionResult(
+                detected=False,
+                details="skipped_by_operator",
+                error_kind="skipped",
+                expected_value="pre_detection",
+                current_value="skipped",
             )
-        if pre.detected and options.skip_if_detected:
-            return self._build_result(
-                package=package,
-                context=context,
-                started_at=started_at,
-                status="already_installed",
-                pre=pre,
-                post=pre,
-                exec_result=None,
-            )
+            self.logger(f"[deploy] pre-detection {package.package_id}: SKIPPED оператором (skip_pre_detection=true)")
+        else:
+            pre = self.backend.run_detection(package, context)
+            self.logger(f"[deploy] pre-detection {package.package_id}: detected={pre.detected}, details={pre.details}, error={pre.error or '-'}")
+            if pre.error and pre.error_kind not in {"not_found", "compare_failed"}:
+                return self._build_result(
+                    package=package,
+                    context=context,
+                    started_at=started_at,
+                    status="detection_failed",
+                    pre=pre,
+                    post=pre,
+                    exec_result=None,
+                    installer_error=pre.error,
+                )
+            if pre.detected and options.skip_if_detected:
+                return self._build_result(
+                    package=package,
+                    context=context,
+                    started_at=started_at,
+                    status="already_installed",
+                    pre=pre,
+                    post=pre,
+                    exec_result=None,
+                )
 
         payload_path = ""
         exec_result: ExecutionResult | None = None

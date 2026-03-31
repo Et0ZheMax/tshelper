@@ -13,7 +13,7 @@ class WindowsInstallDialog(tk.Toplevel):
         self,
         master,
         catalog_path: str,
-        on_install: Callable[[str, bool], None],
+        on_install: Callable[[str, bool, bool], None],
         on_check: Callable[[str], None],
         on_open_log: Callable[[], None],
         runtime_info_provider: Callable[[], dict[str, str]] | None = None,
@@ -33,6 +33,7 @@ class WindowsInstallDialog(tk.Toplevel):
         self.search_var = tk.StringVar()
         self.tag_var = tk.StringVar(value="all")
         self.force_var = tk.BooleanVar(value=False)
+        self.skip_pre_detection_var = tk.BooleanVar(value=False)
         self._raw_items: list[dict] = []
         self._filtered_items: list[dict] = []
         self._build_ui()
@@ -96,6 +97,11 @@ class WindowsInstallDialog(tk.Toplevel):
         self.card_text = tk.Text(right, wrap="word", state="disabled")
         self.card_text.pack(fill="both", expand=True)
         ttk.Checkbutton(container, text="Принудительная переустановка", variable=self.force_var).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(
+            container,
+            text="Пропустить проверку перед установкой",
+            variable=self.skip_pre_detection_var,
+        ).pack(anchor="w", pady=(4, 0))
 
     def _refresh_runtime_info(self):
         info = self.runtime_info_provider() or {}
@@ -234,7 +240,11 @@ class WindowsInstallDialog(tk.Toplevel):
         if not item.get("enabled", True):
             messagebox.showwarning("Установка ПО Windows", "Пакет отключён и не может быть установлен", parent=self)
             return
-        self.on_install(str(item.get("id", "")), bool(self.force_var.get()))
+        self.on_install(
+            str(item.get("id", "")),
+            bool(self.force_var.get()),
+            bool(self.skip_pre_detection_var.get()),
+        )
 
     def _check(self):
         self._refresh_runtime_info()
