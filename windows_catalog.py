@@ -18,6 +18,7 @@ from windows_catalog_models import (
     WindowsInstallType,
     WindowsPackage,
 )
+from windows_silent_presets import guess_silent_preset_from_args, normalize_silent_preset
 
 
 class WindowsCatalogError(Exception):
@@ -138,6 +139,11 @@ def validate_windows_package(raw: dict[str, Any], existing_ids: set[str] | None 
     silent_args = raw.get("silent_args", [])
     if not isinstance(silent_args, list) or not all(isinstance(arg, str) for arg in silent_args):
         raise WindowsCatalogValidationError("silent_args должен быть списком строк")
+    silent_preset_raw = str(raw.get("silent_preset", "")).strip().lower()
+    if install_type == "exe":
+        silent_preset = normalize_silent_preset(silent_preset_raw or guess_silent_preset_from_args(install_type, silent_args), install_type=install_type)
+    else:
+        silent_preset = "custom"
 
     architecture = str(raw.get("architecture", "any")).strip().lower()
     if architecture not in _SUPPORTED_ARCH:
@@ -163,6 +169,7 @@ def validate_windows_package(raw: dict[str, Any], existing_ids: set[str] | None 
         timeout_sec=timeout_sec,
         source=_validate_source(raw.get("source", {})),
         silent_args=[arg for arg in silent_args if arg.strip()],
+        silent_preset=silent_preset,
         detection=_validate_detection(raw.get("detection", {})),
         execution_defaults=raw.get("execution_defaults", {}) if isinstance(raw.get("execution_defaults", {}), dict) else {},
         package_version=str(raw.get("package_version", raw.get("version", ""))).strip(),

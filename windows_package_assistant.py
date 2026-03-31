@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+from windows_silent_presets import infer_exe_silent_preset, preset_args_for_package
 
 _INSTALL_BY_EXT = {
     ".msi": "msi",
@@ -78,6 +79,7 @@ def normalize_package_id(raw_title: str) -> str:
 
 def analyze_installer(path: str) -> AutofillResult:
     insight = _build_insight(path)
+    silent_preset, silent_args = _default_silent_behavior(insight)
     fields: dict[str, Any] = {
         "id": insight.normalized_id,
         "title": insight.title,
@@ -88,7 +90,8 @@ def analyze_installer(path: str) -> AutofillResult:
             "kind": insight.source_kind,
             "value": insight.path,
         },
-        "silent_args": _default_silent_args(insight.install_type),
+        "silent_args": silent_args,
+        "silent_preset": silent_preset,
         "reboot_behavior": "auto_detect",
         "requires_admin": True,
     }
@@ -103,7 +106,10 @@ def analyze_installer(path: str) -> AutofillResult:
     else:
         notes.append("Часть полей заполнена эвристически по имени файла.")
     if insight.install_type == "exe":
-        notes.append("Для EXE silent_args оставлены пустыми: уточните параметры у вендора.")
+        notes.append(
+            "Для EXE quiet preset выбран эвристически (best effort). "
+            "Перед unattended remote install обязательно проверьте silent args."
+        )
 
     return AutofillResult(fields=fields, detection_suggestions=suggestions, notes=notes)
 
@@ -239,10 +245,13 @@ def _architecture_from_template(template: str) -> str:
     return "any"
 
 
-def _default_silent_args(install_type: str) -> list[str]:
-    if install_type == "msi":
-        return []
-    return []
+def _default_silent_behavior(insight: InstallerInsight) -> tuple[str, list[str]]:
+    if insight.install_type == "msi":
+        return "custom", []
+    if insight.install_type == "exe":
+        preset, _reason = infer_exe_silent_preset(insight.path, title=insight.title)
+        return preset, preset_args_for_package("exe", preset, current_args=[])
+    return "custom", []
 
 
 def _build_detection_suggestions(insight: InstallerInsight) -> list[DetectionSuggestion]:
