@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from windows_catalog import WindowsCatalogError, WindowsCatalogValidationError, upsert_windows_package
 from windows_package_assistant import DetectionSuggestion, analyze_installer, normalize_package_id, suggest_detection_from_payload
+from windows_silent_presets import EXE_SILENT_PRESET_ORDER, guess_silent_preset_from_args, normalize_silent_preset, preset_args_for_package
 
 
 class WindowsPackageCardDialog(tk.Toplevel):
@@ -19,6 +20,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
         self._assistant_notes: list[str] = []
         self._detection_suggestions: list[DetectionSuggestion] = []
         self._detection_suggestion_var = tk.StringVar(value="")
+        self._syncing_silent_fields = False
 
         self.title("Карточка Windows-пакета")
         self.transient(master)
@@ -54,6 +56,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
             "source_kind": tk.StringVar(value=self.item.get("source", {}).get("kind", "file_path")),
             "source_value": tk.StringVar(value=self.item.get("source", {}).get("value", "")),
             "silent_args_json": tk.StringVar(value=json.dumps(silent_args, ensure_ascii=False)),
+            "silent_preset": tk.StringVar(value=self._resolve_initial_silent_preset()),
             "architecture": tk.StringVar(value=self.item.get("architecture", "any")),
             "package_version": tk.StringVar(value=self.item.get("package_version", self.item.get("version", ""))),
             "reboot_behavior": tk.StringVar(value=self.item.get("reboot_behavior", "auto_detect")),
@@ -111,7 +114,12 @@ class WindowsPackageCardDialog(tk.Toplevel):
         ttk.Button(helper_actions, text="Применить вариант", command=self._apply_selected_detection).pack(side="left", padx=(8, 0))
         row.counter += 1
 
-        row("silent_args (JSON-массив)", "silent_args_json")
+        row("silent_preset", "silent_preset", EXE_SILENT_PRESET_ORDER)
+        self.silent_args_label = ttk.Label(container, text="silent_args (JSON-массив)")
+        self.silent_args_label.grid(row=row.counter, column=0, sticky="w", pady=3)
+        self.silent_args_entry = ttk.Entry(container, textvariable=self.vars["silent_args_json"])
+        self.silent_args_entry.grid(row=row.counter, column=1, columnspan=2, sticky="ew", pady=3)
+        row.counter += 1
         row("architecture", "architecture", ["x64", "x86", "any"])
         row("package_version", "package_version")
         row("reboot_behavior", "reboot_behavior", ["auto_detect", "never", "always"])
@@ -149,7 +157,10 @@ class WindowsPackageCardDialog(tk.Toplevel):
         for key, var in self.vars.items():
             if isinstance(var, tk.StringVar):
                 var.trace_add("write", lambda *_args, _k=key: self._refresh_preview())
+        self.vars["silent_preset"].trace_add("write", lambda *_args: self._on_silent_preset_changed())
+        self.vars["install_type"].trace_add("write", lambda *_args: self._sync_silent_controls_for_install_type())
         self.vars["detection_type"].trace_add("write", lambda *_args: self._refresh_preview())
+        self._sync_silent_controls_for_install_type()
         self._refresh_preview()
 
         buttons = ttk.Frame(container)
@@ -243,6 +254,9 @@ class WindowsPackageCardDialog(tk.Toplevel):
             self.vars["source_value"].set(str(source["value"]))
         if "silent_args" in fields:
             self.vars["silent_args_json"].set(json.dumps(fields["silent_args"], ensure_ascii=False))
+        if "silent_preset" in fields:
+            self.vars["silent_preset"].set(normalize_silent_preset(str(fields["silent_preset"]), install_type=self.vars["install_type"].get()))
+        self._sync_silent_controls_for_install_type()
 
     def _apply_detection_suggestion(self, suggestion: DetectionSuggestion):
         detection = suggestion.detection
@@ -266,12 +280,14 @@ class WindowsPackageCardDialog(tk.Toplevel):
 
     def _build_payload(self) -> dict:
         silent_args = self._parse_json_args(self.vars["silent_args_json"].get(), "silent_args")
+        install_type = self.vars["install_type"].get().strip()
+        silent_preset = normalize_silent_preset(self.vars["silent_preset"].get(), install_type=install_type)
         detection_command = self._parse_json_args(self.vars["detection_command_json"].get(), "detection.command")
         return {
             "id": self.vars["id"].get().strip(),
             "title": self.vars["title"].get().strip(),
             "os_family": "windows",
-            "install_type": self.vars["install_type"].get().strip(),
+            "install_type": install_type,
             "description": self.vars["description"].get().strip(),
             "tags": self.vars["tags"].get().strip(),
             "enabled": bool(self.vars["enabled"].get()),
@@ -282,6 +298,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
                 "value": self.vars["source_value"].get().strip(),
             },
             "silent_args": silent_args,
+            "silent_preset": silent_preset,
             "architecture": self.vars["architecture"].get().strip(),
             "package_version": self.vars["package_version"].get().strip(),
             "reboot_behavior": self.vars["reboot_behavior"].get().strip(),
@@ -301,6 +318,9 @@ class WindowsPackageCardDialog(tk.Toplevel):
         try:
             payload = self._build_payload()
             text = json.dumps(payload, ensure_ascii=False, indent=2)
+            install_type = str(payload.get("install_type", "")).strip().lower()
+            silent_preset = str(payload.get("silent_preset", "")).strip().lower()
+            silent_args = payload.get("silent_args", [])
             detection_type = payload.get("detection", {}).get("type")
             if detection_type == "powershell_script":
                 warning_text = "Внимание: powershell_script — доверенный сценарий, используйте только проверенные команды."
@@ -308,6 +328,11 @@ class WindowsPackageCardDialog(tk.Toplevel):
                 warning_text = "Detection по ProductCode выбран: path/value_name/operator не используются."
             elif detection_type == "file_exists":
                 warning_text = "Detection file_exists требует корректный путь к файлу."
+            if install_type == "exe" and (silent_preset in {"auto", "generic_silent"} or not silent_args):
+                warning_text = (
+                    "Для EXE quiet args подобраны эвристически и могут не подойти для unattended remote install. "
+                    "Проверьте preset/аргументы в тестовой среде."
+                )
         except Exception as exc:
             text = f"Ошибка preview: {exc}"
 
@@ -318,6 +343,49 @@ class WindowsPackageCardDialog(tk.Toplevel):
         self.preview.delete("1.0", tk.END)
         self.preview.insert("1.0", text)
         self.preview.config(state="disabled")
+
+    def _resolve_initial_silent_preset(self) -> str:
+        install_type = str(self.item.get("install_type", "exe")).strip().lower()
+        raw_preset = str(self.item.get("silent_preset", "")).strip().lower()
+        if raw_preset:
+            return normalize_silent_preset(raw_preset, install_type=install_type)
+        return guess_silent_preset_from_args(install_type, self.item.get("silent_args", []))
+
+    def _on_silent_preset_changed(self):
+        if self._syncing_silent_fields:
+            return
+        install_type = self.vars["install_type"].get().strip().lower()
+        if install_type != "exe":
+            self._refresh_preview()
+            return
+        preset = normalize_silent_preset(self.vars["silent_preset"].get(), install_type=install_type)
+        if preset == "custom":
+            self._sync_silent_controls_for_install_type()
+            self._refresh_preview()
+            return
+        self._syncing_silent_fields = True
+        try:
+            new_args = preset_args_for_package("exe", preset, current_args=self._parse_json_args(self.vars["silent_args_json"].get(), "silent_args"))
+            self.vars["silent_args_json"].set(json.dumps(new_args, ensure_ascii=False))
+        except ValueError:
+            fallback_args = preset_args_for_package("exe", preset, current_args=[])
+            self.vars["silent_args_json"].set(json.dumps(fallback_args, ensure_ascii=False))
+        finally:
+            self._syncing_silent_fields = False
+        self._sync_silent_controls_for_install_type()
+        self._refresh_preview()
+
+    def _sync_silent_controls_for_install_type(self):
+        install_type = self.vars["install_type"].get().strip().lower()
+        if install_type != "exe":
+            self.vars["silent_preset"].set("custom")
+            self.silent_args_entry.configure(state="normal")
+            return
+        preset = normalize_silent_preset(self.vars["silent_preset"].get(), install_type=install_type)
+        if preset != self.vars["silent_preset"].get():
+            self.vars["silent_preset"].set(preset)
+            return
+        self.silent_args_entry.configure(state="normal" if preset == "custom" else "readonly")
 
     def _save(self):
         try:

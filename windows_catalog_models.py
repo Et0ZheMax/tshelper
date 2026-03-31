@@ -74,6 +74,7 @@ class WindowsPackage:
     timeout_sec: int = 1200
     source: SourceConfig = field(default_factory=lambda: SourceConfig(SourceKind.FILE_PATH, ""))
     silent_args: list[str] = field(default_factory=list)
+    silent_preset: str = "auto"
     detection: DetectionConfig = field(default_factory=lambda: DetectionConfig(DetectionType.FILE_EXISTS))
     execution_defaults: dict[str, Any] = field(default_factory=dict)
     package_version: str = ""

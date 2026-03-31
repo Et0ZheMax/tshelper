@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from windows_catalog_models import BackendContext, DeployOptions, DeployResult, DetectionResult, ExecutionResult, WindowsPackage
+from windows_catalog_models import BackendContext, DeployOptions, DeployResult, DetectionResult, ExecutionResult, WindowsInstallType, WindowsPackage
 from windows_execution_backends import BackendError, WindowsExecutionBackend
 
 SUCCESS_CODES = {0}
@@ -196,6 +196,17 @@ class WindowsDeployEngine:
         ended = time.time()
         exit_code = exec_result.exit_code if exec_result else None
         reboot_required = exit_code in REBOOT_CODES if exit_code is not None else False
+        timeout_hint = ""
+        if status == "timeout" and package.install_type == WindowsInstallType.EXE:
+            timeout_hint = (
+                " Установщик EXE не завершился в отведённое время. "
+                "Возможная причина: quiet arguments не подошли для данного инсталлятора. "
+                "Попробуйте другой silent preset или custom-аргументы."
+            )
+            self.logger(f"[deploy] hint: {timeout_hint.strip()}")
+        installer_error_text = (installer_error or "").strip()
+        if timeout_hint:
+            installer_error_text = f"{installer_error_text}\n{timeout_hint}".strip()
         return DeployResult(
             status=status,
             start_time=started_at,
@@ -211,7 +222,7 @@ class WindowsDeployEngine:
             stdout=exec_result.stdout if exec_result else "",
             stderr=exec_result.stderr if exec_result else "",
             transport_error=exec_result.transport_error if exec_result else "",
-            installer_error=installer_error,
+            installer_error=installer_error_text,
             detection_details_before=f"{pre.details}; error={pre.error or '-'}; current={pre.current_value or '-'}",
             detection_details_after=f"{post.details}; error={post.error or '-'}; current={post.current_value or '-'}",
             payload_path_used=exec_result.payload_path_used if exec_result else "",
