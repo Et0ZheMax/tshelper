@@ -8,6 +8,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
 
+from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
+from ui_operation_status import OperationStatusStrip
+
 # --- Версия приложения ---
 VERSION = "v5.0"
 
@@ -1130,8 +1133,15 @@ class LogViewer(tk.Toplevel):
         self.settings = settings
         self.log_path = log_path
         self.title("Просмотр логов")
-        geom = self.settings.get_setting("log_window_geometry")
-        if geom: self.geometry(geom)
+        apply_persisted_geometry(
+            self,
+            self.settings,
+            "log_window_geometry",
+            "900x620+260+120",
+            min_width=760,
+            min_height=460,
+        )
+        self._save_geometry = bind_geometry_persistence(self, self.settings, "log_window_geometry")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.level_var = tk.StringVar(value="Все")
@@ -1171,7 +1181,7 @@ class LogViewer(tk.Toplevel):
         self._schedule_auto_reload()
 
     def on_close(self):
-        self.settings.set_setting("log_window_geometry", self.geometry())
+        self._save_geometry()
         if self._auto_job:
             try:
                 self.after_cancel(self._auto_job)
@@ -1287,6 +1297,81 @@ class LogViewer(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Сохранение", f"Не удалось сохранить файл: {e}")
 
+
+class OperationLogWindow(tk.Toplevel):
+    def __init__(self, master, settings, title="Лог операции"):
+        super().__init__(master)
+        self.settings = settings
+        self.title(title)
+        apply_persisted_geometry(
+            self,
+            self.settings,
+            "action_log_window_geometry",
+            "820x500+240+140",
+            min_width=720,
+            min_height=420,
+        )
+        self._save_geometry = bind_geometry_persistence(self, self.settings, "action_log_window_geometry")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        container = ttk.Frame(self, padding=10)
+        container.pack(fill="both", expand=True)
+        container.rowconfigure(1, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        self.status_strip = OperationStatusStrip(container)
+        self.status_strip.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.status_strip.start("Подготовка")
+
+        text_frame = ttk.Frame(container)
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+        self.text_widget = tk.Text(text_frame, wrap="word")
+        self.text_widget.grid(row=0, column=0, sticky="nsew")
+        yscroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.text_widget.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
+        self.text_widget.configure(yscrollcommand=yscroll.set)
+
+    def append_line(self, message: str):
+        self.text_widget.insert("end", f"{message}\n")
+        self.text_widget.see("end")
+        stage = self._extract_stage(message)
+        if stage:
+            if stage == "Завершено":
+                self.status_strip.mark_done()
+            elif stage == "Ошибка":
+                self.status_strip.mark_error()
+            else:
+                self.status_strip.set_stage(stage)
+
+    def _extract_stage(self, message: str):
+        lower = (message or "").lower()
+        mapping = [
+            ("подготов", "Подготовка"),
+            ("pre-detection", "Pre-check"),
+            ("pre-check", "Pre-check"),
+            ("копирован", "Копирование payload"),
+            ("payload", "Копирование payload"),
+            ("запуск", "Запуск установки"),
+            ("installer", "Запуск установки"),
+            ("post-detection", "Post-check"),
+            ("post-check", "Post-check"),
+            ("финальный статус", "Завершено"),
+            ("успешно", "Завершено"),
+            ("ошибка", "Ошибка"),
+            ("error", "Ошибка"),
+        ]
+        for token, stage in mapping:
+            if token in lower:
+                return stage
+        return None
+
+    def _on_close(self):
+        self._save_geometry()
+        self.destroy()
+
+
 class MainWindow:
     def __init__(self, master):
         self.master = master
@@ -1298,8 +1383,15 @@ class MainWindow:
             except: pass
 
         self.settings = SettingsManager(CONFIG_FILE)
-        geom = self.settings.get_setting("window_geometry","1100x720+200+100")
-        self.master.geometry(geom)
+        apply_persisted_geometry(
+            self.master,
+            self.settings,
+            "window_geometry",
+            "1100x720+200+100",
+            min_width=980,
+            min_height=640,
+        )
+        self._save_main_geometry = bind_geometry_persistence(self.master, self.settings, "window_geometry")
         self.tray_icon = None
         self.mini_widget = None
         self._ignore_unmap = False
@@ -1561,16 +1653,12 @@ class MainWindow:
         return catalog_path
 
     def open_action_log_window(self, title="Remote Ops Log"):
-        window = tk.Toplevel(self.master)
-        window.title(title)
-        window.geometry("760x420")
-        text_widget = tk.Text(window, wrap="word")
-        text_widget.pack(fill="both", expand=True)
+        window = OperationLogWindow(self.master, self.settings, title=title)
 
         def append_callback(message: str):
             def do_append():
-                text_widget.insert("end", f"{message}\n")
-                text_widget.see("end")
+                if window.winfo_exists():
+                    window.append_line(message)
             self.master.after(0, do_append)
 
         return window, append_callback
@@ -3544,9 +3632,16 @@ $items = foreach ($u in $users) {{
     # --------- Settings ----------
     def open_settings(self):
         win = tk.Toplevel(self.master); win.title("Настройки")
-        geom = self.settings.get_setting("settings_window_geometry","900x620+250+150")
-        win.geometry(geom)
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w,"settings_window_geometry"))
+        apply_persisted_geometry(
+            win,
+            self.settings,
+            "settings_window_geometry",
+            "900x620+250+150",
+            min_width=820,
+            min_height=560,
+        )
+        _save_settings_geo = bind_geometry_persistence(win, self.settings, "settings_window_geometry")
+        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "settings_window_geometry", saver=_save_settings_geo))
         nb = ttk.Notebook(win); nb.pack(fill="both", expand=True, padx=10, pady=10)
 
         can_show_secrets = self.settings.can_show_secrets()
@@ -3892,8 +3987,11 @@ $items = foreach ($u in $users) {{
 
         ttk.Button(win, text="Сохранить", command=save_all).pack(pady=8)
 
-    def _close_save_geo(self, window, key):
-        self.settings.set_setting(key, window.geometry())
+    def _close_save_geo(self, window, key, saver=None):
+        if saver:
+            saver()
+        else:
+            self.settings.set_setting(key, window.geometry())
         window.destroy()
 
     # --------- Preflight ----------
@@ -3988,7 +4086,7 @@ $items = foreach ($u in $users) {{
 
     def _perform_exit(self):
         self.master.update_idletasks()
-        self.settings.set_setting("window_geometry", self.master.geometry())
+        self._save_main_geometry()
         self._hide_tray_icon()
         self._destroy_mini_widget()
         try: self.executor.shutdown(wait=False)
@@ -5001,7 +5099,9 @@ Write-Output "OK"
 
         def on_submit(item_id: str, force_reinstall: bool):
             log_window, append_log = self.app.open_action_log_window(f"Установка ПО — {self.user.get('name', '?')}")
+            append_log("Подготовка")
             append_log(f"Старт установки ПО {item_id} для {self.user.get('name', '?')}")
+            append_log("Pre-check")
 
             def run_install():
                 def work():
@@ -5026,16 +5126,19 @@ Write-Output "OK"
                     )
 
                 def on_success(result):
+                    append_log("Post-check")
                     append_log(result.summary)
                     if getattr(result, "needs_sudo_repair", False):
                         self._handle_sudo_repair_flow(result, catalog, item_id, force_reinstall, append_log, run_install)
                         return
+                    append_log("Завершено")
                     self._log_action(f"Remote install: {item_id} -> {'OK' if result.success else 'ERROR'}")
                     log_action(f"Remote install {self.user.get('name', '?')}: {item_id} ({'OK' if result.success else 'ERROR'})")
                     self._show_action_result(result, title="Установка ПО")
 
                 def on_error(error):
                     append_log(f"Ошибка: {error}")
+                    append_log("Ошибка")
                     log_message(f"Установка ПО ошибка: {error}")
                     messagebox.showerror("Установка ПО", str(error))
 
@@ -5044,7 +5147,7 @@ Write-Output "OK"
             run_install()
 
         from remote_install_dialog import SoftwareInstallDialog
-        SoftwareInstallDialog(self.app.master, catalog, on_submit)
+        SoftwareInstallDialog(self.app.master, catalog, on_submit, settings=self.app.settings)
 
     def install_windows_software_dialog(self):
         try:
@@ -5089,7 +5192,11 @@ Write-Output "OK"
             self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
 
         def on_check(package_id: str):
-            try:
+            _log_window, append_log = self.app.open_action_log_window(f"Windows Detection — {self.user.get('name', '?')}")
+            append_log("Подготовка проверки detection")
+            append_log("Pre-check")
+
+            def work():
                 from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
                 runtime_raw = _resolve_windows_runtime()
@@ -5102,23 +5209,36 @@ Write-Output "OK"
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
                 )
-                service = WindowsDeployService(catalog_path=catalog_path)
+                service = WindowsDeployService(catalog_path=catalog_path, logger=append_log)
                 result, backend_name = service.check_package(package_id=package_id, runtime=runtime)
+                return result, backend_name, runtime
+
+            def on_success(payload):
+                result, backend_name, runtime = payload
                 state = "обнаружен" if result.detected else "не обнаружен"
                 details = result.details
                 if result.error:
                     details += f"\nОшибка: {result.error}"
+                append_log("Post-check")
+                append_log("Завершено")
                 messagebox.showinfo(
                     "Windows Detection",
                     f"Backend: {backend_name}\nHost: {runtime.target_host or '-'}\nПакет {package_id}: {state}\n{details}",
                     parent=self.app.master,
                 )
-            except Exception as exc:
+
+            def on_error(exc):
+                append_log(f"Ошибка: {exc}")
+                append_log("Ошибка")
                 messagebox.showerror("Windows Detection", str(exc), parent=self.app.master)
+
+            self.app.run_background(work, on_success, on_error)
 
         def on_install(package_id: str, force_reinstall: bool, skip_pre_detection: bool):
             _log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
+            append_log("Подготовка")
             append_log(f"Старт Windows deployment: {package_id}")
+            append_log("Pre-check")
             if skip_pre_detection:
                 append_log("Оператор включил пропуск pre-detection перед установкой.")
 
@@ -5136,13 +5256,17 @@ Write-Output "OK"
                     psexec_path=runtime_raw["psexec_path"],
                 )
                 service = WindowsDeployService(catalog_path=catalog_path, logger=append_log)
+                append_log("Копирование payload")
+                append_log("Запуск установки")
                 return service.install_package(package_id=package_id, force_reinstall=force_reinstall, runtime=runtime)
 
             def on_success(result):
+                append_log("Post-check")
                 append_log(f"Финальный статус: {result.status}")
                 append_log(f"Exit code: {result.installer_exit_code}")
                 append_log(f"Detection до: {result.detection_details_before}")
                 append_log(f"Detection после: {result.detection_details_after}")
+                append_log("Завершено")
                 log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
                 if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "installed_success_with_warnings"}:
                     messagebox.showinfo("Windows Deployment", f"Статус: {result.status}\nХост: {result.target_host}", parent=self.app.master)
@@ -5151,6 +5275,7 @@ Write-Output "OK"
 
             def on_error(error):
                 append_log(f"Ошибка: {error}")
+                append_log("Ошибка")
                 log_message(f"Windows deployment ошибка: {error}")
                 messagebox.showerror("Windows Deployment", str(error), parent=self.app.master)
 
@@ -5164,6 +5289,7 @@ Write-Output "OK"
             on_check=on_check,
             on_open_log=on_open_log,
             runtime_info_provider=runtime_info_provider,
+            settings=self.app.settings,
         )
 
     def _handle_sudo_repair_flow(self, result, catalog, item_id: str, force_reinstall: bool, append_log, retry_install_callback):

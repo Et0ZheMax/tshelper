@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
 
+from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from windows_catalog import WindowsCatalogError, delete_windows_package, disable_windows_package, load_catalog_payload
 from windows_package_card_dialog import WindowsPackageCardDialog
 
@@ -17,8 +18,10 @@ class WindowsInstallDialog(tk.Toplevel):
         on_check: Callable[[str], None],
         on_open_log: Callable[[], None],
         runtime_info_provider: Callable[[], dict[str, str]] | None = None,
+        settings=None,
     ):
         super().__init__(master)
+        self.settings = settings
         self.catalog_path = catalog_path
         self.on_install = on_install
         self.on_check = on_check
@@ -26,9 +29,23 @@ class WindowsInstallDialog(tk.Toplevel):
         self.runtime_info_provider = runtime_info_provider or (lambda: {})
 
         self.title("Установка ПО Windows")
-        self.geometry("1000x620")
+        if self.settings is not None:
+            apply_persisted_geometry(
+                self,
+                self.settings,
+                "windows_install_dialog_geometry",
+                "1000x620+220+120",
+                min_width=900,
+                min_height=560,
+            )
+            self._save_geometry = bind_geometry_persistence(self, self.settings, "windows_install_dialog_geometry")
+        else:
+            self.geometry("1000x620")
+            self.minsize(900, 560)
+            self._save_geometry = lambda: None
         self.transient(master)
         self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.search_var = tk.StringVar()
         self.tag_var = tk.StringVar(value="all")
@@ -252,3 +269,7 @@ class WindowsInstallDialog(tk.Toplevel):
         if not item:
             return
         self.on_check(str(item.get("id", "")))
+
+    def _on_close(self):
+        self._save_geometry()
+        self.destroy()
