@@ -17,8 +17,10 @@ class WindowsPackageCardDialog(tk.Toplevel):
         self.title("Карточка Windows-пакета")
         self.transient(master)
         self.grab_set()
-        self.geometry("760x700")
+        self.geometry("820x760")
 
+        silent_args = self.item.get("silent_args", [])
+        detection_command = self.item.get("detection", {}).get("command", [])
         self.vars = {
             "id": tk.StringVar(value=self.item.get("id", "")),
             "title": tk.StringVar(value=self.item.get("title", "")),
@@ -30,7 +32,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
             "timeout_sec": tk.StringVar(value=str(self.item.get("timeout_sec", 1200))),
             "source_kind": tk.StringVar(value=self.item.get("source", {}).get("kind", "file_path")),
             "source_value": tk.StringVar(value=self.item.get("source", {}).get("value", "")),
-            "silent_args": tk.StringVar(value=" ".join(self.item.get("silent_args", []))),
+            "silent_args_json": tk.StringVar(value=json.dumps(silent_args, ensure_ascii=False)),
             "architecture": tk.StringVar(value=self.item.get("architecture", "any")),
             "package_version": tk.StringVar(value=self.item.get("package_version", self.item.get("version", ""))),
             "reboot_behavior": tk.StringVar(value=self.item.get("reboot_behavior", "auto_detect")),
@@ -39,7 +41,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
             "detection_value_name": tk.StringVar(value=self.item.get("detection", {}).get("value_name", "")),
             "detection_operator": tk.StringVar(value=self.item.get("detection", {}).get("operator", "==")),
             "detection_value": tk.StringVar(value=self.item.get("detection", {}).get("value", "")),
-            "detection_command": tk.StringVar(value=" ".join(self.item.get("detection", {}).get("command", []))),
+            "detection_command_json": tk.StringVar(value=json.dumps(detection_command, ensure_ascii=False)),
             "detection_script": tk.StringVar(value=self.item.get("detection", {}).get("script", "")),
         }
         self._build_ui()
@@ -53,10 +55,11 @@ class WindowsPackageCardDialog(tk.Toplevel):
             idx = row.counter
             ttk.Label(container, text=label).grid(row=idx, column=0, sticky="w", pady=3)
             if values is None:
-                ttk.Entry(container, textvariable=self.vars[key]).grid(row=idx, column=1, sticky="ew", pady=3)
+                ttk.Entry(container, textvariable=self.vars[key]).grid(row=idx, column=1, columnspan=2, sticky="ew", pady=3)
             else:
-                ttk.Combobox(container, textvariable=self.vars[key], values=values, state="readonly").grid(row=idx, column=1, sticky="ew", pady=3)
+                ttk.Combobox(container, textvariable=self.vars[key], values=values, state="readonly").grid(row=idx, column=1, columnspan=2, sticky="ew", pady=3)
             row.counter += 1
+
         row.counter = 0
 
         row("id", "id")
@@ -73,7 +76,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
         ttk.Button(container, text="Файл…", command=self._pick_source).grid(row=src_row, column=2, sticky="w", padx=(6, 0))
         row.counter += 1
 
-        row("silent_args", "silent_args")
+        row("silent_args (JSON-массив)", "silent_args_json")
         row("architecture", "architecture", ["x64", "x86", "any"])
         row("package_version", "package_version")
         row("reboot_behavior", "reboot_behavior", ["auto_detect", "never", "always"])
@@ -82,7 +85,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
         row("detection.value_name", "detection_value_name")
         row("detection.operator", "detection_operator", ["==", "!=", ">=", "<=", ">", "<"])
         row("detection.value", "detection_value")
-        row("detection.command", "detection_command")
+        row("detection.command (JSON-массив)", "detection_command_json")
         row("detection.script", "detection_script")
 
         check_frame = ttk.Frame(container)
@@ -91,10 +94,14 @@ class WindowsPackageCardDialog(tk.Toplevel):
         ttk.Checkbutton(check_frame, text="requires_admin", variable=self.vars["requires_admin"]).pack(side="left")
         row.counter += 1
 
-        preview_frame = ttk.LabelFrame(container, text="Preview")
+        self.warning_label = ttk.Label(container, text="", foreground="#b56d00")
+        self.warning_label.grid(row=row.counter, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        row.counter += 1
+
+        preview_frame = ttk.LabelFrame(container, text="Нормализованный preview")
         preview_frame.grid(row=row.counter, column=0, columnspan=3, sticky="nsew", pady=(8, 4))
         preview_frame.columnconfigure(0, weight=1)
-        self.preview = tk.Text(preview_frame, height=8, wrap="word", state="disabled")
+        self.preview = tk.Text(preview_frame, height=10, wrap="word", state="disabled")
         self.preview.grid(row=0, column=0, sticky="nsew")
         row.counter += 1
 
@@ -113,8 +120,18 @@ class WindowsPackageCardDialog(tk.Toplevel):
         if selected:
             self.vars["source_value"].set(selected)
 
+    def _parse_json_args(self, raw_text: str, field_name: str) -> list[str]:
+        try:
+            data = json.loads(raw_text.strip() or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{field_name}: ожидается JSON-массив строк") from exc
+        if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
+            raise ValueError(f"{field_name}: ожидается JSON-массив строк")
+        return [item for item in data if item.strip()]
+
     def _build_payload(self) -> dict:
-        detection_command = self.vars["detection_command"].get().strip()
+        silent_args = self._parse_json_args(self.vars["silent_args_json"].get(), "silent_args")
+        detection_command = self._parse_json_args(self.vars["detection_command_json"].get(), "detection.command")
         return {
             "id": self.vars["id"].get().strip(),
             "title": self.vars["title"].get().strip(),
@@ -129,7 +146,7 @@ class WindowsPackageCardDialog(tk.Toplevel):
                 "kind": self.vars["source_kind"].get().strip(),
                 "value": self.vars["source_value"].get().strip(),
             },
-            "silent_args": [arg for arg in self.vars["silent_args"].get().split() if arg],
+            "silent_args": silent_args,
             "architecture": self.vars["architecture"].get().strip(),
             "package_version": self.vars["package_version"].get().strip(),
             "reboot_behavior": self.vars["reboot_behavior"].get().strip(),
@@ -139,21 +156,32 @@ class WindowsPackageCardDialog(tk.Toplevel):
                 "value_name": self.vars["detection_value_name"].get().strip(),
                 "operator": self.vars["detection_operator"].get().strip(),
                 "value": self.vars["detection_value"].get().strip(),
-                "command": [arg for arg in detection_command.split() if arg],
+                "command": detection_command,
                 "script": self.vars["detection_script"].get().strip(),
             },
         }
 
     def _refresh_preview(self):
-        payload = self._build_payload()
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        warning_text = ""
+        try:
+            payload = self._build_payload()
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            if payload.get("detection", {}).get("type") == "powershell_script":
+                warning_text = "Внимание: powershell_script — доверенный сценарий, используйте только проверенные команды."
+        except Exception as exc:
+            text = f"Ошибка preview: {exc}"
+        self.warning_label.config(text=warning_text)
         self.preview.config(state="normal")
         self.preview.delete("1.0", tk.END)
         self.preview.insert("1.0", text)
         self.preview.config(state="disabled")
 
     def _save(self):
-        payload = self._build_payload()
+        try:
+            payload = self._build_payload()
+        except ValueError as exc:
+            messagebox.showerror("Карточка Windows-пакета", str(exc), parent=self)
+            return
         current_id = str(self.item.get("id", "")).strip()
         try:
             self.result = upsert_windows_package(self.catalog_path, payload, current_id=current_id)

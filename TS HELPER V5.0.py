@@ -5054,53 +5054,84 @@ Write-Output "OK"
             messagebox.showerror("Windows Deployment", str(exc))
             return
 
+        def _resolve_windows_runtime():
+            backend_name = str(self.app.settings.get_setting("windows_default_backend", "local_subprocess") or "local_subprocess").strip()
+            prefer_system_context = bool(self.app.settings.get_setting("windows_prefer_system_context", False))
+            timeout_sec = max(30, int(self.app.settings.get_setting("windows_default_timeout_sec", 1200) or 1200))
+            skip_if_detected = bool(self.app.settings.get_setting("windows_skip_if_detected", True))
+            psexec_path = str(self.app.settings.get_setting("windows_psexec_path", "C:\\Tools\\PsExec64.exe") or "").strip()
+            if backend_name == "psexec":
+                target_host = (self.user.get("pc_name") or "").strip()
+                mode = "remote / psexec"
+            else:
+                target_host = "localhost"
+                mode = "local"
+            return {
+                "backend_name": backend_name,
+                "target_host": target_host,
+                "prefer_system_context": prefer_system_context,
+                "timeout_sec": timeout_sec,
+                "skip_if_detected": skip_if_detected,
+                "psexec_path": psexec_path,
+                "mode": mode,
+            }
+
+        def runtime_info_provider():
+            runtime = _resolve_windows_runtime()
+            return {
+                "backend": runtime["backend_name"],
+                "target_host": runtime["target_host"],
+                "mode": f"{runtime['mode']} / {'SYSTEM' if runtime['prefer_system_context'] else 'user context'}",
+            }
+
         def on_open_log():
             self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
 
         def on_check(package_id: str):
             try:
-                from windows_catalog import WindowsSoftwareCatalog
-                from windows_detection import run_detection
+                from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
-                catalog = WindowsSoftwareCatalog.load(catalog_path)
-                package = catalog.get(package_id)
-                result = run_detection(package.detection, timeout_sec=60)
+                runtime_raw = _resolve_windows_runtime()
+                runtime = WindowsDeployRuntime(
+                    backend_name=runtime_raw["backend_name"],
+                    target_host=runtime_raw["target_host"],
+                    timeout_sec=runtime_raw["timeout_sec"],
+                    skip_if_detected=runtime_raw["skip_if_detected"],
+                    prefer_system_context=runtime_raw["prefer_system_context"],
+                    psexec_path=runtime_raw["psexec_path"],
+                )
+                service = WindowsDeployService(catalog_path=catalog_path)
+                result, backend_name = service.check_package(package_id=package_id, runtime=runtime)
                 state = "обнаружен" if result.detected else "не обнаружен"
                 details = result.details
                 if result.error:
                     details += f"\nОшибка: {result.error}"
-                messagebox.showinfo("Windows Detection", f"Пакет {package_id}: {state}\n{details}", parent=self.app.master)
+                messagebox.showinfo(
+                    "Windows Detection",
+                    f"Backend: {backend_name}\nHost: {runtime.target_host or '-'}\nПакет {package_id}: {state}\n{details}",
+                    parent=self.app.master,
+                )
             except Exception as exc:
                 messagebox.showerror("Windows Detection", str(exc), parent=self.app.master)
 
         def on_install(package_id: str, force_reinstall: bool):
-            log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
+            _log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
             append_log(f"Старт Windows deployment: {package_id}")
 
             def work():
-                from windows_catalog import WindowsSoftwareCatalog
-                from windows_deploy_engine import WindowsDeployEngine
-                from windows_execution_backends import LocalSubprocessBackend, PsExecBackend
+                from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
-                catalog = WindowsSoftwareCatalog.load(catalog_path)
-                package = catalog.get(package_id)
-                package.timeout_sec = max(30, int(self.app.settings.get_setting("windows_default_timeout_sec", package.timeout_sec) or package.timeout_sec))
-
-                backend_name = self.app.settings.get_setting("windows_default_backend", "local_subprocess")
-                if backend_name == "psexec":
-                    backend = PsExecBackend(self.app.settings.get_setting("windows_psexec_path", "C:\\\\Tools\\\\PsExec64.exe"), logger=append_log)
-                    target_host = (self.user.get("pc_name") or "").strip() or "localhost"
-                else:
-                    backend = LocalSubprocessBackend(logger=append_log)
-                    target_host = "localhost"
-
-                engine = WindowsDeployEngine(backend, logger=append_log)
-                return engine.deploy(
-                    package=package,
-                    target_host=target_host,
-                    skip_if_detected=(not force_reinstall) and bool(self.app.settings.get_setting("windows_skip_if_detected", True)),
-                    prefer_system_context=bool(self.app.settings.get_setting("windows_prefer_system_context", False)),
+                runtime_raw = _resolve_windows_runtime()
+                runtime = WindowsDeployRuntime(
+                    backend_name=runtime_raw["backend_name"],
+                    target_host=runtime_raw["target_host"],
+                    timeout_sec=runtime_raw["timeout_sec"],
+                    skip_if_detected=runtime_raw["skip_if_detected"],
+                    prefer_system_context=runtime_raw["prefer_system_context"],
+                    psexec_path=runtime_raw["psexec_path"],
                 )
+                service = WindowsDeployService(catalog_path=catalog_path, logger=append_log)
+                return service.install_package(package_id=package_id, force_reinstall=force_reinstall, runtime=runtime)
 
             def on_success(result):
                 append_log(f"Финальный статус: {result.status}")
@@ -5127,6 +5158,7 @@ Write-Output "OK"
             on_install=on_install,
             on_check=on_check,
             on_open_log=on_open_log,
+            runtime_info_provider=runtime_info_provider,
         )
 
     def _handle_sudo_repair_flow(self, result, catalog, item_id: str, force_reinstall: bool, append_log, retry_install_callback):

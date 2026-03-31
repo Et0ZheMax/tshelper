@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
@@ -88,6 +88,12 @@ class DetectionResult:
     version: Optional[str] = None
     raw_output: Optional[str] = None
     error: Optional[str] = None
+    error_kind: str = ""
+    expected_value: str = ""
+    current_value: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -99,6 +105,7 @@ class ExecutionResult:
     transport_error: str = ""
     payload_path_used: str = ""
     command_preview: str = ""
+    error_kind: str = ""
 
 
 @dataclass(slots=True)
@@ -108,6 +115,13 @@ class BackendContext:
     requires_admin: bool
     prefer_system_context: bool = False
     remote_temp_dir: str = "C:\\Windows\\Temp\\tshelper_deploy"
+
+
+@dataclass(slots=True)
+class DeployOptions:
+    timeout_sec: int
+    skip_if_detected: bool = True
+    prefer_system_context: bool = False
 
 
 @dataclass(slots=True)
@@ -131,6 +145,8 @@ class DeployResult:
     detection_details_after: str
     payload_path_used: str
     executed_command_preview: str
+    pre_detection: dict[str, Any] = field(default_factory=dict)
+    post_detection: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,4 +169,6 @@ class DeployResult:
             "detection_details_after": self.detection_details_after,
             "payload_path_used": self.payload_path_used,
             "executed_command_preview": self.executed_command_preview,
+            "pre_detection": self.pre_detection,
+            "post_detection": self.post_detection,
         }
