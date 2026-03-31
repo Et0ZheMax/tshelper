@@ -38,6 +38,30 @@ _SUPPORTED_OPERATORS = {"==", "!=", ">", "<", ">=", "<="}
 _MAX_BACKUPS = 10
 
 
+def _rotate_backups(catalog_path: str, keep_last: int) -> None:
+    if keep_last < 1:
+        return
+    prefix = f"{os.path.basename(catalog_path)}.bak."
+    folder = os.path.dirname(os.path.abspath(catalog_path)) or "."
+    try:
+        candidates = []
+        for name in os.listdir(folder):
+            if not name.startswith(prefix):
+                continue
+            full_path = os.path.join(folder, name)
+            if not os.path.isfile(full_path):
+                continue
+            candidates.append(full_path)
+        candidates.sort(key=lambda item: os.path.getmtime(item), reverse=True)
+        for stale_backup in candidates[keep_last:]:
+            try:
+                os.remove(stale_backup)
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
 def _normalize_tags(tags: Any) -> list[str]:
     if isinstance(tags, str):
         tags = [token.strip() for token in tags.split(",")]

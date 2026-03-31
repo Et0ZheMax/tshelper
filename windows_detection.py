@@ -28,7 +28,16 @@ def run_detection(config: DetectionConfig, timeout_sec: int = 30) -> DetectionRe
 def run_detection_with_executor(config: DetectionConfig, executor: CommandExecutor, timeout_sec: int = 30) -> DetectionResult:
     try:
         if config.type == DetectionType.FILE_EXISTS:
-            cp = executor(["cmd.exe", "/c", "if", "exist", config.path, "(exit", "0)", "else", "(exit", "1)"], timeout_sec)
+            cp = executor(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "if (Test-Path -LiteralPath $args[0]) { exit 0 } else { exit 1 }",
+                    config.path,
+                ],
+                timeout_sec,
+            )
             return DetectionResult(
                 detected=cp.returncode == 0,
                 details=f"file_exists: {config.path}",
