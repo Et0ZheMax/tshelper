@@ -5054,7 +5054,7 @@ Write-Output "OK"
             messagebox.showerror("Windows Deployment", str(exc))
             return
 
-        def _resolve_windows_runtime():
+        def _resolve_windows_runtime(skip_pre_detection: bool = False):
             backend_name = str(self.app.settings.get_setting("windows_default_backend", "local_subprocess") or "local_subprocess").strip()
             prefer_system_context = bool(self.app.settings.get_setting("windows_prefer_system_context", False))
             timeout_sec = max(30, int(self.app.settings.get_setting("windows_default_timeout_sec", 1200) or 1200))
@@ -5072,6 +5072,7 @@ Write-Output "OK"
                 "prefer_system_context": prefer_system_context,
                 "timeout_sec": timeout_sec,
                 "skip_if_detected": skip_if_detected,
+                "skip_pre_detection": bool(skip_pre_detection),
                 "psexec_path": psexec_path,
                 "mode": mode,
             }
@@ -5097,6 +5098,7 @@ Write-Output "OK"
                     target_host=runtime_raw["target_host"],
                     timeout_sec=runtime_raw["timeout_sec"],
                     skip_if_detected=runtime_raw["skip_if_detected"],
+                    skip_pre_detection=runtime_raw["skip_pre_detection"],
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
                 )
@@ -5114,19 +5116,22 @@ Write-Output "OK"
             except Exception as exc:
                 messagebox.showerror("Windows Detection", str(exc), parent=self.app.master)
 
-        def on_install(package_id: str, force_reinstall: bool):
+        def on_install(package_id: str, force_reinstall: bool, skip_pre_detection: bool):
             _log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
             append_log(f"Старт Windows deployment: {package_id}")
+            if skip_pre_detection:
+                append_log("Оператор включил пропуск pre-detection перед установкой.")
 
             def work():
                 from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
-                runtime_raw = _resolve_windows_runtime()
+                runtime_raw = _resolve_windows_runtime(skip_pre_detection=skip_pre_detection)
                 runtime = WindowsDeployRuntime(
                     backend_name=runtime_raw["backend_name"],
                     target_host=runtime_raw["target_host"],
                     timeout_sec=runtime_raw["timeout_sec"],
                     skip_if_detected=runtime_raw["skip_if_detected"],
+                    skip_pre_detection=runtime_raw["skip_pre_detection"],
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
                 )

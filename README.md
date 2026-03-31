@@ -160,6 +160,7 @@ TS HELPER поддерживает SSH-сценарии как для интер
 - отдельный каталог `software_catalog_windows.json` с валидацией, атомарным сохранением и ротацией backup-файлов;
 - backend-aware detection: проверки выполняются в том же контексте, что и установка (`local_subprocess` локально, `psexec` на целевом хосте);
 - pre/post detection с типами `file_exists`, `registry_exists`, `registry_value`, `uninstall_display_name`, `product_code`, `command_success`, `powershell_script`;
+- в окне Windows Deployment доступен операторский override `Пропустить проверку перед установкой`: pre-check можно пропустить вручную для проблемных detection-сценариев, при этом post-detection после установки остаётся обязательным;
 - для `registry_value` реализованы операторы `==`, `!=`, `>`, `<`, `>=`, `<=` с диагностикой текущего и ожидаемого значения;
 - backend-абстракция включает подготовку payload, detection, install и cleanup;
 - для `psexec` используется явный staging в admin-share (`\HOST\C$...`) без неявного fallback на localhost;

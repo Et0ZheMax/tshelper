@@ -121,6 +121,7 @@ class BackendContext:
 class DeployOptions:
     timeout_sec: int
     skip_if_detected: bool = True
+    skip_pre_detection: bool = False
     prefer_system_context: bool = False
 
 
