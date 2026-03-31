@@ -131,6 +131,7 @@ class DeployOptions:
     skip_pre_detection: bool = False
     prefer_system_context: bool = False
     execution_mode: WindowsExecutionMode = WindowsExecutionMode.STANDARD_INSTALL
+    remote_temp_dir: str = "C:\\Windows\\Temp\\tshelper_deploy"
     delivery_folder: str = "C:\\Installers\\TSHelper"
 
 

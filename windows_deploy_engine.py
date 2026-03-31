@@ -37,12 +37,15 @@ class WindowsDeployEngine:
         options: DeployOptions,
     ) -> DeployResult:
         started_at = time.time()
+        remote_temp_dir = options.remote_temp_dir or "C:\\Windows\\Temp\\tshelper_deploy"
+        if options.execution_mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE:
+            remote_temp_dir = options.delivery_folder or "C:\\Installers\\TSHelper"
         context = BackendContext(
             target_host=target_host,
             timeout_sec=max(30, int(options.timeout_sec or package.timeout_sec)),
             requires_admin=package.requires_admin,
             prefer_system_context=options.prefer_system_context,
-            remote_temp_dir=options.delivery_folder or "C:\\Installers\\TSHelper",
+            remote_temp_dir=remote_temp_dir,
         )
         try:
             self.backend.validate_context(context)
