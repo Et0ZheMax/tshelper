@@ -2573,6 +2573,46 @@ $items = foreach ($u in $users) {{
         self.settings.set_dock_items(self.dock_items)
         self._render_dock_buttons()
 
+    def _show_dock_copy_notification(self, button_name: str):
+        try:
+            existing = getattr(self, "_dock_copy_toast", None)
+            if existing and existing.winfo_exists():
+                existing.destroy()
+        except Exception:
+            pass
+
+        toast = tk.Toplevel(self.master)
+        toast.overrideredirect(True)
+        toast.attributes("-topmost", True)
+        toast.configure(bg="#dff6e5")
+
+        container = tk.Frame(toast, bg="#dff6e5", bd=1, relief="solid", highlightthickness=1, highlightbackground="#9ed8af")
+        container.pack(fill="both", expand=True)
+
+        icon_label = tk.Label(container, text="✅", bg="#dff6e5", fg="#1e7e34", font=("Segoe UI", 12, "bold"))
+        icon_label.pack(side="left", padx=(10, 6), pady=8)
+        text_label = tk.Label(
+            container,
+            text=f"Ссылка «{button_name}» скопирована",
+            bg="#dff6e5",
+            fg="#1e7e34",
+            font=("Segoe UI", 9),
+        )
+        text_label.pack(side="left", padx=(0, 10), pady=8)
+
+        toast.update_idletasks()
+        master_x = self.master.winfo_rootx()
+        master_y = self.master.winfo_rooty()
+        master_w = self.master.winfo_width()
+        master_h = self.master.winfo_height()
+        toast_w = toast.winfo_width()
+        toast_h = toast.winfo_height()
+        x_pos = master_x + max(10, master_w - toast_w - 18)
+        y_pos = master_y + max(10, master_h - toast_h - 18)
+        toast.geometry(f"+{x_pos}+{y_pos}")
+        self._dock_copy_toast = toast
+        self.master.after(1700, lambda t=toast: t.destroy() if t.winfo_exists() else None)
+
     def _copy_dock_text(self, copy_text: str, button_name: str, show_success: bool = True):
         text = (copy_text or "").strip()
         if not text:
@@ -2582,7 +2622,7 @@ $items = foreach ($u in $users) {{
             self.master.clipboard_append(text)
             self.master.update_idletasks()
             if show_success:
-                messagebox.showinfo("Док-панель", f"Ссылка «{button_name}» скопирована в буфер обмена.")
+                self._show_dock_copy_notification(button_name)
         except Exception as e:
             messagebox.showerror("Док-панель", f"Не удалось скопировать ссылку: {e}")
 
@@ -2594,7 +2634,7 @@ $items = foreach ($u in $users) {{
             action = "open"
 
         if action in {"copy", "both"}:
-            self._copy_dock_text(item.get("copy_text", ""), item.get("name", "Кнопка"), show_success=(action == "copy"))
+            self._copy_dock_text(item.get("copy_text", ""), item.get("name", "Кнопка"), show_success=True)
 
         if action in {"open", "both"}:
             self._open_dock_resource(item.get("resource", ""))
