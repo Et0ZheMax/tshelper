@@ -5336,6 +5336,11 @@ Write-Output "OK"
             mode = WindowsExecutionMode(execution_mode)
             if mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION:
                 append_log("Поиск сессии пользователя", stage="Поиск сессии пользователя")
+                append_log(
+                    "Режим интерактивной сессии — практичный fallback: "
+                    "на части ПК GUI установщика может отображаться некорректно "
+                    "(чёрные/пустые окна, сломанные контролы)."
+                )
             elif mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE:
                 append_log("Копирование payload", stage="Копирование payload")
             else:
@@ -5382,6 +5387,11 @@ Write-Output "OK"
                     append_log(f"Сессия пользователя: {result.session_username} (id={result.session_id}, state={result.session_state})")
                 if result.payload_path_used:
                     append_log(f"Payload: {result.payload_path_used}")
+                if result.status == "interactive_launch_success":
+                    append_log(
+                        "Подсказка: если GUI установщика отображается некорректно, "
+                        "используйте режим «Только доставить файл и открыть Удалённый помощник»."
+                    )
                 if result.status == "delivery_success":
                     try:
                         self.remote_assistance()
@@ -5394,7 +5404,13 @@ Write-Output "OK"
                 append_log("Завершено", stage="Завершено")
                 log_action(f"Windows deployment {self.user.get('name', '?')}: {package_id} ({result.status})")
                 if result.status in {"installed_success", "installed_success_reboot_required", "already_installed", "interactive_launch_success", "delivery_success_remote_assistance_opened"}:
-                    messagebox.showinfo("Windows Deployment", f"Статус: {result.status}\nХост: {result.target_host}", parent=self.app.master)
+                    info_text = f"Статус: {result.status}\nХост: {result.target_host}"
+                    if result.status == "interactive_launch_success":
+                        info_text += (
+                            "\n\nПодсказка: если GUI установщика отображается некорректно, "
+                            "используйте режим «Только доставить файл и открыть Удалённый помощник»."
+                        )
+                    messagebox.showinfo("Windows Deployment", info_text, parent=self.app.master)
                 elif result.status == "installed_success_with_warnings":
                     messagebox.showwarning(
                         "Windows Deployment",

@@ -152,7 +152,12 @@ class WindowsInstallDialog(tk.Toplevel):
     def _on_mode_changed(self):
         mode = self.execution_mode_var.get()
         if mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION.value:
-            self.execution_mode_hint_var.set("Требуется активная пользовательская сессия на целевом ПК. Флаг пропуска pre-check в этом режиме не влияет.")
+            self.execution_mode_hint_var.set(
+                "Практичный fallback: запуск в сессии пользователя. "
+                "Требуется активная пользовательская сессия на целевом ПК. "
+                "Возможны артефакты GUI некоторых установщиков (чёрные/пустые окна). "
+                "Флаг пропуска pre-check в этом режиме не влияет."
+            )
             self.skip_pre_detection_var.set(True)
             self.skip_pre_detection_check.state(["disabled"])
         elif mode == WindowsExecutionMode.DELIVER_AND_OPEN_REMOTE_ASSISTANCE.value:

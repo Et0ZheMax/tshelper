@@ -139,6 +139,11 @@ class WindowsDeployEngine:
                 session_id = session.session_id
                 session_state = session.state
                 self.logger(f"[deploy] найдена сессия: user={session_username}, session_id={session_id}, state={session_state}")
+                if context.prefer_system_context:
+                    self.logger(
+                        "[deploy] interactive_user_session: prefer_system_context=true "
+                        "будет принудительно отключён для GUI запуска в пользовательской сессии"
+                    )
                 self.stage_logger("Запуск в сессии пользователя")
                 exec_result = self.backend.run_install_in_user_session(package, context, payload_path, session)
                 self.stage_logger("Ожидание реакции пользователя")

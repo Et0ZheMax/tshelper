@@ -420,12 +420,24 @@ class PsExecBackend(LocalSubprocessBackend):
             "-i",
             str(session.session_id),
         ]
-        if package.requires_admin:
+        elevated_token_applied = bool(package.requires_admin)
+        if elevated_token_applied:
             psexec_cmd.append("-h")
-        if context.prefer_system_context:
-            psexec_cmd.append("-s")
+        system_forced_disabled = bool(context.prefer_system_context)
         psexec_cmd.extend(["cmd", "/c", subprocess.list2cmdline(list(command))])
         self.logger(f"[interactive] target={context.target_host}, session_id={session.session_id}, user={session.username}")
+        self.logger(
+            "[interactive] launch flags: "
+            f"session_id={session.session_id}, "
+            f"requires_admin={package.requires_admin}, "
+            f"elevated_token_applied={elevated_token_applied}, "
+            f"system_forced_disabled={system_forced_disabled}"
+        )
+        if system_forced_disabled:
+            self.logger(
+                "[interactive] prefer_system_context=true проигнорирован: "
+                "для GUI запуска в user-session SYSTEM-контекст отключён принудительно"
+            )
         try:
             cp, timed_out = _run_command_with_heartbeat(
                 command=psexec_cmd,
