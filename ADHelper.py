@@ -2245,18 +2245,19 @@ class App(tk.Tk):
             messagebox.showwarning("Приветственный листок", "Невозможно распечатать: у пользователя отсутствует samAccountName.")
             return
 
-        password = simpledialog.askstring(
-            "Пароль для приветственного",
-            f"Введите пароль для пользователя {login}:",
-            parent=getattr(self, "_search_modal", self),
-            show="*",
-        )
-        if password is None:
+        if not self.password_token:
+            messagebox.showwarning("Приветственный листок", "Пароль по умолчанию не задан.")
             return
-
-        password = password.strip()
+        try:
+            password = decrypt_password(self.password_token).strip()
+        except Exception:
+            messagebox.showwarning(
+                "Приветственный листок",
+                "Не удалось расшифровать пароль по умолчанию. Задайте пароль заново.",
+            )
+            return
         if not password:
-            messagebox.showwarning("Приветственный листок", "Пароль не может быть пустым.")
+            messagebox.showwarning("Приветственный листок", "Пароль по умолчанию пустой.")
             return
 
         email = (entry.get("mail") or "").strip()
