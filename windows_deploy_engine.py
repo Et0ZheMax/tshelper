@@ -46,6 +46,7 @@ class WindowsDeployEngine:
             requires_admin=package.requires_admin,
             prefer_system_context=options.prefer_system_context,
             remote_temp_dir=remote_temp_dir,
+            preferred_session_username=(options.preferred_session_username or "").strip(),
         )
         try:
             self.backend.validate_context(context)
