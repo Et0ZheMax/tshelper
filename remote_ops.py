@@ -34,6 +34,10 @@ def build_tshelper_sudoers_content(username: str) -> str:
         f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/apt-get",
         f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/dpkg",
         f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/systemctl",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/bash",
+        f"{safe_username} ALL=(root) NOPASSWD: /bin/bash",
+        f"{safe_username} ALL=(root) NOPASSWD: /usr/sbin/reboot",
+        f"{safe_username} ALL=(root) NOPASSWD: /sbin/reboot",
         f"{safe_username} ALL=(root) NOPASSWD: /usr/bin/bash /usr/local/tshelper-scripts/*",
         f"{safe_username} ALL=(root) NOPASSWD: /bin/bash /usr/local/tshelper-scripts/*",
     ]
