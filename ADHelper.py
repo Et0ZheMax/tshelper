@@ -2019,6 +2019,17 @@ class App(tk.Tk):
         self.search_listbox.pack(side="left", fill="both", expand=False)
         self.search_listbox.bind("<<ListboxSelect>>", self._on_search_select)
         self.search_listbox.bind("<Double-Button-1>", self._on_search_select)
+        self.search_listbox.bind("<Button-3>", self._on_search_right_click)
+
+        self.search_context_menu = tk.Menu(modal, tearoff=0)
+        self.search_context_menu.add_command(
+            label="Скопировать логин",
+            command=self._copy_selected_search_login,
+        )
+        self.search_context_menu.add_command(
+            label="Распечатать приветственный лист",
+            command=self._print_welcome_for_selected_user,
+        )
 
         search_scroll = ttk.Scrollbar(frm_list, orient="vertical", command=self.search_listbox.yview)
         search_scroll.pack(side="right", fill="y")
@@ -2188,6 +2199,100 @@ class App(tk.Tk):
         domain = entry.get("domain") or "unknown"
         self.search_selected_label_var.set(f"Редактирование: {display_name} ({domain})")
         self.btn_save_search.configure(state="normal")
+
+    def _get_selected_search_entry(self) -> Optional[dict]:
+        index = self.selected_search_index
+        visible = getattr(self, "search_visible_results", [])
+        if index is None or index >= len(visible):
+            return None
+        return visible[index]
+
+    def _on_search_right_click(self, event):
+        index = self.search_listbox.nearest(event.y)
+        if index < 0 or index >= self.search_listbox.size():
+            return
+        self.search_listbox.selection_clear(0, "end")
+        self.search_listbox.selection_set(index)
+        self.search_listbox.activate(index)
+        self._on_search_select()
+        self.search_context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_selected_search_login(self):
+        entry = self._get_selected_search_entry()
+        if not entry:
+            messagebox.showerror("Поиск", "Пользователь не выбран.")
+            return
+        login = (entry.get("sam") or "").strip()
+        if not login:
+            messagebox.showwarning("Поиск", "У выбранного пользователя не найден login (samAccountName).")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(login)
+        self.log(f"[search] Логин скопирован в буфер обмена: {login}")
+
+    def _print_welcome_for_selected_user(self):
+        entry = self._get_selected_search_entry()
+        if not entry:
+            messagebox.showerror("Поиск", "Пользователь не выбран.")
+            return
+
+        if not os.path.exists(WELCOME_TEMPLATE_PATH):
+            messagebox.showwarning("Приветственный листок", f"Шаблон не найден: {WELCOME_TEMPLATE_PATH}")
+            return
+
+        login = (entry.get("sam") or "").strip()
+        if not login:
+            messagebox.showwarning("Приветственный листок", "Невозможно распечатать: у пользователя отсутствует samAccountName.")
+            return
+
+        if not self.password_token:
+            messagebox.showwarning("Приветственный листок", "Пароль по умолчанию не задан.")
+            return
+        try:
+            password = decrypt_password(self.password_token).strip()
+        except Exception:
+            messagebox.showwarning(
+                "Приветственный листок",
+                "Не удалось расшифровать пароль по умолчанию. Задайте пароль заново.",
+            )
+            return
+        if not password:
+            messagebox.showwarning("Приветственный листок", "Пароль по умолчанию пустой.")
+            return
+
+        email = (entry.get("mail") or "").strip()
+        context = {
+            "sam": login,
+            "login": login,
+            "domain_login": f"omg\\{login}",
+            "email": email,
+            "password": password,
+        }
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_name = f"Welcome_{login}_{timestamp}.odt"
+        output_path = os.path.join(WELCOME_OUTPUT_DIR, output_name)
+
+        try:
+            generated_path, _, _ = generate_welcome_odt(
+                WELCOME_TEMPLATE_PATH,
+                output_path,
+                context,
+            )
+        except Exception as error:
+            messagebox.showwarning("Приветственный листок", f"Ошибка генерации приветственного: {error}")
+            return
+
+        print_success, print_message = print_welcome_document(generated_path)
+        self.log(f"[welcome] {print_message}")
+        if print_success:
+            messagebox.showinfo("Приветственный листок", "Документ отправлен на печать.")
+            return
+
+        messagebox.showwarning(
+            "Приветственный листок",
+            f"Печать не выполнена. Файл сохранен: {generated_path}",
+        )
 
     def _select_target_ou_with_dialog(self, cfg: dict, dept_text: str) -> Optional[str]:
         resolved_dn, candidates, confidence = resolve_target_ou(cfg, dept_text, base_path_hint=cfg.get("ou_dn"))
