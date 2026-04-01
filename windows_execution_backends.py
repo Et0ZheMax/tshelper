@@ -42,8 +42,11 @@ _DISCONNECTED_SESSION_STATES = {"DISC", "DISCONNECTED"}
 _KNOWN_SESSION_STATE_ALIASES = {
     "ACTIVE": "ACTIVE",
     "АКТИВНО": "ACTIVE",
+    "АКТИВЕН": "ACTIVE",
     "DISC": "DISC",
     "DISCONNECTED": "DISCONNECTED",
+    "ОТКЛЮЧЕН": "DISC",
+    "ОТКЛЮЧЕНО": "DISC",
 }
 
 
@@ -366,13 +369,13 @@ class PsExecBackend(LocalSubprocessBackend):
             cp = subprocess.run(
                 command,
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=max(20, min(context.timeout_sec, 120)),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception as exc:
             raise BackendError(f"Не удалось выполнить quser: {exc}", error_kind="session_query_failed") from exc
-        output = f"{cp.stdout or ''}\n{cp.stderr or ''}".strip()
+        output = _decode_windows_console_streams(cp.stdout, cp.stderr)
         self.logger(f"[interactive] quser raw output:\n{output or '<empty>'}")
         if cp.returncode != 0:
             raise BackendError(
@@ -620,6 +623,24 @@ def _parse_quser_output(output: str) -> list[UserSessionInfo]:
             continue
         sessions.append(UserSessionInfo(username=username, session_id=session_id, state=normalized_state))
     return sessions
+
+
+def _decode_windows_console_streams(stdout: bytes | str | None, stderr: bytes | str | None) -> str:
+    def _decode_stream(stream: bytes | str | None) -> str:
+        if stream is None:
+            return ""
+        if isinstance(stream, str):
+            return stream
+        if not stream:
+            return ""
+        for encoding in ("cp866", "cp1251"):
+            try:
+                return stream.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return stream.decode("cp866", errors="replace")
+
+    return f"{_decode_stream(stdout)}\n{_decode_stream(stderr)}".strip()
 
 
 def _normalize_quser_state(raw_state: str) -> str:
