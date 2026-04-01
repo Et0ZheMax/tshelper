@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from xml.etree import ElementTree as ET
 from typing import Optional, Callable, Any
 
