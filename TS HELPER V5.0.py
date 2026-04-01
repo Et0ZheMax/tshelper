@@ -5249,6 +5249,7 @@ Write-Output "OK"
             psexec_path = str(self.app.settings.get_setting("windows_psexec_path", "C:\\Tools\\PsExec64.exe") or "").strip()
             remote_temp_dir = str(self.app.settings.get_setting("windows_remote_temp_dir", "C:\\Windows\\Temp\\tshelper_deploy") or "C:\\Windows\\Temp\\tshelper_deploy").strip()
             delivery_folder = str(self.app.settings.get_setting("windows_delivery_folder", "C:\\Installers\\TSHelper") or "C:\\Installers\\TSHelper").strip()
+            preferred_session_username = str(self.app.settings.get_setting("windows_preferred_session_username", "") or "").strip()
             if backend_name == "psexec":
                 target_host = (self.user.get("pc_name") or "").strip()
                 mode = "remote / psexec"
@@ -5266,6 +5267,7 @@ Write-Output "OK"
                 "remote_temp_dir": remote_temp_dir,
                 "execution_mode": execution_mode,
                 "delivery_folder": delivery_folder,
+                "preferred_session_username": preferred_session_username,
                 "mode": mode,
             }
 
@@ -5298,6 +5300,7 @@ Write-Output "OK"
                     prefer_system_context=runtime_raw["prefer_system_context"],
                     psexec_path=runtime_raw["psexec_path"],
                     remote_temp_dir=runtime_raw["remote_temp_dir"],
+                    preferred_session_username=runtime_raw["preferred_session_username"],
                 )
                 service = WindowsDeployService(catalog_path=catalog_path, logger=append_log)
                 result, backend_name = service.check_package(package_id=package_id, runtime=runtime)
@@ -5356,6 +5359,7 @@ Write-Output "OK"
                     execution_mode=WindowsExecutionMode(runtime_raw["execution_mode"]),
                     remote_temp_dir=runtime_raw["remote_temp_dir"],
                     delivery_folder=runtime_raw["delivery_folder"],
+                    preferred_session_username=runtime_raw["preferred_session_username"],
                 )
                 service = WindowsDeployService(
                     catalog_path=catalog_path,

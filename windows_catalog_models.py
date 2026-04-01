@@ -122,6 +122,7 @@ class BackendContext:
     requires_admin: bool
     prefer_system_context: bool = False
     remote_temp_dir: str = "C:\\Windows\\Temp\\tshelper_deploy"
+    preferred_session_username: str = ""
 
 
 @dataclass(slots=True)
@@ -133,6 +134,7 @@ class DeployOptions:
     execution_mode: WindowsExecutionMode = WindowsExecutionMode.STANDARD_INSTALL
     remote_temp_dir: str = "C:\\Windows\\Temp\\tshelper_deploy"
     delivery_folder: str = "C:\\Installers\\TSHelper"
+    preferred_session_username: str = ""
 
 
 @dataclass(slots=True)

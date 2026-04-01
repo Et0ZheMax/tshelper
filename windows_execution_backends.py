@@ -37,6 +37,15 @@ class UserSessionInfo:
     session_id: str
     state: str
 
+_ACTIVE_SESSION_STATES = {"ACTIVE"}
+_DISCONNECTED_SESSION_STATES = {"DISC", "DISCONNECTED"}
+_KNOWN_SESSION_STATE_ALIASES = {
+    "ACTIVE": "ACTIVE",
+    "АКТИВНО": "ACTIVE",
+    "DISC": "DISC",
+    "DISCONNECTED": "DISCONNECTED",
+}
+
 
 class WindowsExecutionBackend(ABC):
     def __init__(self, logger: Callable[[str], None] | None = None):
@@ -364,18 +373,32 @@ class PsExecBackend(LocalSubprocessBackend):
         except Exception as exc:
             raise BackendError(f"Не удалось выполнить quser: {exc}", error_kind="session_query_failed") from exc
         output = f"{cp.stdout or ''}\n{cp.stderr or ''}".strip()
+        self.logger(f"[interactive] quser raw output:\n{output or '<empty>'}")
         if cp.returncode != 0:
             raise BackendError(
                 f"Команда quser завершилась с кодом {cp.returncode}: {output or 'нет вывода'}",
                 error_kind="session_query_failed",
             )
         parsed_sessions = _parse_quser_output(output)
+        self.logger(
+            "[interactive] parsed sessions: "
+            + (
+                ", ".join(
+                    f"user={item.username},id={item.session_id},state={item.state}"
+                    for item in parsed_sessions
+                )
+                if parsed_sessions
+                else "<none>"
+            )
+        )
         if not parsed_sessions:
             raise BackendError("На целевом хосте не найдены пользовательские сессии", error_kind="interactive_session_not_found")
-        for session in parsed_sessions:
-            if session.state.upper() == "ACTIVE":
-                return session
-        return parsed_sessions[0]
+        selected_session, reason = _select_user_session(parsed_sessions, context.preferred_session_username)
+        self.logger(
+            f"[interactive] selected session: user={selected_session.username}, "
+            f"id={selected_session.session_id}, state={selected_session.state}, reason={reason}"
+        )
+        return selected_session
 
     def run_install_in_user_session(
         self,
@@ -583,7 +606,8 @@ def _parse_quser_output(output: str) -> list[UserSessionInfo]:
         username = parts[0]
         state_index = None
         for idx, token in enumerate(parts):
-            if token.upper() in {"ACTIVE", "DISC", "DISCONNECTED", "IDLE"} and idx > 0:
+            normalized_state = _normalize_quser_state(token)
+            if normalized_state and idx > 0:
                 state_index = idx
                 break
         if state_index is None or state_index < 2:
@@ -591,8 +615,30 @@ def _parse_quser_output(output: str) -> list[UserSessionInfo]:
         session_id = parts[state_index - 1]
         if not session_id.isdigit():
             continue
-        sessions.append(UserSessionInfo(username=username, session_id=session_id, state=parts[state_index]))
+        normalized_state = _normalize_quser_state(parts[state_index])
+        if not normalized_state:
+            continue
+        sessions.append(UserSessionInfo(username=username, session_id=session_id, state=normalized_state))
     return sessions
+
+
+def _normalize_quser_state(raw_state: str) -> str:
+    normalized = (raw_state or "").strip().upper()
+    if not normalized:
+        return ""
+    return _KNOWN_SESSION_STATE_ALIASES.get(normalized, normalized if normalized in (_ACTIVE_SESSION_STATES | _DISCONNECTED_SESSION_STATES) else "")
+
+
+def _select_user_session(sessions: list[UserSessionInfo], preferred_username: str) -> tuple[UserSessionInfo, str]:
+    normalized_preferred = (preferred_username or "").strip().lower()
+    if normalized_preferred:
+        for session in sessions:
+            if session.state in _ACTIVE_SESSION_STATES and session.username.strip().lower() == normalized_preferred:
+                return session, "active_preferred_username"
+    for session in sessions:
+        if session.state in _ACTIVE_SESSION_STATES:
+            return session, "first_active"
+    return sessions[0], "first_valid_session"
 
 
 def _extract_remote_size(text: str) -> int:

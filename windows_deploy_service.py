@@ -21,6 +21,7 @@ class WindowsDeployRuntime:
     execution_mode: WindowsExecutionMode = WindowsExecutionMode.STANDARD_INSTALL
     remote_temp_dir: str = "C:\\Windows\\Temp\\tshelper_deploy"
     delivery_folder: str = "C:\\Installers\\TSHelper"
+    preferred_session_username: str = ""
 
 
 class WindowsDeployService:
@@ -49,6 +50,7 @@ class WindowsDeployService:
             requires_admin=package.requires_admin,
             prefer_system_context=runtime.prefer_system_context,
             remote_temp_dir=runtime.remote_temp_dir or "C:\\Windows\\Temp\\tshelper_deploy",
+            preferred_session_username=(runtime.preferred_session_username or "").strip(),
         )
         backend.validate_context(context)
         detection = backend.run_detection(package, context)
@@ -67,5 +69,6 @@ class WindowsDeployService:
             execution_mode=runtime.execution_mode,
             remote_temp_dir=runtime.remote_temp_dir or "C:\\Windows\\Temp\\tshelper_deploy",
             delivery_folder=runtime.delivery_folder or "C:\\Installers\\TSHelper",
+            preferred_session_username=(runtime.preferred_session_username or "").strip(),
         )
         return engine.deploy(package=package, target_host=runtime.target_host, options=options)
