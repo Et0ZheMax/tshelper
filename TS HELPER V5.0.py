@@ -4793,6 +4793,7 @@ class UserButton(ttk.Frame):
         )
         self.btn.pack(fill="both", expand=True)
         self.os_badge = tk.Label(self, bd=0, highlightthickness=0, padx=0, pady=0)
+        self._update_os_visual_by_type(self.app.detect_os_type_from_host(self.user.get("pc_name", "")))
         self.set_status(self.status_key)
         self._apply_caller_style()
         self.btn.bind("<Button-3>", self._rclick)
@@ -4827,6 +4828,11 @@ class UserButton(ttk.Frame):
     def set_availability(self, ok, os_type="unknown"):
         new_status = "online" if ok else "offline"
         normalized_os = (os_type or "unknown").lower()
+        if normalized_os == "unknown" and self.os_type != "unknown":
+            normalized_os = self.os_type
+        elif normalized_os == "unknown":
+            normalized_os = self.app.detect_os_type_from_host(self.user.get("pc_name", ""))
+
         visual = self.app.get_os_visual(normalized_os)
         new_text_marker = visual.get("text", "")
         new_image = visual.get("image")
@@ -4839,9 +4845,7 @@ class UserButton(ttk.Frame):
             return
 
         self.avail = ok
-        self.os_type = normalized_os
-        self.os_icon = new_text_marker
-        self.os_icon_image = new_image
+        self._update_os_visual_by_type(normalized_os)
 
         if status_changed:
             self.set_status(new_status)
@@ -4849,6 +4853,13 @@ class UserButton(ttk.Frame):
             self.refresh_text()
         else:
             self._update_os_badge(self.btn.cget("bg"), self.btn.cget("fg"))
+
+    def _update_os_visual_by_type(self, os_type: str):
+        normalized_os = (os_type or "unknown").lower()
+        visual = self.app.get_os_visual(normalized_os)
+        self.os_type = normalized_os
+        self.os_icon = visual.get("text", "")
+        self.os_icon_image = visual.get("image")
 
 
     def _update_os_badge(self, bg_color: str, fg_color: str):
@@ -5010,6 +5021,7 @@ class UserButton(ttk.Frame):
 
         self.app.users.update_user(old_pc, new_user)
         self.user.update(new_user)
+        self._update_os_visual_by_type(self.app.detect_os_type_from_host(pc))
         self.app.rebind_user_widget_key(old_pc, pc, self)
         self.app.refresh_current_view()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
