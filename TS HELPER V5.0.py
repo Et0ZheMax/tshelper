@@ -4927,6 +4927,8 @@ class UserButton(ttk.Frame):
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         if self.caller_info:
+            if self.os_type == "unknown":
+                self._update_os_visual_by_type(self.app.detect_os_type_from_host(self.user.get("pc_name", "")))
             gradient = self.app.get_gradient_image(220, 90, self.app.caller_bg, "#f97316")
             self.btn.config(
                 bg=self.app.caller_bg,
