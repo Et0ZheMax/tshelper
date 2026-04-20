@@ -897,6 +897,7 @@ class SettingsManager:
             "pbx_debug_dump": False,
             "cw_login": "",
             "cw_password": "",
+            "os_badge_cache": {},
             # Цвета
             "ui_user_bg": "#ffffff", "ui_user_fg": "#000000",
             "ui_caller_bg": "#fff3cd", "ui_caller_fg": "#111111",  # жёлтый soft
@@ -1437,6 +1438,7 @@ class MainWindow:
         self.ping_generation = 0
         self.ping_cache = {}
         self.ping_cache_ttl = 15
+        self.os_badge_cache = self._load_os_badge_cache()
 
         # активные звонки (список словарей)
         self.active_calls = []   # [{call_id, ext, num, name, ts, started_ts, last_seen_ts, user, who_key}]
@@ -1789,6 +1791,38 @@ class MainWindow:
 
     def _ping_cache_key(self, pc_name: str) -> str:
         return self.canonical_pc_key(pc_name)
+
+    def _load_os_badge_cache(self) -> dict[str, str]:
+        raw_cache = self.settings.get_setting("os_badge_cache", {})
+        if not isinstance(raw_cache, dict):
+            return {}
+
+        normalized_cache = {}
+        for key, value in raw_cache.items():
+            cache_key = self.canonical_pc_key(str(key))
+            os_type = str(value or "").strip().lower()
+            if not cache_key or os_type not in {"windows", "linux"}:
+                continue
+            normalized_cache[cache_key] = os_type
+        return normalized_cache
+
+    def get_cached_os_type(self, pc_name: str) -> str:
+        key = self.canonical_pc_key(pc_name)
+        if not key:
+            return "unknown"
+        return self.os_badge_cache.get(key, "unknown")
+
+    def remember_os_type(self, pc_name: str, os_type: str):
+        normalized_os = (os_type or "").strip().lower()
+        if normalized_os not in {"windows", "linux"}:
+            return
+        key = self.canonical_pc_key(pc_name)
+        if not key:
+            return
+        if self.os_badge_cache.get(key) == normalized_os:
+            return
+        self.os_badge_cache[key] = normalized_os
+        self.settings.set_setting("os_badge_cache", self.os_badge_cache)
 
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
@@ -3431,6 +3465,7 @@ $items = foreach ($u in $users) {{
                 "ip": ip,
                 "os_type": resolved_os,
             }
+        self.remember_os_type(pc, resolved_os)
         self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
 
     def check_availability(self, user):
@@ -4793,7 +4828,7 @@ class UserButton(ttk.Frame):
         )
         self.btn.pack(fill="both", expand=True)
         self.os_badge = tk.Label(self, bd=0, highlightthickness=0, padx=0, pady=0)
-        self._update_os_visual_by_type(self.app.detect_os_type_from_host(self.user.get("pc_name", "")))
+        self._update_os_visual_by_type(self.app.get_cached_os_type(self.user.get("pc_name", "")))
         self.set_status(self.status_key)
         self._apply_caller_style()
         self.btn.bind("<Button-3>", self._rclick)
@@ -4830,8 +4865,6 @@ class UserButton(ttk.Frame):
         normalized_os = (os_type or "unknown").lower()
         if normalized_os == "unknown" and self.os_type != "unknown":
             normalized_os = self.os_type
-        elif normalized_os == "unknown":
-            normalized_os = self.app.detect_os_type_from_host(self.user.get("pc_name", ""))
 
         visual = self.app.get_os_visual(normalized_os)
         new_text_marker = visual.get("text", "")
@@ -4927,8 +4960,6 @@ class UserButton(ttk.Frame):
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         if self.caller_info:
-            if self.os_type == "unknown":
-                self._update_os_visual_by_type(self.app.detect_os_type_from_host(self.user.get("pc_name", "")))
             gradient = self.app.get_gradient_image(220, 90, self.app.caller_bg, "#f97316")
             self.btn.config(
                 bg=self.app.caller_bg,
@@ -5023,7 +5054,7 @@ class UserButton(ttk.Frame):
 
         self.app.users.update_user(old_pc, new_user)
         self.user.update(new_user)
-        self._update_os_visual_by_type(self.app.detect_os_type_from_host(pc))
+        self._update_os_visual_by_type(self.app.get_cached_os_type(pc))
         self.app.rebind_user_widget_key(old_pc, pc, self)
         self.app.refresh_current_view()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
