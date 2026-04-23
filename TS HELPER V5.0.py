@@ -1824,6 +1824,44 @@ class MainWindow:
         self.os_badge_cache[key] = normalized_os
         self.settings.set_setting("os_badge_cache", self.os_badge_cache)
 
+    def resolve_os_type_for_user(self, user: dict) -> str:
+        """
+        Определяет ОС пользователя без сетевых вызовов:
+        1) os_badge_cache
+        2) ping_cache
+        3) префикс host-кандидатов (w-/l-)
+        """
+        candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
+        if not candidates:
+            return "unknown"
+
+        # 1) Пробуем явный OS cache.
+        for host in candidates:
+            cached_os = self.get_cached_os_type(host)
+            if cached_os in {"windows", "linux"}:
+                self.remember_os_type(host, cached_os)
+                return cached_os
+
+        # 2) Пробуем ping_cache по всем кандидатам.
+        for host in candidates:
+            cache_key = self._ping_cache_key(host)
+            if not cache_key:
+                continue
+            ping_state = self.ping_cache.get(cache_key) or {}
+            ping_os = str(ping_state.get("os_type", "unknown")).lower()
+            if ping_os in {"windows", "linux"}:
+                self.remember_os_type(host, ping_os)
+                return ping_os
+
+        # 3) Фолбэк по префиксу host.
+        for host in candidates:
+            detected_os = self.detect_os_type_from_host(host)
+            if detected_os in {"windows", "linux"}:
+                self.remember_os_type(host, detected_os)
+                return detected_os
+
+        return "unknown"
+
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
         return clean if pref else pc_name
@@ -4960,6 +4998,9 @@ class UserButton(ttk.Frame):
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         if self.caller_info:
+            resolved_os = self.app.resolve_os_type_for_user(self.user)
+            if resolved_os in {"windows", "linux"} and resolved_os != self.os_type:
+                self._update_os_visual_by_type(resolved_os)
             gradient = self.app.get_gradient_image(220, 90, self.app.caller_bg, "#f97316")
             self.btn.config(
                 bg=self.app.caller_bg,
