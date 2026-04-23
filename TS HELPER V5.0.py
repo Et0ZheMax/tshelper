@@ -1827,22 +1827,32 @@ class MainWindow:
     def resolve_os_type_for_user(self, user: dict) -> str:
         """
         Определяет ОС пользователя без сетевых вызовов:
-        1) os_badge_cache
-        2) ping_cache
-        3) префикс host-кандидатов (w-/l-)
+        1) os_badge_cache по основной карточке (pc_name)
+        2) ping_cache по canonical key основного pc_name
+        3) ping_cache по всем host-кандидатам
+        4) fallback по префиксу host-кандидатов (w-/l-)
         """
-        candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
+        primary_pc_name = str(user.get("pc_name", "")).strip()
+        candidates = self.build_host_candidates(user) or ([primary_pc_name] if primary_pc_name else [])
         if not candidates:
             return "unknown"
 
-        # 1) Пробуем явный OS cache.
-        for host in candidates:
-            cached_os = self.get_cached_os_type(host)
+        # 1) Пробуем os_badge_cache только по основной карточке.
+        if primary_pc_name:
+            cached_os = self.get_cached_os_type(primary_pc_name)
             if cached_os in {"windows", "linux"}:
-                self.remember_os_type(host, cached_os)
                 return cached_os
 
-        # 2) Пробуем ping_cache по всем кандидатам.
+        # 2) Пробуем ping_cache по canonical key основного pc_name.
+        if primary_pc_name:
+            primary_key = self._ping_cache_key(primary_pc_name)
+            primary_ping_state = self.ping_cache.get(primary_key) or {} if primary_key else {}
+            primary_ping_os = str(primary_ping_state.get("os_type", "unknown")).lower()
+            if primary_ping_os in {"windows", "linux"}:
+                self.remember_os_type(primary_pc_name, primary_ping_os)
+                return primary_ping_os
+
+        # 3) Пробуем ping_cache по всем кандидатам.
         for host in candidates:
             cache_key = self._ping_cache_key(host)
             if not cache_key:
@@ -1850,14 +1860,16 @@ class MainWindow:
             ping_state = self.ping_cache.get(cache_key) or {}
             ping_os = str(ping_state.get("os_type", "unknown")).lower()
             if ping_os in {"windows", "linux"}:
-                self.remember_os_type(host, ping_os)
+                if primary_pc_name:
+                    self.remember_os_type(primary_pc_name, ping_os)
                 return ping_os
 
-        # 3) Фолбэк по префиксу host.
+        # 4) Фолбэк по префиксу host-кандидатов.
         for host in candidates:
             detected_os = self.detect_os_type_from_host(host)
             if detected_os in {"windows", "linux"}:
-                self.remember_os_type(host, detected_os)
+                if primary_pc_name:
+                    self.remember_os_type(primary_pc_name, detected_os)
                 return detected_os
 
         return "unknown"
@@ -4896,6 +4908,10 @@ class UserButton(ttk.Frame):
         if prev == caller:
             return
         self.caller_info = caller
+        if caller:
+            resolved_os = self.app.resolve_os_type_for_user(self.user)
+            if resolved_os in {"windows", "linux"} and resolved_os != self.os_type:
+                self._update_os_visual_by_type(resolved_os)
         self._apply_caller_style()
 
     def set_availability(self, ok, os_type="unknown"):
@@ -4998,9 +5014,6 @@ class UserButton(ttk.Frame):
     def _apply_caller_style(self):
         pc_label = self.app.get_display_pc_name(self.user["pc_name"])
         if self.caller_info:
-            resolved_os = self.app.resolve_os_type_for_user(self.user)
-            if resolved_os in {"windows", "linux"} and resolved_os != self.os_type:
-                self._update_os_visual_by_type(resolved_os)
             gradient = self.app.get_gradient_image(220, 90, self.app.caller_bg, "#f97316")
             self.btn.config(
                 bg=self.app.caller_bg,
