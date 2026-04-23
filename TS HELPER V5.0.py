@@ -1833,20 +1833,20 @@ class MainWindow:
         4) fallback по префиксу host-кандидатов (w-/l-)
         """
         primary_pc_name = str(user.get("pc_name", "")).strip()
-        if not primary_pc_name:
+        candidates = self.build_host_candidates(user) or ([primary_pc_name] if primary_pc_name else [])
+        if not candidates:
             return "unknown"
 
-        candidates = self.build_host_candidates(user) or [primary_pc_name]
-
         # 1) Пробуем os_badge_cache только по основной карточке.
-        cached_os = self.get_cached_os_type(primary_pc_name)
-        if cached_os in {"windows", "linux"}:
-            return cached_os
+        if primary_pc_name:
+            cached_os = self.get_cached_os_type(primary_pc_name)
+            if cached_os in {"windows", "linux"}:
+                return cached_os
 
         # 2) Пробуем ping_cache по canonical key основного pc_name.
-        primary_key = self._ping_cache_key(primary_pc_name)
-        if primary_key:
-            primary_ping_state = self.ping_cache.get(primary_key) or {}
+        if primary_pc_name:
+            primary_key = self._ping_cache_key(primary_pc_name)
+            primary_ping_state = self.ping_cache.get(primary_key) or {} if primary_key else {}
             primary_ping_os = str(primary_ping_state.get("os_type", "unknown")).lower()
             if primary_ping_os in {"windows", "linux"}:
                 self.remember_os_type(primary_pc_name, primary_ping_os)
@@ -1860,14 +1860,16 @@ class MainWindow:
             ping_state = self.ping_cache.get(cache_key) or {}
             ping_os = str(ping_state.get("os_type", "unknown")).lower()
             if ping_os in {"windows", "linux"}:
-                self.remember_os_type(primary_pc_name, ping_os)
+                if primary_pc_name:
+                    self.remember_os_type(primary_pc_name, ping_os)
                 return ping_os
 
         # 4) Фолбэк по префиксу host-кандидатов.
         for host in candidates:
             detected_os = self.detect_os_type_from_host(host)
             if detected_os in {"windows", "linux"}:
-                self.remember_os_type(primary_pc_name, detected_os)
+                if primary_pc_name:
+                    self.remember_os_type(primary_pc_name, detected_os)
                 return detected_os
 
         return "unknown"
