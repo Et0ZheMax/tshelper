@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket, tempfile
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -283,16 +283,47 @@ def load_json(filename, default=None):
         log_message(f"Ошибка чтения {filename}: {e}")
         return default if default is not None else {}
 
+def safe_save_json(filename, data):
+    tmp_name = None
+    target_dir = os.path.dirname(os.path.abspath(filename)) or "."
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=target_dir) as f:
+            tmp_name = f.name
+            json.dump(data, f, indent=4, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, filename)
+        return True
+    except Exception:
+        if tmp_name and os.path.exists(tmp_name):
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+        raise
+
 def save_json(filename, data):
     try:
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        safe_save_json(filename, data)
+        return True
     except Exception as e:
         log_message(f"Ошибка записи {filename}: {e}")
+        return False
 
 def norm_name(n: str) -> str:
     p = n.strip().lower().split()
     return " ".join(p[:2]) if len(p) >= 2 else " ".join(p)
+
+def canonical_pc_key(pc_name: str) -> str:
+    key = str(pc_name or "").lower()
+    key = re.sub(r"\s+", "", key)
+    while True:
+        next_key = re.sub(r"^(?:ws|lt|w|l)-", "", key, count=1)
+        next_key = re.sub(r"^[a-z]-", "", next_key, count=1)
+        if next_key == key:
+            break
+        key = next_key
+    return key
 
 
 def parse_person_name(value: str) -> dict:
@@ -1150,7 +1181,9 @@ class LogViewer(tk.Toplevel):
         self.date_to_var = tk.StringVar()
         self.autoscroll_var = tk.BooleanVar(value=True)
         self._auto_job = None
-        self._auto_interval_ms = 1000
+        self._auto_interval_ms = 2500
+        self._max_read_bytes = 3 * 1024 * 1024
+        self._last_sources_sig = None
 
         top = ttk.Frame(self, padding=10); top.pack(fill="x")
         ttk.Label(top, text="Уровень:").grid(row=0, column=0, sticky="w", padx=(0,6))
@@ -1173,6 +1206,7 @@ class LogViewer(tk.Toplevel):
         yscroll.pack(side="right", fill="y")
         self.text.pack(side="left", fill="both", expand=True)
         self.text.configure(state="disabled")
+        self.text.bind("<Control-c>", lambda _e: (self.copy_to_clipboard(), "break"))
 
         bottom = ttk.Frame(self, padding=10); bottom.pack(fill="x")
         ttk.Button(bottom, text="Скопировать в буфер", command=self.copy_to_clipboard).pack(side="left", padx=(0,6))
@@ -1237,16 +1271,32 @@ class LogViewer(tk.Toplevel):
             return None, False
 
     def _read_logs(self):
+        sources = sorted(glob.glob(f"{self.log_path}*"), key=os.path.getmtime)
+        source_sig = tuple((path, os.path.getmtime(path), os.path.getsize(path)) for path in sources if os.path.exists(path))
+        if source_sig == self._last_sources_sig and hasattr(self, "_cached_entries"):
+            return list(self._cached_entries)
         entries = []
-        for path in sorted(glob.glob(f"{self.log_path}*"), key=os.path.getmtime):
+        for path in sources:
             try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        parsed = self._parse_line(line.rstrip("\n"))
-                        if parsed:
-                            entries.append(parsed)
+                size = os.path.getsize(path)
+                with open(path, "rb") as f:
+                    if size > self._max_read_bytes:
+                        f.seek(max(0, size - self._max_read_bytes))
+                        chunk = f.read()
+                        nl = chunk.find(b"\n")
+                        if nl >= 0:
+                            chunk = chunk[nl + 1:]
+                    else:
+                        chunk = f.read()
+                text = chunk.decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    parsed = self._parse_line(line.rstrip("\n"))
+                    if parsed:
+                        entries.append(parsed)
             except Exception as e:
                 log_message(f"Не удалось прочитать лог {path}: {e}")
+        self._last_sources_sig = source_sig
+        self._cached_entries = list(entries)
         return entries
 
     def _parse_line(self, line: str):
@@ -1429,7 +1479,8 @@ class MainWindow:
         self.dock_side_var = tk.StringVar(master=self.master, value=self._normalize_dock_side(self.settings.get_setting("dock_side", "left")))
 
         self.users = UserManager(USERS_FILE)
-        self.executor = ThreadPoolExecutor(max_workers=24)
+        self.ping_max_workers = max(2, min(32, int(self.settings.get_setting("ping_max_workers", 8) or 8)))
+        self.executor = ThreadPoolExecutor(max_workers=self.ping_max_workers)
         self.buttons = {}
         self.user_widgets = {}
         self.orphan_widgets = []
@@ -1437,7 +1488,10 @@ class MainWindow:
         self.search_job = None
         self.ping_generation = 0
         self.ping_cache = {}
-        self.ping_cache_ttl = 15
+        self.ping_cache_ttl_ok = 25
+        self.ping_cache_ttl_fail = 7
+        self._pending_ping_users = []
+        self._ping_queue_job = None
         self.os_badge_cache = self._load_os_badge_cache()
 
         # активные звонки (список словарей)
@@ -3030,15 +3084,7 @@ $items = foreach ($u in $users) {{
 
     def canonical_pc_key(self, pc_name: str) -> str:
         """Единый ключ карточки ПК для словарей user_widgets/buttons."""
-        key = str(pc_name or "").lower()
-        key = re.sub(r"\s+", "", key)
-        while True:
-            next_key = re.sub(r"^(?:ws|lt|w|l)-", "", key, count=1)
-            next_key = re.sub(r"^[a-z]-", "", next_key, count=1)
-            if next_key == key:
-                break
-            key = next_key
-        return key
+        return canonical_pc_key(pc_name)
 
     def _open_user_menu(self, user: dict):
         pc_key = self.canonical_pc_key(user.get("pc_name", ""))
@@ -3471,6 +3517,7 @@ $items = foreach ($u in $users) {{
         if show_status:
             self.ping_generation += 1
             gen = self.ping_generation
+            queue = []
             for u in filtered:
                 pc_name = u.get("pc_name")
                 pc_key = self.canonical_pc_key(pc_name)
@@ -3479,7 +3526,8 @@ $items = foreach ($u in $users) {{
                 cache_key = self._ping_cache_key(pc_name)
                 cached = self.ping_cache.get(cache_key)
                 now = time.time()
-                if cached and (now - cached["ts"] <= self.ping_cache_ttl):
+                ttl = self.ping_cache_ttl_ok if cached and cached.get("ok") else self.ping_cache_ttl_fail
+                if cached and (now - cached["ts"] <= ttl):
                     btn = self.buttons.get(pc_key)
                     if btn:
                         btn.set_availability(cached["ok"], os_type=cached.get("os_type", "unknown"))
@@ -3488,9 +3536,38 @@ $items = foreach ($u in $users) {{
                 btn = self.buttons.get(pc_key)
                 if btn:
                     btn.set_status("checking")
-                self.executor.submit(self._ping_task, u, gen)
+                queue.append(u)
+            self._schedule_ping_batch(queue, gen)
         else:
             self.ping_generation += 1
+            self._pending_ping_users = []
+            if self._ping_queue_job:
+                try:
+                    self.master.after_cancel(self._ping_queue_job)
+                except Exception:
+                    pass
+                self._ping_queue_job = None
+
+    def _schedule_ping_batch(self, users, gen):
+        self._pending_ping_users = list(users)
+        if self._ping_queue_job:
+            try:
+                self.master.after_cancel(self._ping_queue_job)
+            except Exception:
+                pass
+            self._ping_queue_job = None
+        self._dispatch_ping_batch(gen)
+
+    def _dispatch_ping_batch(self, gen):
+        self._ping_queue_job = None
+        if gen != self.ping_generation:
+            return
+        batch = self._pending_ping_users[:self.ping_max_workers]
+        self._pending_ping_users = self._pending_ping_users[self.ping_max_workers:]
+        for u in batch:
+            self.executor.submit(self._ping_task, u, gen)
+        if self._pending_ping_users:
+            self._ping_queue_job = self.master.after(120, lambda g=gen: self._dispatch_ping_batch(g))
 
     def clear_search(self, _=None):
         self.search_entry.delete(0, "end")
@@ -4258,6 +4335,13 @@ $items = foreach ($u in $users) {{
         self._save_main_geometry()
         self._hide_tray_icon()
         self._destroy_mini_widget()
+        if self._ping_queue_job:
+            try:
+                self.master.after_cancel(self._ping_queue_job)
+            except Exception:
+                pass
+            self._ping_queue_job = None
+        self._pending_ping_users = []
         try: self.executor.shutdown(wait=False)
         except: pass
         try:
