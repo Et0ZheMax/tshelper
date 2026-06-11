@@ -1,4 +1,4 @@
-# TS HELP AD — v5.0 (all-in-one + CallWatcher)
+# TS HELP AD — v5.9 (all-in-one + CallWatcher)
 # Требуется: Python 3.9+, Windows
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
@@ -12,7 +12,7 @@ from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from ui_operation_status import OperationStatusStrip
 
 # --- Версия приложения ---
-VERSION = "v5.0"
+VERSION = "v5.9"
 
 # Цвета статусов (иконка в тексте)
 STATUS_COLORS_DEFAULT = {
