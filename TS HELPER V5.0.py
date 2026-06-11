@@ -895,6 +895,7 @@ class SettingsManager:
             "reset_password":"",
             # SSH
             "ssh_login":"", "ssh_password":"", "ssh_terminal":"Windows Terminal", "ssh_pass_enabled": False,
+            "termius_path": "",
             "ssh_key_enabled": False,
             "ssh_interactive_try_key_first": True,
             "ssh_key_private_path": "",
@@ -911,6 +912,7 @@ class SettingsManager:
             "windows_skip_if_detected": True,
             "windows_prefer_system_context": False,
             "windows_remote_temp_dir": "C:\\\\Windows\\\\Temp\\\\tshelper_deploy",
+            "elma_sed_source_path": "",
             "plink_hostkeys": {},
             # GLPI
             "glpi_api_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_prefix_field": "name", "glpi_verify_ssl": True,
@@ -920,7 +922,7 @@ class SettingsManager:
             "cw_enabled": True,
             "cw_exts": "4444",  # несколько через запятую
             "cw_url": "http://pbx.pak-cspmz.ru/admin/config.php?display=asteriskinfo&module=peers",
-            "cw_cookie": "mp1oomc5u57gpj1okil7hca2ue",     # строка Cookie: 'PHPSESSID=...; fpbx_admin=...'
+            "cw_cookie": "",     # строка Cookie: 'PHPSESSID=...; fpbx_admin=...'
             "cw_interval": 2,
             "cw_popup": True,
             "cw_debug": False,
@@ -2711,32 +2713,30 @@ $items = foreach ($u in $users) {{
         self.settings.set_dock_items(self.dock_items)
         self._render_dock_buttons()
 
-    def _show_dock_copy_notification(self, button_name: str):
+    def show_toast(self, title: str, message: str, kind: str = "success"):
         try:
-            existing = getattr(self, "_dock_copy_toast", None)
+            existing = getattr(self, "_app_toast", None)
             if existing and existing.winfo_exists():
                 existing.destroy()
         except Exception:
             pass
 
+        palette = {
+            "success": ("#dff6e5", "#1e7e34", "#9ed8af", "✅"),
+            "info": ("#e7f1ff", "#0b5ed7", "#9ec5fe", "ℹ️"),
+            "warning": ("#fff3cd", "#8a6d00", "#ffd966", "⚠️"),
+        }
+        bg, fg, border, icon = palette.get(kind, palette["success"])
         toast = tk.Toplevel(self.master)
         toast.overrideredirect(True)
         toast.attributes("-topmost", True)
-        toast.configure(bg="#dff6e5")
+        toast.configure(bg=bg)
 
-        container = tk.Frame(toast, bg="#dff6e5", bd=1, relief="solid", highlightthickness=1, highlightbackground="#9ed8af")
+        container = tk.Frame(toast, bg=bg, bd=1, relief="solid", highlightthickness=1, highlightbackground=border)
         container.pack(fill="both", expand=True)
-
-        icon_label = tk.Label(container, text="✅", bg="#dff6e5", fg="#1e7e34", font=("Segoe UI", 12, "bold"))
-        icon_label.pack(side="left", padx=(10, 6), pady=8)
-        text_label = tk.Label(
-            container,
-            text=f"Ссылка «{button_name}» скопирована",
-            bg="#dff6e5",
-            fg="#1e7e34",
-            font=("Segoe UI", 9),
-        )
-        text_label.pack(side="left", padx=(0, 10), pady=8)
+        tk.Label(container, text=icon, bg=bg, fg=fg, font=("Segoe UI", 12, "bold")).pack(side="left", padx=(10, 6), pady=8)
+        text = f"{title}\n{message}" if title else message
+        tk.Label(container, text=text, bg=bg, fg=fg, justify="left", font=("Segoe UI", 9)).pack(side="left", padx=(0, 10), pady=8)
 
         toast.update_idletasks()
         master_x = self.master.winfo_rootx()
@@ -2748,8 +2748,11 @@ $items = foreach ($u in $users) {{
         x_pos = master_x + max(10, master_w - toast_w - 18)
         y_pos = master_y + max(10, master_h - toast_h - 18)
         toast.geometry(f"+{x_pos}+{y_pos}")
-        self._dock_copy_toast = toast
-        self.master.after(1700, lambda t=toast: t.destroy() if t.winfo_exists() else None)
+        self._app_toast = toast
+        self.master.after(2600, lambda t=toast: t.destroy() if t.winfo_exists() else None)
+
+    def _show_dock_copy_notification(self, button_name: str):
+        self.show_toast("Док-панель", f"Ссылка «{button_name}» скопирована")
 
     def _copy_dock_text(self, copy_text: str, button_name: str, show_success: bool = True):
         text = (copy_text or "").strip()
@@ -3875,18 +3878,72 @@ $items = foreach ($u in $users) {{
             win,
             self.settings,
             "settings_window_geometry",
-            "900x620+250+150",
-            min_width=820,
-            min_height=560,
+            "760x620+250+120",
+            min_width=680,
+            min_height=520,
         )
         _save_settings_geo = bind_geometry_persistence(win, self.settings, "settings_window_geometry")
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "settings_window_geometry", saver=_save_settings_geo))
-        nb = ttk.Notebook(win); nb.pack(fill="both", expand=True, padx=10, pady=10)
+        try:
+            ttk.Style(win).configure("TLabel", font=("Segoe UI", 10))
+            ttk.Style(win).configure("TButton", font=("Segoe UI", 10), padding=(8, 4))
+        except Exception:
+            pass
+
+        content = ttk.Frame(win)
+        content.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        footer = ttk.Frame(win)
+        footer.pack(fill="x", padx=10, pady=(4, 10))
+        nb = ttk.Notebook(content)
+        nb.pack(fill="both", expand=True)
+
+        def make_scrollable_tab(title: str) -> ttk.Frame:
+            outer = ttk.Frame(nb)
+            nb.add(outer, text=title)
+            canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+            scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+            inner = ttk.Frame(canvas, padding=(12, 8))
+            window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            def _sync_scrollregion(_event=None):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def _sync_width(event):
+                canvas.itemconfigure(window_id, width=event.width)
+
+            def _on_wheel(event):
+                event_num = getattr(event, "num", None)
+                if event_num == 4:
+                    delta = -1
+                elif event_num == 5:
+                    delta = 1
+                else:
+                    delta = -1 if getattr(event, "delta", 0) > 0 else 1
+                canvas.yview_scroll(delta * 3, "units")
+
+            def _bind_wheel(_event=None):
+                canvas.bind_all("<MouseWheel>", _on_wheel, add="+")
+                canvas.bind_all("<Button-4>", _on_wheel, add="+")
+                canvas.bind_all("<Button-5>", _on_wheel, add="+")
+
+            def _unbind_wheel(_event=None):
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Button-4>")
+                canvas.unbind_all("<Button-5>")
+
+            inner.bind("<Configure>", _sync_scrollregion)
+            canvas.bind("<Configure>", _sync_width)
+            outer.bind("<Enter>", _bind_wheel)
+            outer.bind("<Leave>", _unbind_wheel)
+            return inner
 
         can_show_secrets = self.settings.can_show_secrets()
 
         # Общие настройки
-        tab_common = ttk.Frame(nb); nb.add(tab_common, text="Общее")
+        tab_common = make_scrollable_tab("Общее")
         ttk.Label(tab_common, text="Допустимые префиксы ПК (через запятую):").pack(pady=4, anchor="w")
         prefixes_var = tk.StringVar(value=", ".join(self.get_allowed_prefixes()))
         ttk.Entry(tab_common, textvariable=prefixes_var).pack(fill="x")
@@ -3915,7 +3972,7 @@ $items = foreach ($u in $users) {{
                 entry.insert(0, "")
 
         # AD creds
-        tab_ad = ttk.Frame(nb); nb.add(tab_ad, text="Учетные данные AD")
+        tab_ad = make_scrollable_tab("Учетные данные AD")
         add_storage_warning(tab_ad)
         ttk.Label(tab_ad, text="Логин:").pack(pady=4, anchor="w")
         e_user = ttk.Entry(tab_ad); e_user.insert(0, self.settings.get_setting("ad_username","")); e_user.pack(fill="x")
@@ -3938,7 +3995,7 @@ $items = foreach ($u in $users) {{
         ).pack(side="left", padx=(6, 0))
 
         # GLPI
-        tab_glpi = ttk.Frame(nb); nb.add(tab_glpi, text="GLPI")
+        tab_glpi = make_scrollable_tab("GLPI")
         add_storage_warning(tab_glpi)
         ttk.Label(tab_glpi, text="GLPI API URL (apirest.php)").pack(pady=4, anchor="w")
         e_glpi_url = ttk.Entry(tab_glpi); e_glpi_url.insert(0, self.settings.get_setting("glpi_api_url", "")); e_glpi_url.pack(fill="x")
@@ -3954,7 +4011,7 @@ $items = foreach ($u in $users) {{
         ttk.Checkbutton(tab_glpi, text="Использовать сверку с GLPI во время AD Sync", variable=glpi_use_in_ad_sync).pack(pady=4, anchor="w")
 
         # Reset password
-        tab_rst = ttk.Frame(nb); nb.add(tab_rst, text="Пароль для сброса")
+        tab_rst = make_scrollable_tab("Пароль для сброса")
         add_storage_warning(tab_rst)
         ttk.Label(tab_rst, text="Новый пароль:").pack(pady=4, anchor="w")
         e_rst = ttk.Entry(tab_rst, show="*"); insert_secret(e_rst, "reset_password", "12340987"); e_rst.pack(fill="x")
@@ -3965,7 +4022,7 @@ $items = foreach ($u in $users) {{
         btn_toggle.config(command=toggle_pw); btn_toggle.pack(pady=4, anchor="e")
 
         # SSH
-        tab_ssh = ttk.Frame(nb); nb.add(tab_ssh, text="SSH")
+        tab_ssh = make_scrollable_tab("SSH")
         add_storage_warning(tab_ssh)
         ttk.Label(tab_ssh, text="SSH Login:").pack(pady=4, anchor="w")
         e_ssh_login = ttk.Entry(tab_ssh); e_ssh_login.insert(0, self.settings.get_setting("ssh_login","")); e_ssh_login.pack(fill="x")
@@ -3973,10 +4030,17 @@ $items = foreach ($u in $users) {{
         e_ssh_pass = ttk.Entry(tab_ssh, show="*"); insert_secret(e_ssh_pass, "ssh_password", ""); e_ssh_pass.pack(fill="x")
         ttk.Label(tab_ssh, text="Терминал:").pack(pady=4, anchor="w")
         ssh_term = tk.StringVar(value=self.settings.get_setting("ssh_terminal","Windows Terminal"))
-        cmb = ttk.Combobox(tab_ssh, textvariable=ssh_term, values=("Windows Terminal","CMD","PowerShell"), state="readonly")
+        cmb = ttk.Combobox(tab_ssh, textvariable=ssh_term, values=("Windows Terminal","CMD","PowerShell","Termius"), state="readonly")
         cmb.pack(fill="x")
         ssh_pass_enabled = tk.BooleanVar(value=self.settings.get_setting("ssh_pass_enabled", False))
         ttk.Checkbutton(tab_ssh, text="Передавать пароль автоматически", variable=ssh_pass_enabled).pack(pady=4, anchor="w")
+
+        ttk.Label(tab_ssh, text="Путь к Termius.exe (опционально):").pack(pady=4, anchor="w")
+        termius_path = tk.StringVar(value=self.settings.get_setting("termius_path", ""))
+        termius_row = ttk.Frame(tab_ssh)
+        termius_row.pack(fill="x")
+        ttk.Entry(termius_row, textvariable=termius_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(termius_row, text="Обзор…", command=lambda: termius_path.set(filedialog.askopenfilename(title="Выберите Termius.exe", filetypes=[("Executable", "*.exe"), ("Все файлы", "*.*")]) or termius_path.get())).pack(side="left", padx=(6, 0))
         ttk.Label(tab_ssh, text="Plink hostkeys (JSON: {\"host\":\"algo bits fingerprint\"})").pack(pady=4, anchor="w")
         txt_hostkeys = tk.Text(tab_ssh, height=6)
         txt_hostkeys.insert("1.0", json.dumps(self.settings.config.get("plink_hostkeys", {}), ensure_ascii=False, indent=2))
@@ -4052,7 +4116,7 @@ $items = foreach ($u in $users) {{
         ttk.Entry(tab_ssh, textvariable=windows_remote_temp_dir).pack(fill="x")
 
         # Телефония (CallWatcher)
-        tab_cw = ttk.Frame(nb); nb.add(tab_cw, text="Телефония")
+        tab_cw = make_scrollable_tab("Телефония")
         add_storage_warning(tab_cw)
         cw_enabled = tk.BooleanVar(value=self.settings.get_setting("cw_enabled", True))
         ttk.Checkbutton(tab_cw, text="Включить отслеживание звонков", variable=cw_enabled).pack(anchor="w", pady=4)
@@ -4091,8 +4155,19 @@ $items = foreach ($u in $users) {{
         pbx_debug_dump = tk.BooleanVar(value=self.settings.get_setting("pbx_debug_dump", False))
         ttk.Checkbutton(tab_cw, text="Сохранять PBX debug-дампы (raw/plain/block)", variable=pbx_debug_dump).pack(anchor="w", pady=2)
 
+        # Пути и пробросы
+        tab_paths = make_scrollable_tab("Пути / Пробросы")
+        paths_group = ttk.LabelFrame(tab_paths, text="Пути / Пробросы", padding=(12, 8))
+        paths_group.pack(fill="x", pady=4)
+        ttk.Label(paths_group, text="Папка СЭД Elma для проброса:").pack(pady=4, anchor="w")
+        elma_sed_source_path = tk.StringVar(value=self.settings.get_setting("elma_sed_source_path", ""))
+        elma_row = ttk.Frame(paths_group)
+        elma_row.pack(fill="x")
+        ttk.Entry(elma_row, textvariable=elma_sed_source_path).pack(side="left", fill="x", expand=True)
+        ttk.Button(elma_row, text="Обзор…", command=lambda: elma_sed_source_path.set(filedialog.askdirectory(title="Выберите папку СЭД Elma") or elma_sed_source_path.get())).pack(side="left", padx=(6, 0))
+
         # Цвета
-        tab_colors = ttk.Frame(nb); nb.add(tab_colors, text="Цвета")
+        tab_colors = make_scrollable_tab("Цвета")
         def pick_color(current):
             c = colorchooser.askcolor(current)[1]
             return c if c else current
@@ -4145,6 +4220,7 @@ $items = foreach ($u in $users) {{
             self.settings.set_setting("ui_board_bg", board_bg.get())
             self.settings.set_setting("ssh_terminal", ssh_term.get())
             self.settings.set_setting("ssh_pass_enabled", ssh_pass_enabled.get())
+            self.settings.set_setting("termius_path", termius_path.get().strip())
             self.settings.set_setting("ssh_key_enabled", ssh_key_enabled.get())
             self.settings.set_setting("ssh_interactive_try_key_first", ssh_interactive_try_key_first.get())
             self.settings.set_setting("ssh_key_private_path", ssh_key_private_path.get().strip())
@@ -4173,6 +4249,7 @@ $items = foreach ($u in $users) {{
             self.settings.set_setting("windows_skip_if_detected", windows_skip_if_detected.get())
             self.settings.set_setting("windows_prefer_system_context", windows_prefer_system_context.get())
             self.settings.set_setting("windows_remote_temp_dir", windows_remote_temp_dir.get().strip() or "C:\\\\Windows\\\\Temp\\\\tshelper_deploy")
+            self.settings.set_setting("elma_sed_source_path", elma_sed_source_path.get().strip())
             # hostkeys
             try:
                 hk = json.loads(txt_hostkeys.get("1.0","end").strip() or "{}")
@@ -4224,7 +4301,8 @@ $items = foreach ($u in $users) {{
             # перезапуск колл-вотчера с новыми настройками
             self.restart_call_watcher_if_needed()
 
-        ttk.Button(win, text="Сохранить", command=save_all).pack(pady=8)
+        ttk.Button(footer, text="Отмена", command=lambda: self._close_save_geo(win, "settings_window_geometry", saver=_save_settings_geo)).pack(side="right", padx=(6, 0))
+        ttk.Button(footer, text="Сохранить", command=save_all).pack(side="right")
 
     def _close_save_geo(self, window, key, saver=None):
         if saver:
@@ -5160,6 +5238,7 @@ class UserButton(ttk.Frame):
             m.add_separator()
         m.add_command(label="RDP", command=self.rdp_connect)
         m.add_command(label="Удаленный помощник", command=self.remote_assistance)
+        m.add_command(label="PowerShell Remote", command=self.open_powershell_remote)
         m.add_command(label="Проводник (C$)", command=self.open_explorer)
         m.add_command(label="Получить IP", command=self.get_ip)
         m.add_command(label="Открыть в AD", command=self.open_in_ad)
@@ -5172,6 +5251,7 @@ class UserButton(ttk.Frame):
         m.add_command(label="Пробросить SSH-ключ", command=self.bootstrap_ssh_key)
         m.add_command(label="Установка ПО", command=self.install_software_dialog)
         m.add_command(label="Windows Deployment", command=self.install_windows_software_dialog)
+        m.add_command(label="Проброс СЭД Elma", command=self.push_elma_sed)
         m.add_separator()
         m.add_command(label="Редактировать", command=lambda: self.app.open_edit_window(self.user))
         m.add_command(label="Удалить", command=lambda: self.app.delete_user_from_button(self.user))
@@ -5225,6 +5305,75 @@ class UserButton(ttk.Frame):
             os.startfile(f"\\\\{self.user['pc_name']}\\c$")
         except Exception as e:
             messagebox.showerror("Проводник", str(e))
+
+    def open_powershell_remote(self):
+        try:
+            if not is_windows():
+                return messagebox.showerror(
+                    "PowerShell Remote",
+                    "PowerShell Remote доступен только при запуске TSHelper на Windows. Для работы также нужен включённый PowerShell Remoting/WinRM на целевом ПК.",
+                )
+            candidates = self.app.build_host_candidates(self.user)
+            target_host = ""
+            for host in candidates:
+                if self.app.resolve_ip(host):
+                    target_host = host
+                    break
+            if not target_host:
+                target_host = self.user.get("pc_name", "").strip()
+            if not target_host:
+                return messagebox.showerror("PowerShell Remote", "Не удалось определить целевой ПК")
+
+            ps_target = target_host.replace("'", "''")
+            remote_command = f"Enter-PSSession -ComputerName '{ps_target}'"
+            launcher = shutil.which("wt.exe")
+            if launcher:
+                subprocess.Popen([launcher, "powershell.exe", "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", remote_command])
+            else:
+                subprocess.Popen(["powershell.exe", "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", remote_command])
+            self._log_action(f"Открыт PowerShell Remote ({target_host})")
+        except Exception as e:
+            messagebox.showerror("PowerShell Remote", f"{e}\n\nДля работы нужен доступный PowerShell Remoting/WinRM на целевом ПК.")
+
+    def push_elma_sed(self):
+        source_path = self.app.settings.get_setting("elma_sed_source_path", "").strip()
+        if not source_path:
+            return messagebox.showerror("Проброс СЭД Elma", "Не задана папка СЭД Elma в настройках.")
+        if not os.path.exists(source_path):
+            return messagebox.showerror("Проброс СЭД Elma", f"Папка не найдена: {source_path}")
+        if not os.path.isdir(source_path):
+            return messagebox.showerror("Проброс СЭД Elma", f"Указанный путь не является папкой: {source_path}")
+        if not is_windows():
+            return messagebox.showerror("Проброс СЭД Elma", "Проброс через admin-share и robocopy доступен только на Windows.")
+
+        folder_name = os.path.basename(os.path.normpath(source_path))
+        pc_name = self.user.get("pc_name", "").strip()
+        if not pc_name:
+            return messagebox.showerror("Проброс СЭД Elma", "Не удалось определить имя целевого ПК.")
+        dest_unc = f"\\\\{pc_name}\\c$\\{folder_name}"
+
+        def work():
+            command = ["robocopy", source_path, dest_unc, "/E", "/R:1", "/W:1", "/NP"]
+            log_message(f"Проброс СЭД Elma: запуск {' '.join(command)}")
+            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            log_message(f"Проброс СЭД Elma stdout:\n{result.stdout or ''}")
+            log_message(f"Проброс СЭД Elma stderr:\n{result.stderr or ''}")
+            log_message(f"Проброс СЭД Elma returncode: {result.returncode}")
+            if result.returncode >= 8:
+                details = (result.stderr or result.stdout or f"robocopy завершился с кодом {result.returncode}").strip()
+                raise RuntimeError(details)
+            return pc_name, folder_name
+
+        def on_success(result):
+            copied_pc, copied_folder = result
+            self._log_action("Проброс СЭД Elma -> OK")
+            self.app.show_toast("СЭД Elma", f"Папка скопирована на {copied_pc} в C:\\{copied_folder}")
+
+        def on_error(exc):
+            self._log_action("Проброс СЭД Elma -> ERROR")
+            messagebox.showerror("Проброс СЭД Elma", str(exc))
+
+        self.app.run_background(work, on_success, on_error)
 
     def open_glpi(self):
         try:
@@ -5879,6 +6028,31 @@ Write-Output "OK"
         private_key_path = self.app.settings.get_setting("ssh_key_private_path", "").strip()
 
         try:
+            if term == "Termius":
+                if auto:
+                    messagebox.showinfo(
+                        "Termius",
+                        "Termius не поддерживает безопасный автопроброс пароля из TSHelper. Сохрани пароль/ключ внутри Termius или используй Windows Terminal/CMD/PowerShell. Сейчас будет открыт host без передачи пароля.",
+                    )
+                ssh_uri = f"ssh://{urllib.parse.quote(ssh_login, safe='')}@{ssh_target}:22"
+                termius_path = self.app.settings.get_setting("termius_path", "").strip()
+                if termius_path:
+                    if not os.path.isfile(termius_path):
+                        raise FileNotFoundError(f"Termius.exe не найден: {termius_path}")
+                    subprocess.Popen([termius_path, ssh_uri])
+                elif is_windows() and hasattr(os, "startfile"):
+                    try:
+                        os.startfile(ssh_uri)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "Не удалось открыть ssh:// ссылку. Вероятно, обработчик ssh:// не зарегистрирован. "
+                            "Укажи путь к Termius.exe в настройках."
+                        ) from exc
+                else:
+                    raise RuntimeError("Termius без указанного пути поддерживается только на Windows через зарегистрированный обработчик ssh://.")
+                self._log_action(f"Открыт SSH через Termius ({ssh_target})")
+                return
+
             if try_key_first and key_enabled:
                 if private_key_path and os.path.isfile(private_key_path):
                     key_ok, _ = self.test_interactive_ssh_key(ssh_target, ssh_login, private_key_path)
