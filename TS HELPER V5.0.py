@@ -3874,6 +3874,10 @@ $items = foreach ($u in $users) {{
     # --------- Settings ----------
     def open_settings(self):
         win = tk.Toplevel(self.master); win.title("Настройки")
+        screen_w = max(800, int(win.winfo_screenwidth() or 0))
+        screen_h = max(600, int(win.winfo_screenheight() or 0))
+        settings_max_width = max(680, min(920, int(screen_w * 0.85)))
+        settings_max_height = max(520, min(720, int(screen_h * 0.85)))
         apply_persisted_geometry(
             win,
             self.settings,
@@ -3881,6 +3885,8 @@ $items = foreach ($u in $users) {{
             "760x620+250+120",
             min_width=680,
             min_height=520,
+            max_width=settings_max_width,
+            max_height=settings_max_height,
         )
         _save_settings_geo = bind_geometry_persistence(win, self.settings, "settings_window_geometry")
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "settings_window_geometry", saver=_save_settings_geo))
@@ -3923,21 +3929,24 @@ $items = foreach ($u in $users) {{
                 else:
                     delta = -1 if getattr(event, "delta", 0) > 0 else 1
                 canvas.yview_scroll(delta * 3, "units")
+                return "break"
 
-            def _bind_wheel(_event=None):
-                canvas.bind_all("<MouseWheel>", _on_wheel, add="+")
-                canvas.bind_all("<Button-4>", _on_wheel, add="+")
-                canvas.bind_all("<Button-5>", _on_wheel, add="+")
+            def bind_mousewheel_recursive(widget):
+                if not getattr(widget, "_tshelper_settings_wheel_bound", False):
+                    widget.bind("<MouseWheel>", _on_wheel, add="+")
+                    widget.bind("<Button-4>", _on_wheel, add="+")
+                    widget.bind("<Button-5>", _on_wheel, add="+")
+                    setattr(widget, "_tshelper_settings_wheel_bound", True)
+                for child in widget.winfo_children():
+                    bind_mousewheel_recursive(child)
 
-            def _unbind_wheel(_event=None):
-                canvas.unbind_all("<MouseWheel>")
-                canvas.unbind_all("<Button-4>")
-                canvas.unbind_all("<Button-5>")
+            def _sync_inner(_event=None):
+                _sync_scrollregion()
+                inner.after_idle(lambda: bind_mousewheel_recursive(outer))
 
-            inner.bind("<Configure>", _sync_scrollregion)
+            inner.bind("<Configure>", _sync_inner)
             canvas.bind("<Configure>", _sync_width)
-            outer.bind("<Enter>", _bind_wheel)
-            outer.bind("<Leave>", _unbind_wheel)
+            bind_mousewheel_recursive(outer)
             return inner
 
         can_show_secrets = self.settings.can_show_secrets()
@@ -4086,34 +4095,38 @@ $items = foreach ($u in $users) {{
         ttk.Entry(catalog_row, textvariable=software_catalog_path).pack(side="left", fill="x", expand=True)
         ttk.Button(catalog_row, text="Обзор…", command=lambda: software_catalog_path.set(filedialog.askopenfilename(title="Выберите JSON-каталог ПО", filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")]) or software_catalog_path.get())).pack(side="left", padx=(6, 0))
 
-        ttk.Label(tab_ssh, text="Windows каталог ПО:").pack(pady=4, anchor="w")
+        tab_windows = make_scrollable_tab("Windows")
+        windows_group = ttk.LabelFrame(tab_windows, text="Windows Deployment", padding=(12, 8))
+        windows_group.pack(fill="x", pady=4)
+
+        ttk.Label(windows_group, text="Windows каталог ПО:").pack(pady=4, anchor="w")
         windows_software_catalog_path = tk.StringVar(value=self.settings.get_setting("windows_software_catalog_path", "software_catalog_windows.json"))
-        windows_catalog_row = ttk.Frame(tab_ssh)
+        windows_catalog_row = ttk.Frame(windows_group)
         windows_catalog_row.pack(fill="x")
         ttk.Entry(windows_catalog_row, textvariable=windows_software_catalog_path).pack(side="left", fill="x", expand=True)
         ttk.Button(windows_catalog_row, text="Обзор…", command=lambda: windows_software_catalog_path.set(filedialog.askopenfilename(title="Выберите Windows JSON-каталог ПО", filetypes=[("JSON", "*.json"), ("Все файлы", "*.*")]) or windows_software_catalog_path.get())).pack(side="left", padx=(6, 0))
 
-        ttk.Label(tab_ssh, text="Windows backend по умолчанию:").pack(pady=4, anchor="w")
+        ttk.Label(windows_group, text="Windows backend по умолчанию:").pack(pady=4, anchor="w")
         windows_default_backend = tk.StringVar(value=self.settings.get_setting("windows_default_backend", "local_subprocess"))
-        ttk.Combobox(tab_ssh, textvariable=windows_default_backend, values=("local_subprocess", "psexec"), state="readonly").pack(fill="x")
+        ttk.Combobox(windows_group, textvariable=windows_default_backend, values=("local_subprocess", "psexec"), state="readonly").pack(fill="x")
 
-        ttk.Label(tab_ssh, text="Путь к PsExec64.exe:").pack(pady=4, anchor="w")
+        ttk.Label(windows_group, text="Путь к PsExec64.exe:").pack(pady=4, anchor="w")
         windows_psexec_path = tk.StringVar(value=self.settings.get_setting("windows_psexec_path", "C:\\\\Tools\\\\PsExec64.exe"))
-        psexec_row = ttk.Frame(tab_ssh)
+        psexec_row = ttk.Frame(windows_group)
         psexec_row.pack(fill="x")
         ttk.Entry(psexec_row, textvariable=windows_psexec_path).pack(side="left", fill="x", expand=True)
         ttk.Button(psexec_row, text="Обзор…", command=lambda: windows_psexec_path.set(filedialog.askopenfilename(title="Выберите PsExec64.exe", filetypes=[("Executable", "*.exe"), ("Все файлы", "*.*")]) or windows_psexec_path.get())).pack(side="left", padx=(6, 0))
 
-        ttk.Label(tab_ssh, text="Windows timeout по умолчанию, сек:").pack(pady=4, anchor="w")
+        ttk.Label(windows_group, text="Windows timeout по умолчанию, сек:").pack(pady=4, anchor="w")
         windows_default_timeout_sec = tk.StringVar(value=str(self.settings.get_setting("windows_default_timeout_sec", 1200)))
-        ttk.Entry(tab_ssh, textvariable=windows_default_timeout_sec).pack(fill="x")
+        ttk.Entry(windows_group, textvariable=windows_default_timeout_sec).pack(fill="x")
         windows_skip_if_detected = tk.BooleanVar(value=self.settings.get_setting("windows_skip_if_detected", True))
-        ttk.Checkbutton(tab_ssh, text="Windows: пропускать установку, если пакет уже обнаружен", variable=windows_skip_if_detected).pack(anchor="w", pady=4)
+        ttk.Checkbutton(windows_group, text="Windows: пропускать установку, если пакет уже обнаружен", variable=windows_skip_if_detected).pack(anchor="w", pady=4)
         windows_prefer_system_context = tk.BooleanVar(value=self.settings.get_setting("windows_prefer_system_context", False))
-        ttk.Checkbutton(tab_ssh, text="Windows: предпочитать SYSTEM-контекст для удалённого запуска", variable=windows_prefer_system_context).pack(anchor="w", pady=4)
-        ttk.Label(tab_ssh, text="Windows remote temp directory:").pack(pady=4, anchor="w")
+        ttk.Checkbutton(windows_group, text="Windows: предпочитать SYSTEM-контекст для удалённого запуска", variable=windows_prefer_system_context).pack(anchor="w", pady=4)
+        ttk.Label(windows_group, text="Windows remote temp directory:").pack(pady=4, anchor="w")
         windows_remote_temp_dir = tk.StringVar(value=self.settings.get_setting("windows_remote_temp_dir", "C:\\\\Windows\\\\Temp\\\\tshelper_deploy"))
-        ttk.Entry(tab_ssh, textvariable=windows_remote_temp_dir).pack(fill="x")
+        ttk.Entry(windows_group, textvariable=windows_remote_temp_dir).pack(fill="x")
 
         # Телефония (CallWatcher)
         tab_cw = make_scrollable_tab("Телефония")
@@ -5355,7 +5368,15 @@ class UserButton(ttk.Frame):
         def work():
             command = ["robocopy", source_path, dest_unc, "/E", "/R:1", "/W:1", "/NP"]
             log_message(f"Проброс СЭД Elma: запуск {' '.join(command)}")
-            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
             log_message(f"Проброс СЭД Elma stdout:\n{result.stdout or ''}")
             log_message(f"Проброс СЭД Elma stderr:\n{result.stderr or ''}")
             log_message(f"Проброс СЭД Elma returncode: {result.returncode}")
@@ -6036,22 +6057,39 @@ Write-Output "OK"
                     )
                 ssh_uri = f"ssh://{urllib.parse.quote(ssh_login, safe='')}@{ssh_target}:22"
                 termius_path = self.app.settings.get_setting("termius_path", "").strip()
-                if termius_path:
-                    if not os.path.isfile(termius_path):
-                        raise FileNotFoundError(f"Termius.exe не найден: {termius_path}")
-                    subprocess.Popen([termius_path, ssh_uri])
-                elif is_windows() and hasattr(os, "startfile"):
+                startfile_error = ""
+                popen_error = ""
+                if is_windows() and hasattr(os, "startfile"):
                     try:
                         os.startfile(ssh_uri)
+                        self._log_action(f"Открыт SSH через Termius ({ssh_target})")
+                        return
                     except Exception as exc:
-                        raise RuntimeError(
-                            "Не удалось открыть ssh:// ссылку. Вероятно, обработчик ssh:// не зарегистрирован. "
-                            "Укажи путь к Termius.exe в настройках."
-                        ) from exc
-                else:
-                    raise RuntimeError("Termius без указанного пути поддерживается только на Windows через зарегистрированный обработчик ssh://.")
-                self._log_action(f"Открыт SSH через Termius ({ssh_target})")
-                return
+                        startfile_error = str(exc)
+                        log_message(f"Termius: обработчик ssh:// не открыл {ssh_uri}: {startfile_error}")
+
+                if termius_path and os.path.isfile(termius_path):
+                    try:
+                        subprocess.Popen([termius_path, ssh_uri])
+                        self._log_action(f"Открыт SSH через Termius ({ssh_target})")
+                        return
+                    except Exception as exc:
+                        popen_error = str(exc)
+                        log_message(f"Termius: запуск {termius_path} не принял URI {ssh_uri}: {popen_error}")
+                elif termius_path:
+                    popen_error = f"Termius.exe не найден: {termius_path}"
+
+                details = []
+                if startfile_error:
+                    details.append(f"ошибка обработчика ssh://: {startfile_error}")
+                if popen_error:
+                    details.append(popen_error)
+                suffix = f" ({'; '.join(details)})" if details else ""
+                raise RuntimeError(
+                    "Не удалось открыть ssh:// ссылку: обработчик ssh:// не зарегистрирован, "
+                    f"а Termius.exe не найден или не принял URI{suffix}. "
+                    "Укажи корректный путь к Termius.exe в настройках или зарегистрируй обработчик ssh://."
+                )
 
             if try_key_first and key_enabled:
                 if private_key_path and os.path.isfile(private_key_path):
