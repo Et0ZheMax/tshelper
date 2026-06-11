@@ -6059,6 +6059,18 @@ Write-Output "OK"
                 termius_path = self.app.settings.get_setting("termius_path", "").strip()
                 startfile_error = ""
                 popen_error = ""
+
+                if termius_path:
+                    if not os.path.isfile(termius_path):
+                        raise RuntimeError(f"Termius.exe не найден: {termius_path}")
+                    try:
+                        subprocess.Popen([termius_path, ssh_uri])
+                        self._log_action(f"Открыт SSH через Termius ({ssh_target})")
+                        return
+                    except Exception as exc:
+                        popen_error = str(exc)
+                        log_message(f"Termius: запуск {termius_path} не принял URI {ssh_uri}: {popen_error}")
+
                 if is_windows() and hasattr(os, "startfile"):
                     try:
                         os.startfile(ssh_uri)
@@ -6068,26 +6080,17 @@ Write-Output "OK"
                         startfile_error = str(exc)
                         log_message(f"Termius: обработчик ssh:// не открыл {ssh_uri}: {startfile_error}")
 
-                if termius_path and os.path.isfile(termius_path):
-                    try:
-                        subprocess.Popen([termius_path, ssh_uri])
-                        self._log_action(f"Открыт SSH через Termius ({ssh_target})")
-                        return
-                    except Exception as exc:
-                        popen_error = str(exc)
-                        log_message(f"Termius: запуск {termius_path} не принял URI {ssh_uri}: {popen_error}")
-                elif termius_path:
-                    popen_error = f"Termius.exe не найден: {termius_path}"
-
                 details = []
-                if startfile_error:
-                    details.append(f"ошибка обработчика ssh://: {startfile_error}")
                 if popen_error:
                     details.append(popen_error)
+                if startfile_error:
+                    details.append(f"обработчик ssh:// не зарегистрирован или не открыл ссылку: {startfile_error}")
+                elif not (is_windows() and hasattr(os, "startfile")):
+                    details.append("обработчик ssh:// доступен только на Windows")
                 suffix = f" ({'; '.join(details)})" if details else ""
                 raise RuntimeError(
-                    "Не удалось открыть ssh:// ссылку: обработчик ssh:// не зарегистрирован, "
-                    f"а Termius.exe не найден или не принял URI{suffix}. "
+                    "Не удалось открыть SSH через Termius: "
+                    f"Termius.exe не найден/не принял URI или обработчик ssh:// не зарегистрирован{suffix}. "
                     "Укажи корректный путь к Termius.exe в настройках или зарегистрируй обработчик ssh://."
                 )
 
