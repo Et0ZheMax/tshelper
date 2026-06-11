@@ -32,13 +32,18 @@ def _coerce_on_screen(
     pos_y: int,
     min_width: int,
     min_height: int,
+    max_width: int | None = None,
+    max_height: int | None = None,
 ) -> tuple[int, int, int, int]:
     root.update_idletasks()
     screen_w = max(640, int(root.winfo_screenwidth() or 0))
     screen_h = max(480, int(root.winfo_screenheight() or 0))
 
-    safe_w = min(max(width, min_width), screen_w)
-    safe_h = min(max(height, min_height), screen_h)
+    effective_max_w = screen_w if max_width is None else max(min_width, min(int(max_width), screen_w))
+    effective_max_h = screen_h if max_height is None else max(min_height, min(int(max_height), screen_h))
+
+    safe_w = min(max(width, min_width), effective_max_w)
+    safe_h = min(max(height, min_height), effective_max_h)
 
     max_x = max(0, screen_w - safe_w)
     max_y = max(0, screen_h - safe_h)
@@ -55,6 +60,8 @@ def apply_persisted_geometry(
     *,
     min_width: int = 480,
     min_height: int = 320,
+    max_width: int | None = None,
+    max_height: int | None = None,
 ) -> None:
     if hasattr(window, "minsize"):
         window.minsize(min_width, min_height)
@@ -72,7 +79,17 @@ def apply_persisted_geometry(
     else:
         width, height, pos_x, pos_y = parsed
 
-    safe_w, safe_h, safe_x, safe_y = _coerce_on_screen(window, width, height, pos_x, pos_y, min_width, min_height)
+    safe_w, safe_h, safe_x, safe_y = _coerce_on_screen(
+        window,
+        width,
+        height,
+        pos_x,
+        pos_y,
+        min_width,
+        min_height,
+        max_width,
+        max_height,
+    )
     window.geometry(f"{safe_w}x{safe_h}+{safe_x}+{safe_y}")
 
 
