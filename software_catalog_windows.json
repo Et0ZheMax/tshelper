@@ -1,41 +1,54 @@
 {
   "software": [
     {
-      "id": "google_chrome",
-      "title": "Google Chrome",
+      "title": "ChromeSetup",
       "os_family": "windows",
       "install_type": "exe",
       "description": "Google Chrome browser",
-      "tags": ["browser", "common"],
+      "tags": [
+        "browser",
+        "common"
+      ],
       "enabled": true,
       "requires_admin": true,
       "timeout_sec": 1200,
-      "architecture": "x64",
       "source": {
-        "kind": "unc_path",
-        "value": "\\\\srv-backupdata\\packages\\chrome\\123.0.0\\ChromeSetup.exe"
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/ChromeSetup.exe",
+        "checksum_sha256": ""
       },
-      "silent_args": ["/silent", "/install"],
+      "silent_args": [],
       "detection": {
-        "type": "file_exists",
-        "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "ChromeSetup",
+        "command": [],
+        "script": ""
       },
-      "reboot_behavior": "auto_detect"
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "chromesetup"
     },
     {
-      "id": "seven_zip",
       "title": "7-Zip",
       "os_family": "windows",
       "install_type": "msi",
       "description": "Архиватор 7-Zip",
-      "tags": ["utility", "archive"],
+      "tags": [
+        "utility",
+        "archive"
+      ],
       "enabled": true,
       "requires_admin": true,
       "timeout_sec": 900,
-      "architecture": "x64",
       "source": {
         "kind": "file_path",
-        "value": "C:\\Installers\\7zip\\7z2409-x64.msi"
+        "value": "U:/Archive/Programs/7z2408-x64.msi",
+        "checksum_sha256": ""
       },
       "silent_args": [],
       "detection": {
@@ -43,9 +56,15 @@
         "path": "HKLM\\Software\\7-Zip",
         "value_name": "Path",
         "operator": "!=",
-        "value": ""
+        "value": "",
+        "command": [],
+        "script": ""
       },
-      "reboot_behavior": "never"
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "x64",
+      "reboot_behavior": "never",
+      "id": "seven_zip"
     },
     {
       "id": "vcredist_2022",
@@ -53,7 +72,10 @@
       "os_family": "windows",
       "install_type": "exe",
       "description": "Microsoft Visual C++ Redistributable",
-      "tags": ["runtime", "microsoft"],
+      "tags": [
+        "runtime",
+        "microsoft"
+      ],
       "enabled": true,
       "requires_admin": true,
       "timeout_sec": 1200,
@@ -62,7 +84,11 @@
         "kind": "file_path",
         "value": "C:\\Installers\\VC_redist.x64.exe"
       },
-      "silent_args": ["/install", "/quiet", "/norestart"],
+      "silent_args": [
+        "/install",
+        "/quiet",
+        "/norestart"
+      ],
       "detection": {
         "type": "uninstall_display_name",
         "value": "Microsoft Visual C++"
@@ -75,7 +101,10 @@
       "os_family": "windows",
       "install_type": "winget",
       "description": "Notepad++ через winget",
-      "tags": ["editor", "common"],
+      "tags": [
+        "editor",
+        "common"
+      ],
       "enabled": true,
       "requires_admin": false,
       "timeout_sec": 900,
@@ -87,7 +116,10 @@
       "silent_args": [],
       "detection": {
         "type": "command_success",
-        "command": ["where", "notepad++.exe"]
+        "command": [
+          "where",
+          "notepad++.exe"
+        ]
       },
       "reboot_behavior": "never"
     },
@@ -97,7 +129,10 @@
       "os_family": "windows",
       "install_type": "powershell",
       "description": "Кастомный скрипт установки драйвера",
-      "tags": ["driver", "custom"],
+      "tags": [
+        "driver",
+        "custom"
+      ],
       "enabled": false,
       "requires_admin": true,
       "timeout_sec": 1800,
@@ -112,6 +147,353 @@
         "script": "Test-Path 'C:\\Program Files\\Vendor\\driver\\driver.exe'"
       },
       "reboot_behavior": "auto_detect"
+    },
+    {
+      "title": "LibreOffice x86",
+      "os_family": "windows",
+      "install_type": "msi",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/АиХЦИ/Support/Программы/Open/LibreOffice/LibreOffice_6.4.5_Win_x86.msi",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "LibreOffice x86",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "6.4.5",
+      "architecture": "x86",
+      "reboot_behavior": "auto_detect",
+      "id": "libreoffice_x86"
+    },
+    {
+      "title": "PuntoSwitcherSetup",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/PuntoSwitcherSetup.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "PuntoSwitcherSetup",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "puntoswitchersetup"
+    },
+    {
+      "title": "Loupe Browser",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/Loupe-Browser-9.0.0.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "silent_preset": "auto",
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "Loupe Browser",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "9.0.0",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "loupe_browser"
+    },
+    {
+      "title": "dia 0 97 2 es en",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/dia-0-97-2-es-en-win.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "dia 0 97 2 es en",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "dia_0_97_2_es_en"
+    },
+    {
+      "title": "draw.io",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/draw.io-24.7.17-windows-installer.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "detection": {
+        "type": "product_code",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "draw.io",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "24.7.17",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "draw_io"
+    },
+    {
+      "title": "XnView",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/XnView-win.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/SP-"
+      ],
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "XnView",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "xnview"
+    },
+    {
+      "title": "FSViewerSetup48",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/FSViewerSetup48.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/SP-"
+      ],
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "FSViewerSetup48",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "fsviewersetup48"
+    },
+    {
+      "title": "BraveBrowserSetup",
+      "os_family": "windows",
+      "install_type": "exe",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/BraveBrowserSetup.exe",
+        "checksum_sha256": ""
+      },
+      "silent_args": [
+        "/S"
+      ],
+      "silent_preset": "nsis",
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "BraveBrowserSetup",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "bravebrowsersetup"
+    },
+    {
+      "title": "SAV.",
+      "os_family": "windows",
+      "install_type": "msi",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/illumina/SAV.2.4.7.0.msi",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "silent_preset": "custom",
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "SAV.",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "2.4.7.0",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "sav"
+    },
+    {
+      "title": "Bio Rad CFX Manager",
+      "os_family": "windows",
+      "install_type": "msi",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/Bio-Rad_CFX_Manager_3.1.1621_Setup.msi",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "silent_preset": "custom",
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "Bio Rad CFX Manager",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "3.1.1621",
+      "architecture": "any",
+      "reboot_behavior": "auto_detect",
+      "id": "bio_rad_cfx_manager"
+    },
+    {
+      "title": "pdf24 creator x64",
+      "os_family": "windows",
+      "install_type": "msi",
+      "description": "",
+      "tags": [],
+      "enabled": true,
+      "requires_admin": true,
+      "timeout_sec": 1200,
+      "source": {
+        "kind": "file_path",
+        "value": "U:/Archive/Programs/pdf24-creator-11.18.0-x64.msi",
+        "checksum_sha256": ""
+      },
+      "silent_args": [],
+      "silent_preset": "custom",
+      "detection": {
+        "type": "uninstall_display_name",
+        "path": "",
+        "value_name": "",
+        "operator": "==",
+        "value": "pdf24 creator x64",
+        "command": [],
+        "script": ""
+      },
+      "execution_defaults": {},
+      "package_version": "11.18.0",
+      "architecture": "x64",
+      "reboot_behavior": "auto_detect",
+      "id": "pdf24_creator_x64"
     }
   ]
 }

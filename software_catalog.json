@@ -11,7 +11,11 @@
       "url": "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
       "requires_sudo": true,
       "timeout_sec": 1800,
-      "tags": ["browser", "chrome", "google"]
+      "tags": [
+        "browser",
+        "chrome",
+        "google"
+      ]
     },
     {
       "id": "vlc",
@@ -23,7 +27,109 @@
       "package_name": "vlc",
       "requires_sudo": true,
       "timeout_sec": 1200,
-      "tags": ["media", "player"]
+      "tags": [
+        "media",
+        "player"
+      ]
+    },
+    {
+      "id": "vscode",
+      "title": "VS Code",
+      "os_family": "ubuntu",
+      "install_type": "deb_url",
+      "enabled": true,
+      "description": "Скачивает официальный .deb и устанавливает пакет через apt.",
+      "package_name": "code",
+      "url": "http://srv-backupdata/archive/Programs/ubu/code_1.110.0.deb",
+      "requires_sudo": true,
+      "timeout_sec": 1800,
+      "tags": [
+        "code",
+        "vscode",
+        "vs"
+      ]
+    },
+    {
+      "id": "YandexBr",
+      "title": "Яндекс Браузер",
+      "os_family": "ubuntu",
+      "install_type": "deb_url",
+      "enabled": true,
+      "description": "Скачивает официальный .deb и устанавливает пакет через apt.",
+      "package_name": "code",
+      "url": "http://srv-backupdata/archive/Programs/ubu/YandexBrowser.deb",
+      "requires_sudo": true,
+      "timeout_sec": 1800,
+      "tags": [
+        "yandex",
+        "яндекс",
+        "яндекс браузер"
+      ]
+    },
+    {
+      "id": "python",
+      "title": "Python",
+      "os_family": "ubuntu",
+      "install_type": "apt",
+      "enabled": true,
+      "description": "Устанавливает пакет из репозитория Ubuntu.",
+      "package_name": "python3-pip",
+      "requires_sudo": true,
+      "timeout_sec": 1200,
+      "tags": [
+        "python",
+        "pip"
+      ]
+    },
+    {
+      "title": "PyMol",
+      "id": "pymol",
+      "os_family": "ubuntu",
+      "install_type": "apt",
+      "description": "",
+      "tags": [],
+      "timeout_sec": 1800,
+      "requires_sudo": true,
+      "enabled": true,
+      "apt_input": "sudo apt install -y pymol",
+      "local_path": "",
+      "url": "",
+      "packages": [
+        "pymol"
+      ],
+      "package_name": "pymol"
+    },
+    {
+      "title": "SnapGene",
+      "id": "snapgene",
+      "os_family": "ubuntu",
+      "install_type": "deb_file",
+      "description": "",
+      "tags": [],
+      "timeout_sec": 1800,
+      "requires_sudo": true,
+      "enabled": true,
+      "apt_input": "",
+      "local_path": "U:/Archive/Programs/ubu/snapgene_8.2.2_linux.deb",
+      "url": "",
+      "packages": [],
+      "package_name": ""
+    },
+    {
+      "title": "OnlyOffice",
+      "id": "onlyoffice",
+      "os_family": "ubuntu",
+      "install_type": "deb_file",
+      "description": "",
+      "tags": [],
+      "timeout_sec": 1800,
+      "requires_sudo": true,
+      "enabled": true,
+      "apt_input": "",
+      "local_path": "U:/Archive/Programs/ubu/onlyoffice-desktopeditors_amd64.deb",
+      "url": "",
+      "packages": [],
+      "package_name": ""
     }
   ]
 }

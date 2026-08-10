@@ -1,0 +1,69 @@
+{
+  "software": [
+    {
+      "id": "google-chrome",
+      "title": "Google Chrome",
+      "os_family": "ubuntu",
+      "install_type": "deb_url",
+      "enabled": true,
+      "description": "Скачивает официальный .deb и устанавливает пакет через apt.",
+      "package_name": "google-chrome-stable",
+      "url": "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+      "requires_sudo": true,
+      "timeout_sec": 1800,
+      "tags": ["browser", "chrome", "google"]
+    },
+    {
+      "id": "vlc",
+      "title": "VLC",
+      "os_family": "ubuntu",
+      "install_type": "apt",
+      "enabled": true,
+      "description": "Устанавливает пакет из репозитория Ubuntu.",
+      "package_name": "vlc",
+      "requires_sudo": true,
+      "timeout_sec": 1200,
+      "tags": ["media", "player"]
+    },
+    {
+      "id": "obsidian",
+      "title": "Obsidian",
+      "os_family": "ubuntu",
+      "install_type": "deb_url",
+      "enabled": false,
+      "description": "Пример отключенного пакета. Просто включи enabled=true и подставь рабочий URL.",
+      "package_name": "obsidian",
+      "url": "https://github.com/obsidianmd/obsidian-releases/releases/latest/download/obsidian_amd64.deb",
+      "requires_sudo": true,
+      "timeout_sec": 1800,
+      "tags": ["notes", "wiki"]
+    },
+    {
+      "id": "custom-company-agent",
+      "title": "Company Agent",
+      "os_family": "ubuntu",
+      "install_type": "local_script",
+      "enabled": false,
+      "description": "Пример запуска локального shell-скрипта, который лежит рядом с TSHelper.",
+      "local_script_path": ".\\actions\\install_company_agent.sh",
+      "check_cmd": "systemctl is-active --quiet company-agent.service",
+      "requires_sudo": true,
+      "post_install_cmd": "sudo systemctl enable --now company-agent.service",
+      "timeout_sec": 1800,
+      "tags": ["agent", "company"]
+    },
+    {
+      "id": "apt-transport-https",
+      "title": "apt-transport-https",
+      "os_family": "ubuntu",
+      "install_type": "custom_cmd",
+      "enabled": false,
+      "description": "Пример полностью кастомной команды.",
+      "check_cmd": "dpkg -s apt-transport-https >/dev/null 2>&1",
+      "install_cmd": "sudo apt-get update -y && sudo apt-get install -y apt-transport-https",
+      "requires_sudo": true,
+      "timeout_sec": 900,
+      "tags": ["custom", "apt"]
+    }
+  ]
+}
