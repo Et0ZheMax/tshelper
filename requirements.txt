@@ -6,3 +6,4 @@ pywin32
 keyring
 paramiko
 openpyxl
+prn-site-ping @ git+https://github.com/Et0ZheMax/print_mon.git@009f954be9711cd2aabc31ef92d327aec5287ea0

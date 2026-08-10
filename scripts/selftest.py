@@ -10,6 +10,11 @@ spec = importlib.util.spec_from_file_location('tshelper_v5', MODULE_PATH)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
+from printer_monitor_launcher import (  # noqa: E402
+    PrinterMonitorLauncher,
+    build_printer_monitor_command,
+)
+
 
 def assert_eq(actual, expected, msg):
     if actual != expected:
@@ -64,6 +69,21 @@ def test_callwatcher_parse_helpers():
     assert 'иванов' in name.lower(), 'parse name'
 
 
+def test_printer_monitor_launcher_contract():
+    command = build_printer_monitor_command('pythonw.exe', r'C:\Data\printers.txt')
+    assert_eq(command[:3], ['pythonw.exe', '-m', 'prn_site_ping'], 'print monitor module')
+    assert_eq(command[3:5], ['--config', r'C:\Data\printers.txt'], 'print monitor config')
+
+    class RunningProcess:
+        @staticmethod
+        def poll():
+            return None
+
+    launcher = PrinterMonitorLauncher(working_directory=ROOT)
+    launcher._process = RunningProcess()
+    assert launcher.is_running, 'duplicate launch guard'
+
+
 if __name__ == '__main__':
     tests = [
         test_normalize_phone,
@@ -71,6 +91,7 @@ if __name__ == '__main__':
         test_broken_json_and_safe_save,
         test_safe_save_json_cleans_temp_on_error,
         test_callwatcher_parse_helpers,
+        test_printer_monitor_launcher_contract,
     ]
     for t in tests:
         t()

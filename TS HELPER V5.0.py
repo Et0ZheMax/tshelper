@@ -1,18 +1,20 @@
-# TS HELP AD — v5.9 (all-in-one + CallWatcher)
-# Требуется: Python 3.9+, Windows
+# TS HELP AD — v5.9.2 (all-in-one + CallWatcher + GLPI browser bridge + Print Monitor)
+# Требуется: Python 3.11+, Windows
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket, tempfile
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket, tempfile, secrets
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
 
 from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from ui_operation_status import OperationStatusStrip
+from browser_integration import BrowserIntegrationServer
+from printer_monitor_launcher import PrinterMonitorLauncher, PrinterMonitorUnavailable
 
 # --- Версия приложения ---
-VERSION = "v5.9"
+VERSION = "v5.9.2"
 
 # Цвета статусов (иконка в тексте)
 STATUS_COLORS_DEFAULT = {
@@ -944,6 +946,11 @@ class SettingsManager:
             "minimize_to_widget": False,
             "mini_widget_geometry": "",
             "idle_timeout_minutes": 0,
+            # Браузерная интеграция GLPI -> TSHelper
+            "browser_integration_enabled": True,
+            "browser_integration_host": "127.0.0.1",
+            "browser_integration_port": 8766,
+            "browser_integration_token": "",
         })
         self.secret_storage = SecretStorage(APP_NAME)
         self._secret_keys = {"ad_password", "ssh_password", "reset_password", "cw_password", "glpi_app_token", "glpi_user_token"}
@@ -1459,6 +1466,11 @@ class MainWindow:
         self._idle_job = None
         self._idle_last_activity = time.time()
         self.idle_timeout_minutes = 0
+        self.browser_integration_server = None
+        self.browser_integration_error = ""
+        self.printer_monitor_launcher = PrinterMonitorLauncher(
+            working_directory=os.path.dirname(os.path.abspath(__file__))
+        )
 
         # стили (переопределяются при изменении настроек)
         self.style = ttk.Style(self.master)
@@ -1530,6 +1542,7 @@ class MainWindow:
         self.build_ui()
         self.populate_buttons()
         self._setup_idle_tracking()
+        self.start_browser_integration()
 
         # Перестраивать сетку при изменении ширины (чтоб не «в столбик»)
         self._last_cols = None
@@ -2437,8 +2450,14 @@ $items = foreach ($u in $users) {{
         menubar.add_cascade(label="Док-панель", menu=dockm)
 
         toolsm = tk.Menu(menubar, tearoff=0)
+        toolsm.add_command(label="Мониторинг принтеров", command=self.open_printer_monitor)
+        toolsm.add_separator()
         toolsm.add_command(label="Проверка окружения", command=self.show_env_check)
         toolsm.add_command(label="Просмотр логов", command=self.open_log_viewer)
+        toolsm.add_separator()
+        toolsm.add_command(label="Браузерная интеграция: статус", command=self.show_browser_integration_status)
+        toolsm.add_command(label="Скопировать токен интеграции", command=self.copy_browser_integration_token)
+        toolsm.add_command(label="Перезапустить браузерную интеграцию", command=self.restart_browser_integration)
         menubar.add_cascade(label="Инструменты", menu=toolsm)
         self.master.config(menu=menubar)
 
@@ -2486,6 +2505,7 @@ $items = foreach ($u in $users) {{
         ttk.Button(bottom, text="Добавить", command=self.add_user).pack(side="left", padx=5)
         ttk.Button(bottom, text="AD Sync", command=self.ad_sync).pack(side="left", padx=5)
         ttk.Button(bottom, text="GLPI Sync", command=self.glpi_prefix_sync).pack(side="left", padx=5)
+        ttk.Button(bottom, text="Принтеры", command=self.open_printer_monitor).pack(side="left", padx=5)
         self.count_lbl = ttk.Label(bottom, text="Найдено аккаунтов: 0"); self.count_lbl.pack(side="right")
 
     def _setup_idle_tracking(self):
@@ -2539,6 +2559,26 @@ $items = foreach ($u in $users) {{
             self.log_window.lift(); self.log_window.focus_force()
             return
         self.log_window = LogViewer(self.master, self.settings)
+
+    def open_printer_monitor(self):
+        try:
+            started = self.printer_monitor_launcher.start()
+        except PrinterMonitorUnavailable as exc:
+            messagebox.showerror("Мониторинг принтеров", str(exc), parent=self.master)
+            return
+        except Exception as exc:
+            logger.exception("Не удалось запустить мониторинг принтеров")
+            messagebox.showerror(
+                "Мониторинг принтеров",
+                f"Не удалось запустить компонент:\n{exc}",
+                parent=self.master,
+            )
+            return
+
+        if started:
+            log_action("Запущен мониторинг принтеров")
+        else:
+            self.show_toast("Мониторинг принтеров", "Окно уже запущено")
 
     def _bind_mousewheel(self):
         # включаем прокрутку только когда курсор над канвой, чтобы не мешать другим окнам
@@ -3091,11 +3131,153 @@ $items = foreach ($u in $users) {{
 
     def _open_user_menu(self, user: dict):
         pc_key = self.canonical_pc_key(user.get("pc_name", ""))
-        btn = self.buttons.get(pc_key)
+        btn = self.user_widgets.get(pc_key) or self.buttons.get(pc_key)
         if btn:
             btn._show_menu()
         else:
             messagebox.showinfo("Пользователь", "Пользователь не найден в списке")
+
+    @staticmethod
+    def _normalize_external_text(value: str) -> str:
+        text = str(value or "").casefold().replace("ё", "е")
+        text = re.sub(r"[^a-zа-я0-9@._\-]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _external_login_candidates_for_user(cls, user: dict) -> set:
+        candidates = set()
+        pc_values = [user.get("pc_name", "")] + list(user.get("pc_options") or [])
+        for value in pc_values:
+            raw = cls._normalize_external_text(value).replace(" ", "")
+            if not raw:
+                continue
+            candidates.add(raw)
+            short = re.sub(r"^(?:ws|lt|w|l)-", "", raw)
+            short = re.sub(r"^[a-z]-", "", short)
+            candidates.add(short)
+            candidates.add(re.sub(r"\d+$", "", short))
+        return {candidate for candidate in candidates if candidate}
+
+    def _match_external_user(self, payload: dict):
+        users = self.users.get_users()
+        requested_name = self._normalize_external_text(payload.get("name", ""))
+        requested_login = self._normalize_external_text(payload.get("login", "")).replace(" ", "")
+        requested_email = self._normalize_external_text(payload.get("email", "")).replace(" ", "")
+        requested_ext = clean_internal_number(payload.get("extension", ""))
+        email_login = requested_email.split("@", 1)[0] if "@" in requested_email else requested_email
+        login_values = {value for value in (requested_login, email_login) if value}
+        requested_parts = parse_person_name(requested_name)
+
+        scored = []
+        for user in users:
+            score = 0
+            reasons = []
+            user_name = self._normalize_external_text(user.get("name", ""))
+            user_ext = clean_internal_number(user.get("ext", ""))
+            user_logins = self._external_login_candidates_for_user(user)
+            user_parts = parse_person_name(user_name)
+
+            if requested_ext and user_ext and requested_ext == user_ext:
+                score += 120
+                reasons.append("extension")
+            if login_values and user_logins.intersection(login_values):
+                score += 110
+                reasons.append("login")
+            if requested_name and user_name == requested_name:
+                score += 100
+                reasons.append("full_name")
+            if requested_name and user_name.startswith(requested_name + " "):
+                score += 90
+                reasons.append("short_name")
+            if (
+                requested_parts.get("last")
+                and requested_parts.get("first_init")
+                and requested_parts.get("last") == user_parts.get("last")
+                and requested_parts.get("first_init") == user_parts.get("first_init")
+            ):
+                score += 70
+                reasons.append("name_parts")
+                if requested_parts.get("first") and requested_parts.get("first") == user_parts.get("first"):
+                    score += 20
+
+            if score:
+                scored.append((score, user, reasons))
+
+        if not scored:
+            return None, "", []
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top_score = scored[0][0]
+        top = [item for item in scored if item[0] == top_score]
+        if len(top) > 1:
+            return None, "ambiguous", [item[1].get("name", "") for item in top[:5]]
+        score, user, reasons = top[0]
+        if score < 70:
+            return None, "weak", []
+        return user, "+".join(reasons), []
+
+    def _open_external_user_in_ui(self, payload: dict) -> dict:
+        user, matched_by, candidates = self._match_external_user(payload)
+        if not user:
+            requested = payload.get("name") or payload.get("login") or payload.get("email") or payload.get("extension") or "неизвестный пользователь"
+            if matched_by == "ambiguous":
+                message = f"Найдено несколько совпадений для «{requested}»: {', '.join(candidates)}"
+            else:
+                message = f"Пользователь «{requested}» не найден в users.json"
+            self.show_toast("GLPI → TSHelper", message, kind="warning")
+            log_message(f"Browser bridge: {message}")
+            return {"ok": False, "error": message}
+
+        self.restore_main_window()
+        search_value = " ".join(str(user.get("name", "")).split()[:2])
+        self.search_entry.delete(0, "end")
+        self.search_entry.insert(0, search_value)
+        self.populate_buttons(show_status=False, search_text=search_value.casefold())
+        self.master.update_idletasks()
+
+        pc_key = self.canonical_pc_key(user.get("pc_name", ""))
+        widget = self.user_widgets.get(pc_key) or self.buttons.get(pc_key)
+        if not widget:
+            message = f"Карточка пользователя {user.get('name', '')} не создана"
+            self.show_toast("GLPI → TSHelper", message, kind="warning")
+            return {"ok": False, "error": message}
+
+        try:
+            self.canvas.yview_moveto(0.0)
+        except Exception:
+            pass
+        self.master.after(180, widget._show_menu)
+        log_action(
+            f"GLPI → TSHelper: открыта карточка {user.get('name', '?')} "
+            f"({user.get('pc_name', '?')}), совпадение: {matched_by or 'unknown'}"
+        )
+        return {
+            "ok": True,
+            "message": f"Открыта карточка: {user.get('name', '')}",
+            "matched_user": user.get("name", ""),
+            "pc_name": user.get("pc_name", ""),
+            "matched_by": matched_by,
+        }
+
+    def _handle_browser_open_user_request(self, payload: dict) -> dict:
+        done = threading.Event()
+        result = {}
+
+        def run_on_ui():
+            try:
+                result.update(self._open_external_user_in_ui(payload))
+            except Exception as exc:
+                log_message(f"Browser bridge UI error: {exc}")
+                result.update({"ok": False, "error": "Ошибка открытия карточки в TSHelper"})
+            finally:
+                done.set()
+
+        try:
+            self.master.after(0, run_on_ui)
+        except Exception:
+            return {"ok": False, "error": "Окно TSHelper недоступно"}
+        if not done.wait(timeout=5.0):
+            return {"ok": False, "error": "TSHelper не ответил вовремя"}
+        return result
 
     def rebind_user_widget_key(self, old_pc: str, new_pc: str, widget=None):
         """Обновляем ключ кэша карточек при смене основного имени ПК."""
@@ -4415,6 +4597,88 @@ $items = foreach ($u in $users) {{
     def _copy(self, txt):
         self.master.clipboard_clear(); self.master.clipboard_append(txt)
 
+    # --------- Браузерная интеграция GLPI ----------
+    def _ensure_browser_integration_token(self) -> str:
+        token = str(self.settings.get_setting("browser_integration_token", "") or "").strip()
+        if len(token) < 32:
+            token = secrets.token_urlsafe(32)
+            self.settings.set_setting("browser_integration_token", token)
+        return token
+
+    def start_browser_integration(self):
+        if not bool(self.settings.get_setting("browser_integration_enabled", True)):
+            log_message("Browser bridge отключён в config.json")
+            return
+        if self.browser_integration_server and self.browser_integration_server.is_running:
+            return
+
+        host = str(self.settings.get_setting("browser_integration_host", "127.0.0.1") or "127.0.0.1").strip()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            host = "127.0.0.1"
+            self.settings.set_setting("browser_integration_host", host)
+        try:
+            port = int(self.settings.get_setting("browser_integration_port", 8766) or 8766)
+        except (TypeError, ValueError):
+            port = 8766
+            self.settings.set_setting("browser_integration_port", port)
+
+        token = self._ensure_browser_integration_token()
+        self.browser_integration_error = ""
+        try:
+            server = BrowserIntegrationServer(
+                host=host,
+                port=port,
+                token=token,
+                open_user_callback=self._handle_browser_open_user_request,
+                log_callback=log_message,
+            )
+            server.start()
+            self.browser_integration_server = server
+        except Exception as exc:
+            self.browser_integration_server = None
+            self.browser_integration_error = str(exc)
+            log_message(f"Не удалось запустить Browser bridge: {exc}")
+            self.master.after(300, lambda: self.show_toast(
+                "Браузерная интеграция",
+                f"Не удалось запустить локальный сервер: {exc}",
+                kind="warning",
+            ))
+
+    def stop_browser_integration(self):
+        server = self.browser_integration_server
+        self.browser_integration_server = None
+        if server:
+            try:
+                server.stop()
+            except Exception as exc:
+                log_message(f"Ошибка остановки Browser bridge: {exc}")
+
+    def restart_browser_integration(self):
+        self.stop_browser_integration()
+        self.start_browser_integration()
+        if self.browser_integration_server and self.browser_integration_server.is_running:
+            self.show_toast("Браузерная интеграция", "Локальный сервер перезапущен")
+
+    def copy_browser_integration_token(self):
+        token = self._ensure_browser_integration_token()
+        self._copy(token)
+        messagebox.showinfo(
+            "Браузерная интеграция",
+            "Токен скопирован в буфер обмена.\n\n"
+            "Откройте настройки расширения «TSHelper для GLPI», вставьте токен и нажмите «Проверить подключение».",
+        )
+
+    def show_browser_integration_status(self):
+        server = self.browser_integration_server
+        running = bool(server and server.is_running)
+        host = str(self.settings.get_setting("browser_integration_host", "127.0.0.1") or "127.0.0.1")
+        port = int(self.settings.get_setting("browser_integration_port", 8766) or 8766)
+        state = "работает" if running else "не запущена"
+        details = f"Статус: {state}\nАдрес: http://{host}:{port}"
+        if self.browser_integration_error:
+            details += f"\nОшибка: {self.browser_integration_error}"
+        messagebox.showinfo("Браузерная интеграция GLPI", details)
+
     # --------- Закрытие ----------
     def on_closing(self):
         if not self._force_exit and self._should_minimize_custom():
@@ -4439,6 +4703,7 @@ $items = foreach ($u in $users) {{
             self._stop_cw = True
         except:
             pass
+        self.stop_browser_integration()
         self.master.destroy()
 
     def exit_app(self):

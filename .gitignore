@@ -1,5 +1,8 @@
 # Логи
 *.log
+*.log.*
+__pycache__/
+*.py[cod]
 
 # Отладочные и пользовательские данные
 _pbx_debug/
@@ -9,3 +12,10 @@ users.json
 config.json
 config.local*.json
 .ts_help_ad_secrets.json
+secret.key
+*.bak*
+dock_items.json
+
+# Устаревшая локальная копия: актуальный Print Monitor устанавливается
+# из закреплённого Git-коммита через requirements.txt.
+prn-site-ping/
