@@ -2,8 +2,36 @@
 setlocal
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
-  py -3 -m venv .venv
-  .venv\Scripts\python.exe -m pip install --upgrade pip
-  .venv\Scripts\python.exe -m pip install -r requirements.txt
+  where py >nul 2>&1
+  if errorlevel 1 (
+    python -m venv .venv
+  ) else (
+    py -3 -m venv .venv
+  )
+  if errorlevel 1 goto :bootstrap_error
 )
-.venv\Scripts\python.exe main.py %*
+
+.venv\Scripts\python.exe -c "import PySide6" >nul 2>&1
+if errorlevel 1 (
+  .venv\Scripts\python.exe -m pip install --upgrade pip
+  if errorlevel 1 goto :bootstrap_error
+  .venv\Scripts\python.exe -m pip install -r requirements.txt
+  if errorlevel 1 goto :bootstrap_error
+)
+
+> ".venv\.adhelper-ready" echo ready
+
+if exist ".venv\Scripts\pythonw.exe" (
+  start "" ".venv\Scripts\pythonw.exe" main.py %*
+) else (
+  .venv\Scripts\python.exe main.py %*
+)
+exit /b 0
+
+:bootstrap_error
+if exist ".venv\.adhelper-ready" del /q ".venv\.adhelper-ready" >nul 2>&1
+echo.
+echo Failed to prepare the embedded ADHelper 2 environment.
+echo Check Python installation and network access, then run this file again.
+pause
+exit /b 1

@@ -361,13 +361,15 @@ class UsersPage(QWidget):
         self.context.events.operations_changed.emit()
         data = getattr(result, "data", {})
         deleted = data.get("deleted_user") if isinstance(data, dict) else {}
+        recovery_path = str(data.get("recovery_path") or "") if isinstance(data, dict) else ""
         domain = str(deleted.get("domain") or (self.selected.domain if self.selected else ""))
         sam = str(deleted.get("sam") or (self.selected.sam if self.selected else ""))
         self._clear_selected_user()
         QMessageBox.information(
             self,
             "Пользователь удалён",
-            f"Пользователь {sam} удалён из домена {domain}. Операция записана в аудит.",
+            f"Пользователь {sam} удалён из домена {domain}. Операция записана в аудит.\n\n"
+            f"Recovery JSON: {recovery_path}",
         )
         self._refresh_after_finish = True
 

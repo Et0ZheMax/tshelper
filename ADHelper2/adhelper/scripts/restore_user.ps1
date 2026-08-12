@@ -11,6 +11,13 @@ try {
 
     if ($null -eq $snapshot) { throw 'Recovery-снимок не передан' }
     if ($null -eq $snapshot.attributes) { throw 'Recovery-снимок не содержит attributes' }
+    $isDeletionSnapshot = $false
+    $recoveryReasonProperty = $snapshot.PSObject.Properties['recovery_reason']
+    if ($null -ne $recoveryReasonProperty) {
+        $isDeletionSnapshot = ([string]$recoveryReasonProperty.Value).Equals(
+            'delete_user', [System.StringComparison]::OrdinalIgnoreCase
+        )
+    }
 
     $snapshotGuid = [string]$snapshot.guid
     if ([string]::IsNullOrWhiteSpace($snapshotGuid)) {
@@ -147,6 +154,32 @@ try {
         return $user
     }
 
+    function Get-DeletedTarget {
+        if (-not $isDeletionSnapshot) { return $null }
+        $deleted = $null
+        try {
+            $deleted = Get-ADObject -Server $server -Identity ([guid]$snapshotGuid) `
+                -IncludeDeletedObjects -Properties @('ObjectGUID','sAMAccountName','lastKnownParent','msDS-LastKnownRDN','isDeleted') `
+                -ErrorAction Stop
+        } catch { }
+        if ($null -eq $deleted -or -not [bool]$deleted.isDeleted) {
+            throw "Удалённый пользователь '$sam' с GUID $snapshotGuid не найден в корзине Active Directory. " +
+                'Проверьте, что AD Recycle Bin включена и срок хранения объекта не истёк.'
+        }
+        $deletedSam = [string]$deleted.sAMAccountName
+        if (-not [string]::IsNullOrWhiteSpace($deletedSam) -and
+            -not $deletedSam.Equals($sam, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Логин удалённого объекта '$deletedSam' не совпадает с recovery JSON '$sam'"
+        }
+        $escapedSam = Escape-LdapValue $sam
+        $activeCollisions = @(Get-ADUser -Server $server -LDAPFilter "(sAMAccountName=$escapedSam)" `
+            -SearchBase ([string]$domain.search_base) -Properties ObjectGUID -ErrorAction SilentlyContinue)
+        if (@($activeCollisions | Where-Object { $_.ObjectGUID.ToString() -ne $snapshotGuid }).Count -gt 0) {
+            throw "В домене уже существует активная учётная запись с логином '$sam' и другим GUID. Восстановление заблокировано."
+        }
+        return $deleted
+    }
+
     function Assert-OriginalOu {
         try {
             Get-ADObject -Server $server -Identity $originalParent -ErrorAction Stop | Out-Null
@@ -175,8 +208,33 @@ try {
     }
 
     function Invoke-ValidatePhase {
-        $user = Get-TargetUser
         Assert-OriginalOu
+        $user = $null
+        try { $user = Get-TargetUser } catch {
+            if (-not $isDeletionSnapshot) { throw }
+        }
+        if ($null -eq $user) {
+            $deleted = Get-DeletedTarget
+            $status = if ($dryRun) { 'simulated' } else { 'success' }
+            return [pscustomobject]@{
+                key = 'validate'
+                status = $status
+                message = 'Удалённый объект найден в AD Recycle Bin и может быть восстановлен с исходным SID'
+                sam = $sam
+                guid = $snapshotGuid
+                current_dn = [string]$deleted.DistinguishedName
+                original_dn = $originalDn
+                original_parent = $originalParent
+                current_parent = ''
+                attributes_in_snapshot = $restoreAttrs.Count
+                attributes_to_restore = $restoreAttrs.Count
+                attributes_to_restore_names = @($restoreAttrs)
+                move_needed = $false
+                original_enabled = $originalEnabled
+                enabled_change_needed = $true
+                deleted_object = $true
+            }
+        }
         $currentParent = Assert-CurrentLocation -User $user
         $toRestore = @()
         foreach ($attribute in $restoreAttrs) {
@@ -207,8 +265,25 @@ try {
     }
 
     function Invoke-AttributesPhase {
-        $user = Get-TargetUser
         Assert-OriginalOu
+        $user = $null
+        try { $user = Get-TargetUser } catch {
+            if (-not $isDeletionSnapshot) { throw }
+        }
+        $restoredFromRecycleBin = $false
+        if ($null -eq $user) {
+            $deleted = Get-DeletedTarget
+            if ($dryRun) {
+                return [pscustomobject]@{
+                    key='attributes'; status='simulated'
+                    message='Объект будет восстановлен из AD Recycle Bin, затем будут возвращены сохранённые атрибуты'
+                    restored=@(); unchanged=@(); failed=@(); restored_from_recycle_bin=$false
+                }
+            }
+            Restore-ADObject -Server $server -Identity $deleted.ObjectGUID -ErrorAction Stop
+            $user = Get-TargetUser
+            $restoredFromRecycleBin = $true
+        }
         [void](Assert-CurrentLocation -User $user)
         $toRestore = @()
         foreach ($attribute in $restoreAttrs) {
@@ -265,6 +340,7 @@ try {
         return [pscustomobject]@{
             key='attributes'; status=$status; message=$message
             restored=@($restored); unchanged=@($restoreAttrs | Where-Object { $_ -notin $toRestore }); failed=@($failed); warnings=@($warnings)
+            restored_from_recycle_bin=$restoredFromRecycleBin
         }
     }
 

@@ -41,6 +41,7 @@ class _AD:
         ]
         self.domain_by_name = {"pak": self.domains[0]}
         self.calls: list[tuple[str, bool]] = []
+        self.snapshot_calls = 0
         self.fail_phase = fail_phase
 
     def restore_user(self, domain, snapshot, dry_run=False, phase="all"):
@@ -54,6 +55,8 @@ class _AD:
             "enable": "Исходное состояние восстановлено: Enabled=True",
         }
         step = {"key": phase, "status": "simulated" if dry_run else "success", "message": messages[phase]}
+        if phase == "attributes" and snapshot.get("recovery_reason") == "delete_user":
+            step["restored_from_recycle_bin"] = True
         if phase == "validate":
             step.update({
                 "attributes_in_snapshot": 2,
@@ -67,6 +70,7 @@ class _AD:
         return {"steps": [step], "warnings": []}
 
     def snapshot_user(self, domain, sam, guid=""):
+        self.snapshot_calls += 1
         return {
             "domain": domain.name,
             "guid": guid,
@@ -153,6 +157,31 @@ class RecoveryServiceTests(unittest.TestCase):
             ("move", False),
             ("enable", False),
         ])
+        self.assertEqual(ad.snapshot_calls, 1)
+
+    def test_deleted_user_recovery_uses_ad_recycle_bin_without_active_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            payload = _snapshot()
+            payload["pak"]["recovery_reason"] = "delete_user"
+            payload["pak"]["requires_ad_recycle_bin"] = True
+            path = root / "recovery_deleted_user.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            ad = _AD()
+            audit = _Audit(root)
+            service = RecoveryService(ad, audit)
+
+            result = service.execute(path)
+
+        self.assertEqual(result.status, "success")
+        self.assertNotIn("pre_restore_path", result.data)
+        self.assertEqual(ad.snapshot_calls, 0)
+        self.assertEqual(ad.calls, [
+            ("validate", True),
+            ("attributes", False),
+            ("move", False),
+            ("enable", False),
+        ])
 
     def test_validation_failure_blocks_all_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -180,6 +209,12 @@ class RecoverySourceRegressionTests(unittest.TestCase):
         self.assertIn("Get-OffboardingClearAttributes", self.script)
         self.assertIn("$snapshotPropertyNames -notcontains $attribute", self.script)
         self.assertIn("$declaredClearAttrs -notcontains $attribute", self.script)
+
+    def test_deleted_user_restore_requires_ad_recycle_bin(self) -> None:
+        self.assertIn("Get-ADObject", self.script)
+        self.assertIn("-IncludeDeletedObjects", self.script)
+        self.assertIn("Restore-ADObject", self.script)
+        self.assertIn("requires_ad_recycle_bin", (Path(__file__).resolve().parent / "test_user_deletion.py").read_text(encoding="utf-8"))
 
     def test_restore_order_is_attributes_move_enable(self) -> None:
         all_block = self.script.split("'all' {", 1)[1]
