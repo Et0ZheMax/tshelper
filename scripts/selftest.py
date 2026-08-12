@@ -84,6 +84,16 @@ def test_printer_monitor_launcher_contract():
     assert launcher.is_running, 'duplicate launch guard'
 
 
+def test_embedded_adhelper2_command():
+    query = 'ivanov'
+    command, working_directory = mod.build_adhelper2_command(query)
+    assert_eq(os.path.basename(working_directory), 'ADHelper2', 'ADHelper2 working directory')
+    assert os.path.isfile(command[1]), 'embedded ADHelper2 entry point not found'
+    search_index = command.index('--search')
+    assert_eq(command[search_index + 1], query, 'ADHelper2 search query')
+    assert '--autorun' in command, 'ADHelper2 autorun flag missing'
+
+
 if __name__ == '__main__':
     tests = [
         test_normalize_phone,
@@ -92,6 +102,7 @@ if __name__ == '__main__':
         test_safe_save_json_cleans_temp_on_error,
         test_callwatcher_parse_helpers,
         test_printer_monitor_launcher_contract,
+        test_embedded_adhelper2_command,
     ]
     for t in tests:
         t()

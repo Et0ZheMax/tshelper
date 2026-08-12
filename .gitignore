@@ -7,6 +7,11 @@ __pycache__/
 # Отладочные и пользовательские данные
 _pbx_debug/
 users.json
+__pycache__/
+*.py[cod]
+.venv/
+ADHelper2/build/
+ADHelper2/dist/
 
 # Конфигурации и секреты
 config.json
