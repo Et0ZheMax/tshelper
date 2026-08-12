@@ -231,6 +231,12 @@ class RecoveryService:
             operation.steps.append(backup_step)
             current_snapshots: dict[str, dict[str, Any]] = {}
             for _source_key, domain, snapshot in resolved:
+                if str(snapshot.get("recovery_reason") or "").casefold() == "delete_user":
+                    report(
+                        f"{domain.label}: объект удалён; откат обеспечивается исходным recovery JSON и AD Recycle Bin",
+                        advance=True,
+                    )
+                    continue
                 report(f"{domain.label}: сохраняем текущее состояние учётки из OU уволенных…")
                 current_snapshot = self.ad.snapshot_user(domain, info["sam"], guid=str(snapshot.get("guid") or ""))
                 if current_snapshot is None:
@@ -244,11 +250,17 @@ class RecoveryService:
                 current_snapshots[domain.name] = current_snapshot
                 report(f"{domain.label}: снимок перед восстановлением получен", advance=True)
 
-            report("Записываем rollback JSON до первого изменения в Active Directory…")
-            rollback_path = self.audit.save_pre_restore(operation.operation_id, info["sam"], current_snapshots)
-            operation.data["pre_restore_path"] = str(rollback_path)
-            backup_step.finish("success", "Rollback JSON создан до первого изменения", {"path": str(rollback_path)})
-            report(f"Rollback JSON сохранён: {rollback_path}", advance=True)
+            if current_snapshots:
+                report("Записываем rollback JSON до первого изменения в Active Directory…")
+                rollback_path = self.audit.save_pre_restore(operation.operation_id, info["sam"], current_snapshots)
+                operation.data["pre_restore_path"] = str(rollback_path)
+                backup_step.finish("success", "Rollback JSON создан до первого изменения", {"path": str(rollback_path)})
+                report(f"Rollback JSON сохранён: {rollback_path}", advance=True)
+            else:
+                backup_step.finish(
+                    "skipped",
+                    "Для удалённого объекта используется исходный recovery JSON и AD Recycle Bin",
+                )
 
             mutated_domains = 0
             for _source_key, domain, snapshot in resolved:
@@ -292,7 +304,7 @@ class RecoveryService:
                             operation.errors.append(f"[{domain.name}] {title}: {text}")
                         elif phase == "attributes" and status in {"success", "warning"}:
                             restored = raw.get("restored") if isinstance(raw, dict) else []
-                            if isinstance(restored, list) and restored:
+                            if (isinstance(restored, list) and restored) or bool(raw.get("restored_from_recycle_bin")):
                                 domain_mutated = True
                         elif phase in {"move", "enable"} and status == "success":
                             domain_mutated = True

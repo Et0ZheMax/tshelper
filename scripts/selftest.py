@@ -86,12 +86,22 @@ def test_printer_monitor_launcher_contract():
 
 def test_embedded_adhelper2_command():
     query = 'ivanov'
-    command, working_directory = mod.build_adhelper2_command(query)
+    command, working_directory, show_bootstrap_console = mod.build_adhelper2_command(query)
     assert_eq(os.path.basename(working_directory), 'ADHelper2', 'ADHelper2 working directory')
-    assert os.path.isfile(command[1]), 'embedded ADHelper2 entry point not found'
+    batch_files = [item for item in command if str(item).lower().endswith('run_adhelper.bat')]
+    assert batch_files, 'embedded ADHelper2 bootstrap not found'
+    assert os.path.isfile(batch_files[0]), 'embedded ADHelper2 bootstrap path not found'
+    ready_marker = os.path.join(working_directory, '.venv', '.adhelper-ready')
+    assert_eq(show_bootstrap_console, not os.path.isfile(ready_marker), 'ADHelper2 bootstrap visibility')
     search_index = command.index('--search')
     assert_eq(command[search_index + 1], query, 'ADHelper2 search query')
     assert '--autorun' in command, 'ADHelper2 autorun flag missing'
+
+    batch_source = open(batch_files[0], encoding='utf-8').read()
+    assert 'import PySide6' in batch_source, 'ADHelper2 bootstrap dependency check missing'
+    assert '.adhelper-ready' in batch_source, 'ADHelper2 bootstrap ready marker missing'
+    assert 'pythonw.exe' in batch_source, 'ADHelper2 GUI launcher missing'
+    assert 'pip install -r requirements.txt' in batch_source, 'ADHelper2 dependency installation missing'
 
 
 if __name__ == '__main__':

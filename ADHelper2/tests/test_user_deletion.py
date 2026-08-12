@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from adhelper.models import UserRecord
+from adhelper.models import DomainConfig, UserRecord
 from adhelper.services.ad_service import ADService
 from adhelper.services.powershell import PowerShellResponse
 from adhelper.services.user_management import UserManagementService
@@ -39,9 +39,30 @@ class FakePowerShell:
 class FakeAudit:
     def __init__(self) -> None:
         self.saved = []
+        self.recovery_calls = []
 
     def save(self, operation):
         self.saved.append(operation)
+
+    def save_recovery(self, operation_id, subject, snapshots):
+        self.recovery_calls.append((operation_id, subject, snapshots))
+        return Path("C:/recovery/recovery_ivanov.json")
+
+
+def snapshot_for(user: UserRecord) -> dict:
+    return {
+        "domain": user.domain,
+        "sam": user.sam,
+        "guid": user.guid,
+        "dn": user.dn,
+        "displayName": user.display_name,
+        "attributes": {
+            "SamAccountName": user.sam,
+            "ObjectGUID": user.guid,
+            "DistinguishedName": user.dn,
+            "DisplayName": user.display_name,
+        },
+    }
 
 
 class UserDeletionTests(unittest.TestCase):
@@ -70,6 +91,13 @@ class UserDeletionTests(unittest.TestCase):
 
     def test_management_service_audits_successful_deletion(self) -> None:
         class FakeAd:
+            domain_by_name = {"example": DomainConfig.from_dict(DOMAIN)}
+
+            @staticmethod
+            def snapshot_user(_domain, sam, guid=""):
+                self.assertEqual((sam, guid), ("ivanov", "guid-1"))
+                return snapshot_for(self.user)
+
             @staticmethod
             def delete_user(user):
                 return {"domain": user.domain, "sam": user.sam, "guid": user.guid}
@@ -82,10 +110,23 @@ class UserDeletionTests(unittest.TestCase):
         self.assertEqual(operation.status, "success")
         self.assertEqual(operation.operation_type, "delete")
         self.assertEqual(operation.data["deleted_user"]["sam"], "ivanov")
+        self.assertTrue(operation.data["recovery_complete"])
+        self.assertEqual(operation.data["recovery_path"], "C:\\recovery\\recovery_ivanov.json")
+        self.assertEqual(audit.recovery_calls[0][1], "ivanov")
+        self.assertEqual(list(audit.recovery_calls[0][2]), ["example"])
+        saved_snapshot = audit.recovery_calls[0][2]["example"]
+        self.assertEqual(saved_snapshot["recovery_reason"], "delete_user")
+        self.assertTrue(saved_snapshot["requires_ad_recycle_bin"])
         self.assertIs(audit.saved[0], operation)
 
     def test_management_service_audits_failed_deletion(self) -> None:
         class FailingAd:
+            domain_by_name = {"example": DomainConfig.from_dict(DOMAIN)}
+
+            @staticmethod
+            def snapshot_user(_domain, _sam, guid=""):
+                return snapshot_for(self.user)
+
             @staticmethod
             def delete_user(_user):
                 raise RuntimeError("Access denied")
@@ -97,7 +138,60 @@ class UserDeletionTests(unittest.TestCase):
             service.delete(self.user)
 
         self.assertEqual(audit.saved[0].status, "failed")
-        self.assertEqual(audit.saved[0].errors, ["Access denied"])
+        self.assertIn("Access denied", audit.saved[0].errors[0])
+        self.assertIn("Recovery JSON сохранён", audit.saved[0].errors[0])
+
+    def test_recovery_write_failure_prevents_deletion(self) -> None:
+        class CountingAd:
+            domain_by_name = {"example": DomainConfig.from_dict(DOMAIN)}
+            delete_calls = 0
+
+            @staticmethod
+            def snapshot_user(_domain, _sam, guid=""):
+                return snapshot_for(self.user)
+
+            @classmethod
+            def delete_user(cls, _user):
+                cls.delete_calls += 1
+                return {}
+
+        class FailingAudit(FakeAudit):
+            def save_recovery(self, _operation_id, _subject, _snapshots):
+                raise OSError("disk full")
+
+        audit = FailingAudit()
+        service = UserManagementService(CountingAd(), audit)
+
+        with self.assertRaisesRegex(RuntimeError, "disk full"):
+            service.delete(self.user)
+
+        self.assertEqual(CountingAd.delete_calls, 0)
+        self.assertFalse(audit.saved[0].data.get("recovery_complete", False))
+
+    def test_mismatched_snapshot_prevents_deletion(self) -> None:
+        class MismatchedAd:
+            domain_by_name = {"example": DomainConfig.from_dict(DOMAIN)}
+            delete_calls = 0
+
+            @staticmethod
+            def snapshot_user(_domain, _sam, guid=""):
+                snapshot = snapshot_for(self.user)
+                snapshot["guid"] = "another-guid"
+                return snapshot
+
+            @classmethod
+            def delete_user(cls, _user):
+                cls.delete_calls += 1
+                return {}
+
+        audit = FakeAudit()
+        service = UserManagementService(MismatchedAd(), audit)
+
+        with self.assertRaisesRegex(RuntimeError, "GUID recovery-снимка"):
+            service.delete(self.user)
+
+        self.assertEqual(MismatchedAd.delete_calls, 0)
+        self.assertEqual(audit.recovery_calls, [])
 
     def test_unknown_domain_stops_before_powershell(self) -> None:
         powershell = FakePowerShell()
@@ -117,6 +211,8 @@ class UserDeletionTests(unittest.TestCase):
         self.assertIn("expected_guid", script)
         self.assertIn("search_base", script)
         self.assertIn("EndsWith", script)
+        self.assertIn("Get-ADOptionalFeature", script)
+        self.assertIn("Recycle Bin Feature", script)
         self.assertIn("Remove-ADUser", script)
         self.assertIn("-Confirm:$false", script)
 

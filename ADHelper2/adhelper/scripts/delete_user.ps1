@@ -14,6 +14,10 @@ try {
     if ([string]::IsNullOrWhiteSpace($identity)) { throw 'User identity is missing' }
 
     $server = Get-DomainServer $domain
+    $recycleBin = Get-ADOptionalFeature -Server $server -Filter 'Name -eq "Recycle Bin Feature"' -Properties EnabledScopes -ErrorAction Stop
+    if ($null -eq $recycleBin -or @($recycleBin.EnabledScopes).Count -eq 0) {
+        throw "Корзина Active Directory не включена для домена '$domainName'. Удаление заблокировано, потому что восстановление объекта с исходным SID и паролем невозможно."
+    }
     $user = Get-ADUser -Server $server -Identity $identity -Properties @(
         'DisplayName','SamAccountName','DistinguishedName','ObjectGUID'
     ) -ErrorAction Stop

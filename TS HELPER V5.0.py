@@ -416,8 +416,8 @@ def is_windows(): return platform.system().lower().startswith("win")
 ADHELPER2_DIRECTORY = "ADHelper2"
 
 
-def build_adhelper2_command(query: str) -> tuple[list[str], str]:
-    """Возвращает команду запуска встроенного ADHelper 2 и его рабочую папку."""
+def build_adhelper2_command(query: str) -> tuple[list[str], str, bool]:
+    """Возвращает команду, рабочую папку и признак видимой bootstrap-консоли."""
     base_directories = []
     if getattr(sys, "frozen", False):
         base_directories.append(os.path.dirname(sys.executable))
@@ -435,12 +435,25 @@ def build_adhelper2_command(query: str) -> tuple[list[str], str]:
 
         adhelper_directory = os.path.join(base_directory, ADHELPER2_DIRECTORY)
         executable_path = os.path.join(adhelper_directory, "ADHelper2.exe")
+        built_executable_path = os.path.join(adhelper_directory, "dist", "ADHelper2", "ADHelper2.exe")
+        ready_marker_path = os.path.join(adhelper_directory, ".venv", ".adhelper-ready")
+        batch_path = os.path.join(adhelper_directory, "run_adhelper.bat")
         script_path = os.path.join(adhelper_directory, "main.py")
         arguments = ["--search", query, "--autorun"]
         if os.path.isfile(executable_path):
-            return [executable_path, *arguments], adhelper_directory
-        if os.path.isfile(script_path):
-            return [sys.executable, script_path, *arguments], adhelper_directory
+            return [executable_path, *arguments], adhelper_directory, False
+        if os.path.isfile(built_executable_path):
+            return [built_executable_path, *arguments], adhelper_directory, False
+        if is_windows() and os.path.isfile(batch_path):
+            command_processor = os.environ.get("COMSPEC") or "cmd.exe"
+            show_bootstrap_console = not os.path.isfile(ready_marker_path)
+            return (
+                [command_processor, "/d", "/c", batch_path, *arguments],
+                adhelper_directory,
+                show_bootstrap_console,
+            )
+        if os.path.isfile(script_path) and not getattr(sys, "frozen", False):
+            return [sys.executable, script_path, *arguments], adhelper_directory, False
 
     expected_path = os.path.join(base_directories[0], ADHELPER2_DIRECTORY)
     raise FileNotFoundError(f"Встроенный ADHelper 2 не найден: {expected_path}")
@@ -3912,7 +3925,7 @@ $items = foreach ($u in $users) {{
             return messagebox.showerror("ADHelper", "Не удалось определить строку поиска для пользователя")
 
         try:
-            cmd, working_directory = build_adhelper2_command(query)
+            cmd, working_directory, show_bootstrap_console = build_adhelper2_command(query)
         except FileNotFoundError as exc:
             self._log_action(f"[AD] Embedded ADHelper 2 not found: {exc}")
             messagebox.showerror(
@@ -3925,10 +3938,15 @@ $items = foreach ($u in $users) {{
 
         try:
             if is_windows():
+                creation_flags = (
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    if show_bootstrap_console
+                    else getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
                 subprocess.Popen(
                     cmd,
                     cwd=working_directory,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    creationflags=creation_flags,
                 )
             else:
                 subprocess.Popen(cmd, cwd=working_directory)

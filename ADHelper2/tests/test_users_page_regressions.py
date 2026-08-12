@@ -30,6 +30,7 @@ class UsersPageSourceRegressionTests(unittest.TestCase):
         self.assertIn("domain = self.context.ad.domain_by_name.get(user.domain)", self.source)
         self.assertIn("QMessageBox.StandardButton.No", self.source)
         self.assertIn("self.context.user_management.delete, user", self.source)
+        self.assertIn('data.get("recovery_path")', self.source)
 
     def test_welcome_sheet_uses_omg_profile_for_any_selected_account(self) -> None:
         self.assertIn("select_welcome_domain(self.context.ad.domains)", self.source)
