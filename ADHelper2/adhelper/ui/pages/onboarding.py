@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtCore import QThreadPool, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget,
@@ -54,10 +55,19 @@ class OnboardingPage(QWidget):
         self._busy_state = False
         self._plan_progress_current = 0
         self._plan_progress_total = 0
+        self._external_callback_url = ""
+        self._external_source_url = ""
+        self._external_ticket_id: int | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.addWidget(PageHeader("Создание сотрудника", "Пошаговый мастер: заявка и карточка → AD-план → выполнение."))
+
+        self.external_source_label = QLabel()
+        self.external_source_label.setObjectName("Muted")
+        self.external_source_label.setWordWrap(True)
+        self.external_source_label.hide()
+        root.addWidget(self.external_source_label)
 
         self.steps_label = QLabel()
         self.steps_label.setObjectName("Muted")
@@ -353,6 +363,27 @@ class OnboardingPage(QWidget):
         if index > 0:
             self.stack.setCurrentIndex(index - 1)
         self._sync_navigation()
+
+    def load_external_payload(self, payload: dict[str, object]) -> None:
+        """Открывает мастер из GLPI и запоминает одноразовый callback."""
+        self.reset()
+        self._external_callback_url = str(payload.get("callback_url") or "").strip()
+        self._external_source_url = str(payload.get("source_url") or "").strip()
+        try:
+            self._external_ticket_id = int(payload.get("ticket_id") or 0) or None
+        except (TypeError, ValueError):
+            self._external_ticket_id = None
+
+        ticket_title = str(payload.get("ticket_title") or "").strip()
+        if self._external_ticket_id:
+            title = f"Получено из GLPI: заявка #{self._external_ticket_id}"
+            if ticket_title:
+                title += f" — {ticket_title}"
+            self.external_source_label.setText(title)
+            self.external_source_label.show()
+
+        self.request_text.setPlainText(str(payload.get("request_text") or ""))
+        self.request_text.setFocus()
 
     def _update_request_preview(self) -> None:
         text = self.request_text.toPlainText()
@@ -686,6 +717,19 @@ class OnboardingPage(QWidget):
         )
         if status in ("success", "simulated"):
             QMessageBox.information(self, "Готово", "Операция успешно завершена")
+            if status == "success" and self._external_callback_url:
+                callback_url = self._external_callback_url
+                # Callback одноразовый: повторные сигналы/клики не должны создавать
+                # вторую заявку. GLPI дополнительно обеспечивает идемпотентность.
+                self._external_callback_url = ""
+                if not QDesktopServices.openUrl(QUrl(callback_url)):
+                    self._external_callback_url = callback_url
+                    QMessageBox.warning(
+                        self,
+                        "GLPI",
+                        "Пользователь создан, но не удалось открыть GLPI для создания связанной заявки. "
+                        "Откройте исходную заявку и повторите автоматизацию — повторное создание пользователя не запускайте.",
+                    )
         else:
             QMessageBox.warning(self, "Результат", "Операция завершена с предупреждениями или ошибками")
 
@@ -741,6 +785,12 @@ class OnboardingPage(QWidget):
         self.request_text.clear()
         self.request = ParsedRequest()
         self.plan = None
+        self._external_callback_url = ""
+        self._external_source_url = ""
+        self._external_ticket_id = None
+        if hasattr(self, "external_source_label"):
+            self.external_source_label.clear()
+            self.external_source_label.hide()
         self.result_table.setRowCount(0)
         self.stack.setCurrentIndex(0)
         self._sync_navigation()

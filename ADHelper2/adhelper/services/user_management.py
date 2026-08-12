@@ -37,3 +37,27 @@ class UserManagementService:
             if not operation.finished_at:
                 operation.close("failed")
             self.audit.save(operation)
+
+    def delete(self, user: UserRecord, progress=None) -> OperationResult:
+        operation = OperationResult("delete", user.display_name or user.sam, operator=operator_info()["username"])
+        operation.data.update({"sam": user.sam, "guid": user.guid, "domain": user.domain})
+        step = StepResult("delete", f"Удаление пользователя из {user.domain}")
+        operation.steps.append(step)
+        step.start()
+        try:
+            if progress:
+                progress("delete", f"Удаление {user.sam} из домена {user.domain}")
+            result = self.ad.delete_user(user)
+            operation.data["deleted_user"] = result
+            step.finish("success", "Пользователь удалён", result)
+            operation.close("success")
+            return operation
+        except Exception as exc:
+            step.finish("failed", str(exc))
+            operation.errors.append(str(exc))
+            operation.close("failed")
+            raise
+        finally:
+            if not operation.finished_at:
+                operation.close("failed")
+            self.audit.save(operation)

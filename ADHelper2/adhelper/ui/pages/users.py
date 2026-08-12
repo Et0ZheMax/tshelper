@@ -317,12 +317,59 @@ class UsersPage(QWidget):
         menu = QMenu(self)
         copy_login = menu.addAction(f"Копировать логин: {user.sam}")
         print_welcome = menu.addAction("Печать приветственного листа")
+        menu.addSeparator()
+        delete_user = menu.addAction("Удалить пользователя")
         selected_action = menu.exec(self.table.viewport().mapToGlobal(position))
 
         if selected_action == copy_login:
             QApplication.clipboard().setText(user.sam)
         elif selected_action == print_welcome:
             self._print_welcome_for_user(user)
+        elif selected_action == delete_user:
+            self._delete_user(user)
+
+    def _delete_user(self, user: UserRecord) -> None:
+        if self._active_worker is not None:
+            QMessageBox.information(self, "Удаление пользователя", "Дождитесь завершения текущей операции")
+            return
+        domain = self.context.ad.domain_by_name.get(user.domain)
+        if domain is None:
+            QMessageBox.critical(self, "Удаление пользователя", f"Не найдена конфигурация домена: {user.domain}")
+            return
+        domain_label = domain.label or domain.name
+        answer = QMessageBox.question(
+            self,
+            "Удаление пользователя",
+            f'Вы уверены, что хотите удалить пользователя из домена "{domain_label}"?\n\n'
+            f"Пользователь: {user.display_name}\n"
+            f"Логин: {user.sam}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self._busy(True, f"Удаление {user.sam} из домена {domain_label}…")
+        worker = FunctionWorker(self.context.user_management.delete, user)
+        self._active_worker = worker
+        worker.signals.result.connect(self._delete_ready)
+        worker.signals.error.connect(self._error)
+        worker.signals.finished.connect(self._worker_finished)
+        self.pool.start(worker)
+
+    def _delete_ready(self, result: object) -> None:
+        self.context.events.operations_changed.emit()
+        data = getattr(result, "data", {})
+        deleted = data.get("deleted_user") if isinstance(data, dict) else {}
+        domain = str(deleted.get("domain") or (self.selected.domain if self.selected else ""))
+        sam = str(deleted.get("sam") or (self.selected.sam if self.selected else ""))
+        self._clear_selected_user()
+        QMessageBox.information(
+            self,
+            "Пользователь удалён",
+            f"Пользователь {sam} удалён из домена {domain}. Операция записана в аудит.",
+        )
+        self._refresh_after_finish = True
 
     def _print_welcome_for_user(self, user: UserRecord) -> None:
         if self._active_worker is not None:
