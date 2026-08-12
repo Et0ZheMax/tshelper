@@ -114,3 +114,12 @@ class MainWindow(QMainWindow):
         self.users.query.setText(query)
         if autorun and query.strip():
             self.users.search()
+
+    def open_onboarding_payload(self, payload: dict[str, object]) -> None:
+        self.stack.setCurrentWidget(self.onboarding)
+        button = self.nav_group.button(1)
+        if button:
+            button.setChecked(True)
+        self.onboarding.load_external_payload(payload)
+        self.raise_()
+        self.activateWindow()

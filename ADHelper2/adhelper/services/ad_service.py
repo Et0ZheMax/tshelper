@@ -180,6 +180,22 @@ class ADService:
         )
         return response.data if isinstance(response.data, dict) else {}
 
+    def delete_user(self, user: UserRecord) -> dict[str, Any]:
+        domain = self.domain_by_name.get(user.domain)
+        if domain is None:
+            raise ValueError(f"Не найдена конфигурация домена: {user.domain}")
+        response = self.ps.invoke(
+            "delete_user",
+            {
+                "domain": domain.to_dict(),
+                "identity": user.guid or user.sam,
+                "expected_sam": user.sam,
+                "expected_guid": user.guid,
+            },
+            timeout=120,
+        )
+        return response.data if isinstance(response.data, dict) else {}
+
     def snapshot_user(self, domain: DomainConfig, sam: str, guid: str = "") -> dict[str, Any] | None:
         response = self.ps.invoke(
             "snapshot_user",
