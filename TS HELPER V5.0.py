@@ -413,6 +413,38 @@ def clean_internal_number(num: str) -> str:
 def which(name): return shutil.which(name)
 def is_windows(): return platform.system().lower().startswith("win")
 
+ADHELPER2_DIRECTORY = "ADHelper2"
+
+
+def build_adhelper2_command(query: str) -> tuple[list[str], str]:
+    """Возвращает команду запуска встроенного ADHelper 2 и его рабочую папку."""
+    base_directories = []
+    if getattr(sys, "frozen", False):
+        base_directories.append(os.path.dirname(sys.executable))
+    base_directories.append(os.path.dirname(os.path.abspath(__file__)))
+    bundle_directory = getattr(sys, "_MEIPASS", "")
+    if bundle_directory:
+        base_directories.append(bundle_directory)
+
+    checked_directories = set()
+    for base_directory in base_directories:
+        normalized_base = os.path.normcase(os.path.abspath(base_directory))
+        if normalized_base in checked_directories:
+            continue
+        checked_directories.add(normalized_base)
+
+        adhelper_directory = os.path.join(base_directory, ADHELPER2_DIRECTORY)
+        executable_path = os.path.join(adhelper_directory, "ADHelper2.exe")
+        script_path = os.path.join(adhelper_directory, "main.py")
+        arguments = ["--search", query, "--autorun"]
+        if os.path.isfile(executable_path):
+            return [executable_path, *arguments], adhelper_directory
+        if os.path.isfile(script_path):
+            return [sys.executable, script_path, *arguments], adhelper_directory
+
+    expected_path = os.path.join(base_directories[0], ADHELPER2_DIRECTORY)
+    raise FileNotFoundError(f"Встроенный ADHelper 2 не найден: {expected_path}")
+
 def run_as_admin(exe, args=""):
     try:
         import ctypes
@@ -892,7 +924,6 @@ class SettingsManager:
             "edit_window_geometry":"", "settings_window_geometry":"", "ad_sync_select_geometry":"", "ip_window_geometry":"",
             # AD creds
             "ad_username":"", "ad_password":"",
-            "adhelper_path":"ADHelper(15).py",
             # Reset password
             "reset_password":"",
             # SSH
@@ -3880,36 +3911,30 @@ $items = foreach ($u in $users) {{
         if not query:
             return messagebox.showerror("ADHelper", "Не удалось определить строку поиска для пользователя")
 
-        adhelper_path = self.settings.get_setting("adhelper_path", "").strip()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        candidates = []
-        if adhelper_path:
-            candidates.append(adhelper_path)
-        candidates.extend(["ADHelper(15).py", "ADHelper.py"])
-
-        resolved_path = ""
-        for candidate in candidates:
-            candidate_path = candidate if os.path.isabs(candidate) else os.path.join(script_dir, candidate)
-            if os.path.isfile(candidate_path):
-                resolved_path = candidate_path
-                break
-
-        if not resolved_path:
-            messagebox.showwarning("ADHelper", "Укажите корректный путь к ADHelper в настройках")
-            self.open_settings()
+        try:
+            cmd, working_directory = build_adhelper2_command(query)
+        except FileNotFoundError as exc:
+            self._log_action(f"[AD] Embedded ADHelper 2 not found: {exc}")
+            messagebox.showerror(
+                "ADHelper 2",
+                "Встроенный ADHelper 2 не найден. Переустановите или обновите TSHelper.",
+            )
             return
 
-        self._log_action(f"[AD] Launch: {resolved_path}, query={query}")
+        self._log_action(f"[AD] Launch embedded ADHelper 2: {cmd[0]}, query={query}")
 
-        cmd = [sys.executable, resolved_path, "--search", query, "--autorun", "--focus-search"]
         try:
             if is_windows():
-                subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                subprocess.Popen(
+                    cmd,
+                    cwd=working_directory,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
             else:
-                subprocess.Popen(cmd)
+                subprocess.Popen(cmd, cwd=working_directory)
         except Exception as exc:
             self._log_action(f"[AD] Launch error: {repr(exc)}")
-            messagebox.showerror("ADHelper", f"Не удалось запустить ADHelper: {exc}")
+            messagebox.showerror("ADHelper 2", f"Не удалось запустить ADHelper 2: {exc}")
 
     def _merge_pc_options(self, main_pc: str, *option_lists):
         main_pc = main_pc or ""
@@ -4169,21 +4194,11 @@ $items = foreach ($u in $users) {{
         e_user = ttk.Entry(tab_ad); e_user.insert(0, self.settings.get_setting("ad_username","")); e_user.pack(fill="x")
         ttk.Label(tab_ad, text="Пароль:").pack(pady=4, anchor="w")
         e_pass = ttk.Entry(tab_ad, show="*"); insert_secret(e_pass, "ad_password", ""); e_pass.pack(fill="x")
-        ttk.Label(tab_ad, text="Путь к ADHelper.py:").pack(pady=(10, 4), anchor="w")
-        adhelper_row = ttk.Frame(tab_ad)
-        adhelper_row.pack(fill="x")
-        adhelper_path_var = tk.StringVar(value=self.settings.get_setting("adhelper_path", "ADHelper(15).py"))
-        ttk.Entry(adhelper_row, textvariable=adhelper_path_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(
-            adhelper_row,
-            text="Обзор…",
-            command=lambda: adhelper_path_var.set(
-                filedialog.askopenfilename(
-                    title="Выберите ADHelper",
-                    filetypes=[("Python", "*.py"), ("Все файлы", "*.*")],
-                ) or adhelper_path_var.get()
-            ),
-        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            tab_ad,
+            text="ADHelper 2 встроен в TSHelper и запускается без настройки пути.",
+            wraplength=520,
+        ).pack(pady=(10, 4), anchor="w")
 
         # GLPI
         tab_glpi = make_scrollable_tab("GLPI")
@@ -4408,7 +4423,6 @@ $items = foreach ($u in $users) {{
             self._apply_idle_timeout_setting(max(0, idle_minutes))
             self.settings.set_setting("ad_username", e_user.get().strip())
             self.settings.set_setting("ad_password", e_pass.get().strip())
-            self.settings.set_setting("adhelper_path", adhelper_path_var.get().strip())
             self.settings.set_setting("reset_password", e_rst.get().strip())
             self.settings.set_setting("ssh_login", e_ssh_login.get().strip())
             self.settings.set_setting("ssh_password", e_ssh_pass.get().strip())
