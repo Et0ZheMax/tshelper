@@ -6,5 +6,5 @@ pywin32
 keyring
 paramiko
 openpyxl
-prn-site-ping @ git+https://github.com/Et0ZheMax/print_mon.git@009f954be9711cd2aabc31ef92d327aec5287ea0
+prn-site-ping @ git+https://github.com/Et0ZheMax/print_mon.git@92990ff3d2e8303b19fdc73c19eac11621df6821
 PySide6>=6.8,<7

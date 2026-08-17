@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 
-PRINT_MONITOR_COMMIT = "009f954be9711cd2aabc31ef92d327aec5287ea0"
+PRINT_MONITOR_COMMIT = "92990ff3d2e8303b19fdc73c19eac11621df6821"
 
 
 class PrinterMonitorUnavailable(RuntimeError):
