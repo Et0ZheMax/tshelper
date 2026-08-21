@@ -122,6 +122,114 @@ def test_card_contact_line_with_location():
     assert '4443 -- Щ5-104' in text
 
 
+def test_batched_settings_and_glpi_timeout():
+    manager = mod.SettingsManager.__new__(mod.SettingsManager)
+    manager.config = {}
+    manager._secret_keys = set()
+    writes = []
+    manager.save_config = lambda: writes.append(dict(manager.config))
+    manager.set_settings({'one': 1, 'two': 2, 'three': 3})
+    assert_eq(manager.config, {'one': 1, 'two': 2, 'three': 3}, 'batched settings values')
+    assert_eq(len(writes), 1, 'batched settings use one config write')
+
+    calls = []
+
+    class FakeResponse:
+        content = b'{}'
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {'data': []}
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+    client = mod.GLPIClient('https://glpi.invalid/apirest.php', 'app', 'user', request_timeout=7)
+    client.session = FakeSession()
+    client.session_token = 'session'
+    client._search('User', 'test')
+    assert_eq(calls[0][1].get('timeout'), 7, 'GLPI request timeout')
+
+
+def test_incremental_card_sync_and_deferred_ad_lookup():
+    class FakeApp:
+        @staticmethod
+        def resolve_os_types_for_user(_user):
+            return ['windows']
+
+    button = mod.UserButton.__new__(mod.UserButton)
+    button.app = FakeApp()
+    button.user = {'name': 'Тест', 'pc_name': 'w-test', 'pc_options': [], 'ext': '1', 'location': ''}
+    button._user_render_signature = button._data_signature(button.user)
+    button._os_badge_signature = ('windows',)
+    button.btn = type('FakeButton', (), {'cget': lambda self, key: '#fff' if key == 'bg' else '#000'})()
+    refreshes = []
+    badges = []
+    button.refresh_text = lambda: refreshes.append(True)
+    button._update_os_badge = lambda _bg, _fg: badges.append(True)
+    button.sync_user(dict(button.user))
+    assert_eq(refreshes, [], 'unchanged card is not redrawn')
+    assert_eq(badges, [], 'unchanged OS badge is not rebuilt')
+    changed_user = dict(button.user, location='Щ5-104')
+    button.sync_user(changed_user)
+    assert_eq(len(refreshes), 1, 'changed card is redrawn once')
+
+    app = mod.MainWindow.__new__(mod.MainWindow)
+    app._ad_mobile_cache = {}
+    app._ad_mobile_failed_cache = {}
+    app._ad_mobile_cache_lock = __import__('threading').Lock()
+    app._find_ad_candidates_by_mobile = lambda *_args: (_ for _ in ()).throw(AssertionError('network lookup must be deferred'))
+    assert app.ad_lookup_by_mobile('+7 999 000-11-22', allow_network=False) is None
+
+
+def test_ping_dispatch_is_bounded():
+    class FakeFuture:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    class FakeExecutor:
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, callback, user):
+            self.submitted.append((callback, user))
+            return FakeFuture()
+
+    class FakeMaster:
+        def __init__(self):
+            self.jobs = []
+
+        def after(self, delay, callback):
+            self.jobs.append((delay, callback))
+            return len(self.jobs)
+
+    app = mod.MainWindow.__new__(mod.MainWindow)
+    app.ping_generation = 1
+    app.ping_max_workers = 2
+    app._pending_ping_users = [
+        {'pc_name': 'w-one'},
+        {'pc_name': 'w-two'},
+        {'pc_name': 'w-three'},
+    ]
+    app._ping_queue_job = None
+    app._ping_inflight = {}
+    app._ping_inflight_lock = __import__('threading').Lock()
+    app.executor = FakeExecutor()
+    app.master = FakeMaster()
+    app._ping_task = lambda _user: None
+    app._dispatch_ping_batch(1)
+    assert_eq(len(app.executor.submitted), 2, 'ping submissions are bounded by worker count')
+    assert_eq(len(app._ping_inflight), 2, 'ping inflight accounting')
+    assert_eq(len(app._pending_ping_users), 1, 'remaining ping stays in app queue')
+    assert app._ping_queue_job is not None
+
+
 def test_broken_json_and_safe_save():
     with tempfile.TemporaryDirectory() as td:
         p = os.path.join(td, 'broken.json')
@@ -206,6 +314,9 @@ if __name__ == '__main__':
         test_os_specific_context_actions,
         test_multi_pc_os_cache_and_merge,
         test_card_contact_line_with_location,
+        test_batched_settings_and_glpi_timeout,
+        test_incremental_card_sync_and_deferred_ad_lookup,
+        test_ping_dispatch_is_bounded,
         test_broken_json_and_safe_save,
         test_safe_save_json_cleans_temp_on_error,
         test_callwatcher_parse_helpers,

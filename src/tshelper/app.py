@@ -563,10 +563,11 @@ def check_updates_async():
         log_message(f"Ошибка проверки обновлений: {e}")
 
 # --- AD: получить пользователей через ldap3 ---
-def get_ad_users(server, username, password, base_dn, domain):
+def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: bool = False):
     try:
         import ldap3
-        ldap_server = ldap3.Server(server, get_info=ldap3.ALL)
+        # Для списка карточек схема AD не нужна; NONE заметно сокращает handshake.
+        ldap_server = ldap3.Server(server, get_info=ldap3.NONE)
         conn = ldap3.Connection(ldap_server, user=f"{username}@{domain}", password=password, auto_bind=True)
         search_filter = "(&(objectCategory=person)(objectClass=user))"
         attrs = ["cn", "sAMAccountName", "ipPhone", "telephoneNumber", "physicalDeliveryOfficeName", "l"]
@@ -590,19 +591,25 @@ def get_ad_users(server, username, password, base_dn, domain):
         return users
     except Exception as e:
         log_message(f"AD error: {e}")
+        if raise_errors:
+            raise RuntimeError(f"Не удалось получить пользователей из AD: {e}") from e
         messagebox.showerror("Ошибка AD", f"Не удалось получить пользователей из AD: {e}")
         return []
 
 
 class GLPIClient:
-    def __init__(self, api_url: str, app_token: str, user_token: str, prefix_field: str = "name", verify_ssl: bool = True):
+    def __init__(self, api_url: str, app_token: str, user_token: str, prefix_field: str = "name",
+                 verify_ssl: bool = True, request_timeout: int = 12, notify_errors: bool = True):
         self.api_url = (api_url or "").strip().rstrip("/")
         self.app_token = app_token or ""
         self.user_token = user_token or ""
         self.prefix_field = prefix_field or "name"
         self.verify_ssl = bool(verify_ssl)
+        self.request_timeout = max(2, int(request_timeout or 12))
+        self.notify_errors = bool(notify_errors)
         self.session_token = None
         self.session = None
+        self.last_error = ""
 
     def _headers(self, with_auth: bool = True):
         hdrs = {"App-Token": self.app_token}
@@ -618,7 +625,8 @@ class GLPIClient:
         requests, err = _import_requests_optional()
         if not requests:
             log_message(err or "requests не установлен")
-            messagebox.showerror("GLPI", err or "requests не установлен")
+            if self.notify_errors:
+                messagebox.showerror("GLPI", err or "requests не установлен")
             return False
         self.session = requests.Session()
         self.session.verify = self.verify_ssl
@@ -630,15 +638,22 @@ class GLPIClient:
         return True
 
     def _init_session(self) -> bool:
+        if self.last_error:
+            return False
         if self.session_token:
             return True
         if not self.api_url or not self.app_token or not self.user_token:
-            messagebox.showerror("GLPI", "Не заданы API URL/токены")
+            if self.notify_errors:
+                messagebox.showerror("GLPI", "Не заданы API URL/токены")
             return False
         if not self._ensure_session():
             return False
         try:
-            resp = self.session.post(f"{self.api_url}/initSession", headers=self._headers())
+            resp = self.session.post(
+                f"{self.api_url}/initSession",
+                headers=self._headers(),
+                timeout=self.request_timeout,
+            )
             resp.raise_for_status()
             data = resp.json() if resp.content else {}
             self.session_token = data.get("session_token") or data.get("sessiontoken")
@@ -646,24 +661,30 @@ class GLPIClient:
                 raise ValueError("session_token отсутствует в ответе")
             return True
         except Exception as e:
+            self.last_error = str(e)
             log_message(f"GLPI initSession error: {e}")
-            messagebox.showerror("GLPI", f"Не удалось открыть сессию: {e}\nПроверьте URL (apirest.php) и опцию проверки SSL в настройках")
+            if self.notify_errors:
+                messagebox.showerror("GLPI", f"Не удалось открыть сессию: {e}\nПроверьте URL (apirest.php) и опцию проверки SSL в настройках")
             return False
 
     def _search(self, itemtype: str, query: str):
+        if self.last_error:
+            return []
         if not self._init_session():
             return []
         try:
             resp = self.session.get(
                 f"{self.api_url}/search/{itemtype}",
                 headers=self._headers(),
-                params={"searchText": query}
+                params={"searchText": query},
+                timeout=self.request_timeout,
             )
             resp.raise_for_status()
             data = resp.json()
             rows = data.get("data") if isinstance(data, dict) else None
             return rows if isinstance(rows, list) else []
         except Exception as e:
+            self.last_error = str(e)
             log_message(f"GLPI search error ({itemtype}): {e}")
             return []
 
@@ -685,12 +706,15 @@ class GLPIClient:
         return None
 
     def _fetch_user_computers(self, user_id):
+        if self.last_error:
+            return []
         if not self._init_session():
             return []
         try:
             resp = self.session.get(
                 f"{self.api_url}/User/{user_id}/Computer",
-                headers=self._headers()
+                headers=self._headers(),
+                timeout=self.request_timeout,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -699,6 +723,7 @@ class GLPIClient:
             if isinstance(data, dict):
                 return data.get("data") or []
         except Exception as e:
+            self.last_error = str(e)
             log_message(f"GLPI get computers error: {e}")
         return []
 
@@ -743,7 +768,7 @@ class GLPIClient:
     def find_user_computers(self, login: str, full_name: str = ""):
         uid = self._first_user_id(login, full_name)
         computers = self._fetch_user_computers(uid) if uid else []
-        if not computers:
+        if not computers and not self.last_error:
             # fallback по текстовому поиску, если привязки не нашли
             fallback_query = login or full_name
             computers = self._search("Computer", fallback_query) if fallback_query else []
@@ -1106,7 +1131,7 @@ class SettingsManager:
             return self.config.get(k, default)
         return self.config.get(k, default)
 
-    def set_setting(self, k, v):
+    def _set_setting_in_memory(self, k, v):
         if k in self._secret_keys:
             ref = self.secret_storage.store_secret(k, v, self.config.get(k, ""))
             if not v:
@@ -1115,9 +1140,17 @@ class SettingsManager:
             if not self.secret_storage.available:
                 # без защищённого хранилища не показываем и не держим пароли в конфиге
                 self.config[k] = ""
-            self.save_config()
             return
         self.config[k] = v
+
+    def set_setting(self, k, v):
+        self._set_setting_in_memory(k, v)
+        self.save_config()
+
+    def set_settings(self, values: dict):
+        """Применить пакет настроек и атомарно записать config.json один раз."""
+        for key, value in dict(values or {}).items():
+            self._set_setting_in_memory(key, value)
         self.save_config()
 
     def can_show_secrets(self) -> bool:
@@ -1586,6 +1619,7 @@ class MainWindow:
         self._idle_job = None
         self._idle_last_activity = time.time()
         self.idle_timeout_minutes = 0
+        self._sync_in_progress = False
         self.browser_integration_server = None
         self.browser_integration_error = ""
         self.printer_monitor_launcher = PrinterMonitorLauncher(
@@ -1617,6 +1651,8 @@ class MainWindow:
         self.executor = ThreadPoolExecutor(max_workers=self.ping_max_workers)
         self.buttons = {}
         self.user_widgets = {}
+        self._search_cache = {}
+        self._grid_positions = {}
         self.orphan_widgets = []
         self.empty_state_label = None
         self.search_job = None
@@ -1626,7 +1662,11 @@ class MainWindow:
         self.ping_cache_ttl_fail = 7
         self._pending_ping_users = []
         self._ping_queue_job = None
+        self._ping_inflight = {}
+        self._ping_inflight_lock = threading.Lock()
         self.os_badge_cache = self._load_os_badge_cache()
+        self._os_badge_cache_lock = threading.Lock()
+        self._os_badge_cache_save_job = None
 
         # активные звонки (список словарей)
         self.active_calls = []   # [{call_id, ext, num, name, ts, started_ts, last_seen_ts, user, who_key}]
@@ -1649,6 +1689,8 @@ class MainWindow:
         self._ad_mobile_cache = {}
         self._ad_mobile_failed_cache = {}
         self._ad_mobile_cache_lock = threading.Lock()
+        self._ad_mobile_inflight = set()
+        self._ad_lookup_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tshelper-ad-lookup")
         self._ad_mobile_cache_ttl = 3 * 60 * 60
         self._ad_mobile_failed_ttl = 15 * 60
         self._ad_domain_order = [
@@ -2019,10 +2061,40 @@ class MainWindow:
         key = host_identity_key(pc_name)
         if not key:
             return
-        if self.os_badge_cache.get(key) == normalized_os:
+        lock = getattr(self, "_os_badge_cache_lock", None)
+        if lock:
+            with lock:
+                if self.os_badge_cache.get(key) == normalized_os:
+                    return
+                self.os_badge_cache[key] = normalized_os
+        else:
+            if self.os_badge_cache.get(key) == normalized_os:
+                return
+            self.os_badge_cache[key] = normalized_os
+
+        master = getattr(self, "master", None)
+        if master is None:
+            self._flush_os_badge_cache()
             return
-        self.os_badge_cache[key] = normalized_os
-        self.settings.set_setting("os_badge_cache", self.os_badge_cache)
+        try:
+            master.after(0, self._schedule_os_badge_cache_save)
+        except Exception:
+            self._flush_os_badge_cache()
+
+    def _schedule_os_badge_cache_save(self):
+        if self._os_badge_cache_save_job:
+            return
+        self._os_badge_cache_save_job = self.master.after(1000, self._flush_os_badge_cache)
+
+    def _flush_os_badge_cache(self):
+        self._os_badge_cache_save_job = None
+        lock = getattr(self, "_os_badge_cache_lock", None)
+        if lock:
+            with lock:
+                snapshot = dict(self.os_badge_cache)
+        else:
+            snapshot = dict(self.os_badge_cache)
+        self.settings.set_setting("os_badge_cache", snapshot)
 
     def resolve_os_type_for_host(self, host: str) -> str:
         """Определить ОС конкретного hostname, не смешивая w-* и l-*."""
@@ -2351,7 +2423,7 @@ $items = foreach ($u in $users) {{
 
         return None
 
-    def ad_lookup_by_mobile(self, caller_num: str):
+    def ad_lookup_by_mobile(self, caller_num: str, *, allow_network: bool = True):
         canonical = normalize_phone(caller_num)
         last10 = phone_last10(caller_num)
         cache_key = canonical or (f"last10:{last10}" if last10 else "")
@@ -2366,6 +2438,8 @@ $items = foreach ($u in $users) {{
             failed_exp = self._ad_mobile_failed_cache.get(cache_key, 0)
             if failed_exp > now:
                 return None
+        if not allow_network:
+            return None
 
         needles = []
         if canonical:
@@ -2436,7 +2510,68 @@ $items = foreach ($u in $users) {{
                 self._ad_mobile_failed_cache[cache_key] = now + self._ad_mobile_failed_ttl
         return result
 
-    def resolve_call_to_user(self, call_name: str, call_num: str):
+    def _schedule_ad_mobile_lookup(self, caller_num: str):
+        canonical = normalize_phone(caller_num)
+        last10 = phone_last10(caller_num)
+        cache_key = canonical or (f"last10:{last10}" if last10 else "")
+        if not cache_key:
+            return
+        now = time.time()
+        with self._ad_mobile_cache_lock:
+            cache_entry = self._ad_mobile_cache.get(cache_key)
+            if cache_entry and cache_entry.get("expires", 0) > now:
+                return
+            if self._ad_mobile_failed_cache.get(cache_key, 0) > now:
+                return
+            if cache_key in self._ad_mobile_inflight:
+                return
+            self._ad_mobile_inflight.add(cache_key)
+
+        future = self._ad_lookup_executor.submit(self.ad_lookup_by_mobile, caller_num)
+        future.add_done_callback(
+            lambda completed, key=cache_key, number=caller_num: self._ad_mobile_lookup_done(key, number, completed)
+        )
+
+    def _ad_mobile_lookup_done(self, cache_key: str, caller_num: str, future):
+        with self._ad_mobile_cache_lock:
+            self._ad_mobile_inflight.discard(cache_key)
+        try:
+            ad_match = future.result()
+        except Exception as exc:
+            log_message(f"CallWatcher AD lookup error: {exc}")
+            return
+        if not ad_match:
+            return
+
+        def apply_match():
+            matched_user = self.map_ad_person_to_ts_user(ad_match.get("ad_person", {}))
+            meta = {
+                "rule": ad_match.get("rule", "ad_mobile"),
+                "ad_domain": ad_match.get("ad_domain", ""),
+                "ad_display_name": ad_match.get("ad_display_name", ""),
+                "ad_mobile": ad_match.get("ad_mobile", ""),
+            }
+            changed = False
+            target_phone = normalize_phone(caller_num) or phone_last10(caller_num)
+            with self.calls_lock:
+                for call in self.active_calls:
+                    call_phone = normalize_phone(call.get("num", "")) or phone_last10(call.get("num", ""))
+                    if target_phone and call_phone == target_phone:
+                        call["resolution"] = meta
+                        if matched_user:
+                            call["user"] = matched_user
+                        elif ad_match.get("ad_display_name"):
+                            call["ad_match"] = meta
+                        changed = True
+            if changed:
+                self._schedule_call_ui_refresh("async_ad_mobile")
+
+        try:
+            self.master.after(0, apply_match)
+        except Exception:
+            pass
+
+    def resolve_call_to_user(self, call_name: str, call_num: str, *, defer_ad_lookup: bool = False):
         raw_num = call_num or ""
         normalized_num = normalize_phone(raw_num)
         self._cw_debug_log(
@@ -2457,10 +2592,12 @@ $items = foreach ($u in $users) {{
                 "ad_mobile": "",
             }
 
-        ad_match = self.ad_lookup_by_mobile(call_num)
+        ad_match = self.ad_lookup_by_mobile(call_num, allow_network=not defer_ad_lookup)
+        if not ad_match and defer_ad_lookup:
+            self._schedule_ad_mobile_lookup(call_num)
         if not ad_match:
             return None, {
-                "rule": "no_match",
+                "rule": "ad_lookup_pending" if defer_ad_lookup else "no_match",
                 "ad_domain": "",
                 "ad_display_name": "",
                 "ad_mobile": "",
@@ -3427,17 +3564,26 @@ $items = foreach ($u in $users) {{
 
     def _get_filtered_users(self, text=None):
         if text is None:
-            text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+            text = self.search_entry.get().casefold().strip() if getattr(self, "search_entry", None) else ""
         all_users = self.users.get_users()
         if not text:
             return all_users
-        return [
-            u for u in all_users
-            if text in u["name"].lower()
-            or any(text in pc.lower() for pc in user_pc_names(u))
-            or text in str(u.get("ext", "")).lower()
-            or text in str(u.get("location", "")).lower()
-        ]
+        result = []
+        for user in all_users:
+            pc_key = self.canonical_pc_key(user.get("pc_name", ""))
+            cached = self._search_cache.get(pc_key)
+            if cached:
+                blob = cached[1]
+            else:
+                blob = "\n".join([
+                    str(user.get("name", "")),
+                    *user_pc_names(user),
+                    str(user.get("ext", "")),
+                    str(user.get("location", "")),
+                ]).casefold()
+            if text in blob:
+                result.append(user)
+        return result
 
     def _sync_user_widgets(self):
         users = self.users.get_users()
@@ -3475,6 +3621,8 @@ $items = foreach ($u in $users) {{
             if pc_name not in users_by_pc:
                 widget = self.user_widgets.pop(pc_name)
                 widget.destroy()
+                self._search_cache.pop(pc_name, None)
+                self._grid_positions.pop(pc_name, None)
 
         # создаём недостающие и обновляем данные существующих карточек
         for pc_key, user in users_by_pc.items():
@@ -3483,9 +3631,18 @@ $items = foreach ($u in $users) {{
                 widget = UserButton(self.inner, user, app=self, style_name="User.TButton", caller=None, show_status=False)
                 self.user_widgets[pc_key] = widget
             else:
-                widget.user = user
-                widget.refresh_text()
-                widget._update_os_badge(widget.btn.cget("bg"), widget.btn.cget("fg"))
+                widget.sync_user(user)
+
+            search_signature = UserButton._data_signature(user)
+            cached_search = self._search_cache.get(pc_key)
+            if not cached_search or cached_search[0] != search_signature:
+                search_blob = "\n".join([
+                    str(user.get("name", "")),
+                    *user_pc_names(user),
+                    str(user.get("ext", "")),
+                    str(user.get("location", "")),
+                ]).casefold()
+                self._search_cache[pc_key] = (search_signature, search_blob)
 
     def get_visible_users(self, search_text: str):
         all_users = self.users.get_users()
@@ -3521,7 +3678,9 @@ $items = foreach ($u in $users) {{
                 meta = call.get("resolution") if isinstance(call.get("resolution"), dict) else None
                 matched_user = call.get("user")
                 if not meta:
-                    matched_user, meta = self.resolve_call_to_user(call.get("name", ""), call.get("num", ""))
+                    matched_user, meta = self.resolve_call_to_user(
+                        call.get("name", ""), call.get("num", ""), defer_ad_lookup=True
+                    )
                     call["resolution"] = meta
                     if matched_user:
                         call["user"] = matched_user
@@ -3695,8 +3854,15 @@ $items = foreach ($u in $users) {{
         }
 
     def render_grid(self, ordered_keys, orphan_calls, show_empty_state=False):
-        for widget in self.user_widgets.values():
-            widget.grid_remove()
+        current_buttons = {
+            key: widget
+            for key, widget in self.buttons.items()
+            if self.user_widgets.get(key) is widget
+        }
+        next_keys = {key for key in ordered_keys if key in self.user_widgets}
+        for pc_key, widget in current_buttons.items():
+            if pc_key not in next_keys:
+                widget.grid_remove()
         for widget in self.orphan_widgets:
             widget.destroy()
         self.orphan_widgets = []
@@ -3725,7 +3891,10 @@ $items = foreach ($u in $users) {{
                     f"render_grid: отсутствует widget для pc_key={pc_key}, available_keys_sample={sample_keys}"
                 )
                 continue
-            widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            position = (row, col)
+            if pc_key not in current_buttons or self._grid_positions.get(pc_key) != position:
+                widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+                self._grid_positions[pc_key] = position
             self.buttons[pc_key] = widget
             col += 1
             if col >= cols:
@@ -3759,7 +3928,7 @@ $items = foreach ($u in $users) {{
 
     def populate_buttons(self, items=None, show_empty_state=False, show_status=False, search_text=None):
         if search_text is None:
-            search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+            search_text = self.search_entry.get().casefold().strip() if getattr(self, "search_entry", None) else ""
         self._sync_user_widgets()
         view_state = self._compute_view_state(search_text, show_status=show_status)
         self._apply_status_visibility(bool(show_status))
@@ -3799,7 +3968,7 @@ $items = foreach ($u in $users) {{
             return
         self._cw_ui_refresh_pending = False
 
-        search_text = self.search_entry.get().lower().strip() if getattr(self, "search_entry", None) else ""
+        search_text = self.search_entry.get().casefold().strip() if getattr(self, "search_entry", None) else ""
         show_status = len(search_text) >= 3
         prev_state = self._cw_render_state or {}
         next_state = self._compute_view_state(search_text, show_status=show_status)
@@ -3830,7 +3999,7 @@ $items = foreach ($u in $users) {{
         self.search_job = self.master.after(250, self._do_search)
 
     def _do_search(self):
-        text = self.search_entry.get().lower().strip()
+        text = self.search_entry.get().casefold().strip()
         show_status = len(text) >= 3
         self._cw_last_signature = None
         filtered = self.populate_buttons(show_status=show_status, search_text=text)
@@ -3838,6 +4007,7 @@ $items = foreach ($u in $users) {{
             self.ping_generation += 1
             gen = self.ping_generation
             queue = []
+            queued_keys = set()
             for u in filtered:
                 pc_name = u.get("pc_name")
                 pc_key = self.canonical_pc_key(pc_name)
@@ -3856,7 +4026,10 @@ $items = foreach ($u in $users) {{
                 btn = self.buttons.get(pc_key)
                 if btn:
                     btn.set_status("checking")
-                queue.append(u)
+                task_key = self._ping_cache_key(pc_name)
+                if task_key and task_key not in queued_keys:
+                    queued_keys.add(task_key)
+                    queue.append(dict(u))
             self._schedule_ping_batch(queue, gen)
         else:
             self.ping_generation += 1
@@ -3882,12 +4055,29 @@ $items = foreach ($u in $users) {{
         self._ping_queue_job = None
         if gen != self.ping_generation:
             return
-        batch = self._pending_ping_users[:self.ping_max_workers]
-        self._pending_ping_users = self._pending_ping_users[self.ping_max_workers:]
-        for u in batch:
-            self.executor.submit(self._ping_task, u, gen)
+        with self._ping_inflight_lock:
+            available_slots = max(0, self.ping_max_workers - len(self._ping_inflight))
+
+        submitted = 0
+        while self._pending_ping_users and submitted < available_slots:
+            user = self._pending_ping_users.pop(0)
+            task_key = self._ping_cache_key(user.get("pc_name", ""))
+            if not task_key:
+                continue
+            with self._ping_inflight_lock:
+                if task_key in self._ping_inflight:
+                    continue
+                future = self.executor.submit(self._ping_task, user)
+                self._ping_inflight[task_key] = future
+            future.add_done_callback(lambda completed, key=task_key: self._ping_future_done(key, completed))
+            submitted += 1
         if self._pending_ping_users:
             self._ping_queue_job = self.master.after(120, lambda g=gen: self._dispatch_ping_batch(g))
+
+    def _ping_future_done(self, task_key: str, future):
+        with self._ping_inflight_lock:
+            if self._ping_inflight.get(task_key) is future:
+                self._ping_inflight.pop(task_key, None)
 
     def clear_search(self, _=None):
         self.search_entry.delete(0, "end")
@@ -3895,10 +4085,9 @@ $items = foreach ($u in $users) {{
         self._do_search()
         return "break"
 
-    def _ping_task(self, user, gen):
+    def _ping_task(self, user):
         pc = user.get("pc_name", "")
         ok, host, ip, os_type = self.check_availability(user)
-        if gen != self.ping_generation: return
         cache_key = self._ping_cache_key(pc)
         cached = self.ping_cache.get(cache_key, {}) if cache_key else {}
         resolved_os = (os_type or "unknown").lower()
@@ -4097,7 +4286,7 @@ $items = foreach ($u in $users) {{
         merged["pc_options"] = options
         return self.users._normalize_user(merged)
 
-    def _make_glpi_client(self, silent: bool = False):
+    def _make_glpi_client(self, silent: bool = False, notify_errors: bool = True):
         url = self.settings.get_setting("glpi_api_url", "").strip()
         app_token = self.settings.get_setting("glpi_app_token", "").strip()
         user_token = self.settings.get_setting("glpi_user_token", "").strip()
@@ -4109,14 +4298,28 @@ $items = foreach ($u in $users) {{
             if not silent:
                 messagebox.showerror("GLPI", "Заполните URL API и токены GLPI в настройках")
             return None
-        return GLPIClient(url, app_token, user_token, prefix_field, verify_ssl)
+        return GLPIClient(
+            url,
+            app_token,
+            user_token,
+            prefix_field,
+            verify_ssl,
+            request_timeout=int(self.settings.get_setting("glpi_request_timeout_sec", 12) or 12),
+            notify_errors=notify_errors,
+        )
 
-    def _apply_glpi_prefixes(self, users: list, glpi_client: GLPIClient, log_prefix: str):
+    def _apply_glpi_prefixes(self, users: list, glpi_client: GLPIClient, log_prefix: str, progress_callback=None):
         if not glpi_client:
             return users, False
         updated = []
         changed = False
-        for u in users:
+        total = len(users)
+        for index, u in enumerate(users, start=1):
+            if getattr(glpi_client, "last_error", ""):
+                updated.extend(users[index - 1:])
+                break
+            if progress_callback:
+                progress_callback(f"GLPI: {index}/{total} — {u.get('name', '')}")
             login = self._extract_login(u.get("pc_name", ""))
             info = glpi_client.find_user_computers(login, u.get("name", "")) if login or u.get("name") else None
             if not info or not info.get("main"):
@@ -4139,32 +4342,90 @@ $items = foreach ($u in $users) {{
                 changed = True
         return updated, changed
 
+    def _run_sync_background(self, title: str, initial_message: str, work, on_success):
+        """Запустить синхронизацию без блокировки Tk mainloop."""
+        if self._sync_in_progress:
+            return messagebox.showinfo("Синхронизация", "Другая синхронизация уже выполняется.")
+        self._sync_in_progress = True
+
+        win = tk.Toplevel(self.master)
+        win.title(title)
+        win.transient(self.master)
+        win.resizable(False, False)
+        message_var = tk.StringVar(value=initial_message)
+        ttk.Label(win, textvariable=message_var, wraplength=430).pack(fill="x", padx=18, pady=(16, 8))
+        progress = ttk.Progressbar(win, mode="indeterminate", length=430)
+        progress.pack(fill="x", padx=18, pady=(0, 16))
+        progress.start(12)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        def report(message: str):
+            def update_message():
+                if win.winfo_exists():
+                    message_var.set(message)
+            self.master.after(0, update_message)
+
+        def close_progress():
+            self._sync_in_progress = False
+            try:
+                progress.stop()
+                win.destroy()
+            except Exception:
+                pass
+
+        def success(result):
+            close_progress()
+            on_success(result)
+
+        def failure(error):
+            close_progress()
+            log_message(f"{title}: {error}")
+            messagebox.showerror(title, str(error))
+
+        self.run_background(lambda: work(report), success, failure)
+
     def ad_sync(self):
         ad_user = self.settings.get_setting("ad_username","").strip()
         ad_pass = self.settings.get_setting("ad_password","").strip()
         if not ad_user or not ad_pass:
             return self.open_settings()
-        ad_list = get_ad_users(AD_SERVER, ad_user, ad_pass, AD_BASE_DN, AD_DOMAIN)
-        if not ad_list: return
         glpi_enabled = self.settings.get_setting("glpi_use_in_ad_sync", True)
-        glpi_client = self._make_glpi_client(silent=True) if glpi_enabled else None
-        if glpi_client:
-            ad_list, _ = self._apply_glpi_prefixes(ad_list, glpi_client, "AD Sync")
-        elif not glpi_enabled:
-            log_message("AD Sync: проверка с GLPI отключена в настройках")
-        by_norm = {norm_name(u["name"]): self.users._normalize_user(u) for u in self.users.get_users()}
-        new_candidates = []
-        for adu in ad_list:
-            k = norm_name(adu["name"])
-            if k in by_norm:
-                by_norm[k] = self._merge_user_records(by_norm[k], adu)
-            else:
-                new_candidates.append(self.users._normalize_user(adu))
-        if not new_candidates:
-            self.users.users = list(by_norm.values()); self.users.save()
-            self.populate_buttons()
-            return messagebox.showinfo("AD Sync","Новых пользователей нет. Обновления применены.")
-        self.show_ad_sync_selection(new_candidates, by_norm)
+        glpi_client = self._make_glpi_client(silent=True, notify_errors=False) if glpi_enabled else None
+
+        def work(report):
+            report("Получение пользователей из Active Directory…")
+            ad_list = get_ad_users(
+                AD_SERVER, ad_user, ad_pass, AD_BASE_DN, AD_DOMAIN, raise_errors=True
+            )
+            if glpi_client and ad_list:
+                ad_list, _ = self._apply_glpi_prefixes(
+                    ad_list, glpi_client, "AD Sync", progress_callback=report
+                )
+                if glpi_client.last_error:
+                    log_message(f"AD Sync: GLPI недоступен, продолжаем только с AD: {glpi_client.last_error}")
+            elif not glpi_enabled:
+                log_message("AD Sync: проверка с GLPI отключена в настройках")
+            return ad_list
+
+        def apply_result(ad_list):
+            if not ad_list:
+                return messagebox.showinfo("AD Sync", "Active Directory не вернул пользователей.")
+            by_norm = {norm_name(u["name"]): self.users._normalize_user(u) for u in self.users.get_users()}
+            new_candidates = []
+            for adu in ad_list:
+                key = norm_name(adu["name"])
+                if key in by_norm:
+                    by_norm[key] = self._merge_user_records(by_norm[key], adu)
+                else:
+                    new_candidates.append(self.users._normalize_user(adu))
+            if not new_candidates:
+                self.users.users = list(by_norm.values())
+                self.users.save()
+                self.populate_buttons()
+                return messagebox.showinfo("AD Sync", "Новых пользователей нет. Обновления применены.")
+            self.show_ad_sync_selection(new_candidates, by_norm)
+
+        self._run_sync_background("AD Sync", "Подключение к Active Directory…", work, apply_result)
 
     def show_ad_sync_selection(self, new_users, merged_map):
         win = tk.Toplevel(self.master); win.title("Новые пользователи AD")
@@ -4201,17 +4462,44 @@ $items = foreach ($u in $users) {{
         ttk.Button(win, text="Добавить выбранных", command=apply_sel).pack(pady=8)
 
     def glpi_prefix_sync(self):
-        glpi_client = self._make_glpi_client()
+        glpi_client = self._make_glpi_client(notify_errors=False)
         if not glpi_client:
             return
-        updated, changed = self._apply_glpi_prefixes(self.users.get_users(), glpi_client, "GLPI Sync")
-        if changed:
-            self.users.users = updated
-            self.users.save()
-            self.populate_buttons()
-            messagebox.showinfo("GLPI", "Префиксы и ПК обновлены по данным GLPI")
-        else:
-            messagebox.showinfo("GLPI", "Изменений нет")
+        users_snapshot = [dict(user) for user in self.users.get_users()]
+
+        def work(report):
+            updated, changed = self._apply_glpi_prefixes(
+                users_snapshot, glpi_client, "GLPI Sync", progress_callback=report
+            )
+            if glpi_client.last_error:
+                raise RuntimeError(f"Ошибка GLPI: {glpi_client.last_error}")
+            return updated, changed
+
+        def apply_result(result):
+            updated, changed = result
+            if changed:
+                # Пока сеть работала, оператор мог изменить карточки. Применяем
+                # только GLPI-поля ПК поверх актуального списка, не возвращая
+                # удалённых пользователей и не затирая телефон/локацию.
+                updated_by_name = {norm_name(user.get("name", "")): user for user in updated}
+                merged_users = []
+                for current in self.users.get_users():
+                    candidate = updated_by_name.get(norm_name(current.get("name", "")))
+                    if not candidate:
+                        merged_users.append(current)
+                        continue
+                    merged = dict(current)
+                    merged["pc_name"] = candidate.get("pc_name", current.get("pc_name", ""))
+                    merged["pc_options"] = candidate.get("pc_options", current.get("pc_options", []))
+                    merged_users.append(self.users._normalize_user(merged))
+                self.users.users = merged_users
+                self.users.save()
+                self.populate_buttons()
+                messagebox.showinfo("GLPI", "Префиксы и ПК обновлены по данным GLPI")
+            else:
+                messagebox.showinfo("GLPI", "Изменений нет")
+
+        self._run_sync_background("GLPI Sync", "Подключение к GLPI…", work, apply_result)
 
     # --------- Settings ----------
     def open_settings(self):
@@ -4558,31 +4846,10 @@ $items = foreach ($u in $users) {{
         # Save
         def save_all():
             prefixes = [p.strip() for p in re.split(r"[;,]", prefixes_var.get()) if p.strip()]
-            self.settings.set_setting("pc_prefixes", prefixes)
-            self.settings.set_setting("combine_context_functionality", combine_context_functionality.get())
-            self.settings.set_setting("minimize_to_tray", minimize_to_tray.get())
-            self.settings.set_setting("minimize_to_widget", minimize_to_widget.get())
             try:
                 idle_minutes = float(idle_timeout_var.get().replace(",", ".").strip() or 0)
             except Exception:
                 idle_minutes = 0
-            self.settings.set_setting("idle_timeout_minutes", max(0, idle_minutes))
-            self._apply_idle_timeout_setting(max(0, idle_minutes))
-            self.settings.set_setting("ad_username", e_user.get().strip())
-            self.settings.set_setting("ad_password", e_pass.get().strip())
-            self.settings.set_setting("reset_password", e_rst.get().strip())
-            self.settings.set_setting("ssh_login", e_ssh_login.get().strip())
-            self.settings.set_setting("ssh_password", e_ssh_pass.get().strip())
-            self.settings.set_setting("ui_board_bg", board_bg.get())
-            self.settings.set_setting("ssh_terminal", ssh_term.get())
-            self.settings.set_setting("ssh_pass_enabled", ssh_pass_enabled.get())
-            self.settings.set_setting("termius_path", termius_path.get().strip())
-            self.settings.set_setting("ssh_key_enabled", ssh_key_enabled.get())
-            self.settings.set_setting("ssh_interactive_try_key_first", ssh_interactive_try_key_first.get())
-            self.settings.set_setting("ssh_key_private_path", ssh_key_private_path.get().strip())
-            self.settings.set_setting("ssh_key_public_path", ssh_key_public_path.get().strip())
-            self.settings.set_setting("ssh_key_auto_bootstrap", ssh_key_auto_bootstrap.get())
-            self.settings.set_setting("ssh_key_push_nopasswd", ssh_key_push_nopasswd.get())
             try:
                 connect_timeout = max(1, int(ssh_connect_timeout_sec.get().strip() or "8"))
             except Exception:
@@ -4591,67 +4858,90 @@ $items = foreach ($u in $users) {{
                 command_timeout = max(1, int(ssh_command_timeout_sec.get().strip() or "1800"))
             except Exception:
                 command_timeout = 1800
-            self.settings.set_setting("ssh_connect_timeout_sec", connect_timeout)
-            self.settings.set_setting("ssh_command_timeout_sec", command_timeout)
-            self.settings.set_setting("software_catalog_path", software_catalog_path.get().strip() or "software_catalog.json")
-            self.settings.set_setting("windows_software_catalog_path", windows_software_catalog_path.get().strip() or "software_catalog_windows.json")
-            self.settings.set_setting("windows_default_backend", windows_default_backend.get().strip() or "local_subprocess")
-            self.settings.set_setting("windows_psexec_path", windows_psexec_path.get().strip() or "C:\\\\Tools\\\\PsExec64.exe")
             try:
                 windows_timeout = max(30, int(windows_default_timeout_sec.get().strip() or "1200"))
             except Exception:
                 windows_timeout = 1200
-            self.settings.set_setting("windows_default_timeout_sec", windows_timeout)
-            self.settings.set_setting("windows_skip_if_detected", windows_skip_if_detected.get())
-            self.settings.set_setting("windows_prefer_system_context", windows_prefer_system_context.get())
-            self.settings.set_setting("windows_remote_temp_dir", windows_remote_temp_dir.get().strip() or "C:\\\\Windows\\\\Temp\\\\tshelper_deploy")
-            self.settings.set_setting("elma_sed_source_path", elma_sed_source_path.get().strip())
-            # hostkeys
             try:
                 hk = json.loads(txt_hostkeys.get("1.0","end").strip() or "{}")
-                if isinstance(hk, dict):
-                    self.settings.config["plink_hostkeys"] = hk
-                    self.settings.save_config()
             except Exception as e:
                 messagebox.showerror("Hostkeys", f"Ошибка JSON: {e}")
                 return
+            if not isinstance(hk, dict):
+                messagebox.showerror("Hostkeys", "Ожидался JSON-объект")
+                return
 
-            # CallWatcher
-            self.settings.set_setting("cw_enabled", cw_enabled.get())
-            self.settings.set_setting("cw_exts", e_exts.get().strip())
-            self.settings.set_setting("cw_url", e_url.get().strip())
-            self.settings.set_setting("cw_cookie", e_cookie.get().strip())
-            self.settings.set_setting("cw_login", e_pbx_login.get().strip())
-            self.settings.set_setting("cw_password", e_pbx_pass.get().strip())
             try:
-                self.settings.set_setting("cw_interval", int(e_interval.get().strip()))
-            except:
-                self.settings.set_setting("cw_interval", 2)
-            self.settings.set_setting("cw_popup", cw_popup.get())
-            self.settings.set_setting("cw_debug", cw_debug.get())
-            self.settings.set_setting("pbx_debug_dump", pbx_debug_dump.get())
+                call_interval = int(e_interval.get().strip())
+            except Exception:
+                call_interval = 2
+
+            settings_values = {
+                "pc_prefixes": prefixes,
+                "combine_context_functionality": combine_context_functionality.get(),
+                "minimize_to_tray": minimize_to_tray.get(),
+                "minimize_to_widget": minimize_to_widget.get(),
+                "idle_timeout_minutes": max(0, idle_minutes),
+                "ad_username": e_user.get().strip(),
+                "ad_password": e_pass.get().strip(),
+                "reset_password": e_rst.get().strip(),
+                "ssh_login": e_ssh_login.get().strip(),
+                "ssh_password": e_ssh_pass.get().strip(),
+                "ui_board_bg": board_bg.get(),
+                "ssh_terminal": ssh_term.get(),
+                "ssh_pass_enabled": ssh_pass_enabled.get(),
+                "termius_path": termius_path.get().strip(),
+                "ssh_key_enabled": ssh_key_enabled.get(),
+                "ssh_interactive_try_key_first": ssh_interactive_try_key_first.get(),
+                "ssh_key_private_path": ssh_key_private_path.get().strip(),
+                "ssh_key_public_path": ssh_key_public_path.get().strip(),
+                "ssh_key_auto_bootstrap": ssh_key_auto_bootstrap.get(),
+                "ssh_key_push_nopasswd": ssh_key_push_nopasswd.get(),
+                "ssh_connect_timeout_sec": connect_timeout,
+                "ssh_command_timeout_sec": command_timeout,
+                "software_catalog_path": software_catalog_path.get().strip() or "software_catalog.json",
+                "windows_software_catalog_path": windows_software_catalog_path.get().strip() or "software_catalog_windows.json",
+                "windows_default_backend": windows_default_backend.get().strip() or "local_subprocess",
+                "windows_psexec_path": windows_psexec_path.get().strip() or "C:\\\\Tools\\\\PsExec64.exe",
+                "windows_default_timeout_sec": windows_timeout,
+                "windows_skip_if_detected": windows_skip_if_detected.get(),
+                "windows_prefer_system_context": windows_prefer_system_context.get(),
+                "windows_remote_temp_dir": windows_remote_temp_dir.get().strip() or "C:\\\\Windows\\\\Temp\\\\tshelper_deploy",
+                "elma_sed_source_path": elma_sed_source_path.get().strip(),
+                "plink_hostkeys": hk,
+                "cw_enabled": cw_enabled.get(),
+                "cw_exts": e_exts.get().strip(),
+                "cw_url": e_url.get().strip(),
+                "cw_cookie": e_cookie.get().strip(),
+                "cw_login": e_pbx_login.get().strip(),
+                "cw_password": e_pbx_pass.get().strip(),
+                "cw_interval": call_interval,
+                "cw_popup": cw_popup.get(),
+                "cw_debug": cw_debug.get(),
+                "pbx_debug_dump": pbx_debug_dump.get(),
+                "ui_user_bg": user_bg.get(),
+                "ui_user_fg": user_fg.get(),
+                "ui_caller_bg": caller_bg.get(),
+                "ui_caller_fg": caller_fg.get(),
+                "ui_status_colors": {
+                    "checking": status_checking.get(),
+                    "online": status_online.get(),
+                    "offline": status_offline.get(),
+                },
+                "glpi_api_url": e_glpi_url.get().strip(),
+                "glpi_app_token": e_glpi_app.get().strip(),
+                "glpi_user_token": e_glpi_user.get().strip(),
+                "glpi_prefix_field": e_glpi_prefix.get().strip() or "name",
+                "glpi_verify_ssl": glpi_verify_ssl.get(),
+                "glpi_use_in_ad_sync": glpi_use_in_ad_sync.get(),
+            }
+            self.settings.set_settings(settings_values)
+            self._apply_idle_timeout_setting(max(0, idle_minutes))
 
             # Цвета
-            self.settings.set_setting("ui_user_bg", user_bg.get())
-            self.settings.set_setting("ui_user_fg", user_fg.get())
-            self.settings.set_setting("ui_caller_bg", caller_bg.get())
-            self.settings.set_setting("ui_caller_fg", caller_fg.get())
-            self.settings.set_setting("ui_status_colors", {
-                "checking": status_checking.get(),
-                "online": status_online.get(),
-                "offline": status_offline.get(),
-            })
             self._apply_button_styles()
             self.status_icons = self._build_status_icons()
             self.refresh_current_view()
-
-            # GLPI
-            self.settings.set_setting("glpi_api_url", e_glpi_url.get().strip())
-            self.settings.set_setting("glpi_app_token", e_glpi_app.get().strip())
-            self.settings.set_setting("glpi_user_token", e_glpi_user.get().strip())
-            self.settings.set_setting("glpi_prefix_field", e_glpi_prefix.get().strip() or "name")
-            self.settings.set_setting("glpi_verify_ssl", glpi_verify_ssl.get())
-            self.settings.set_setting("glpi_use_in_ad_sync", glpi_use_in_ad_sync.get())
 
             self._close_save_geo(win,"settings_window_geometry")
             # перезапуск колл-вотчера с новыми настройками
@@ -4854,6 +5144,12 @@ $items = foreach ($u in $users) {{
     def _perform_exit(self):
         self.master.update_idletasks()
         self._save_main_geometry()
+        if self._os_badge_cache_save_job:
+            try:
+                self.master.after_cancel(self._os_badge_cache_save_job)
+            except Exception:
+                pass
+            self._flush_os_badge_cache()
         self._hide_tray_icon()
         self._destroy_mini_widget()
         if self._ping_queue_job:
@@ -4865,6 +5161,8 @@ $items = foreach ($u in $users) {{
         self._pending_ping_users = []
         try: self.executor.shutdown(wait=False)
         except: pass
+        try: self._ad_lookup_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception: pass
         try:
             self._stop_cw = True
         except:
@@ -5318,7 +5616,9 @@ $items = foreach ($u in $users) {{
                         first_seen_in_cycle = call_id not in active_now
                         active_now.add(call_id)
 
-                        matched_user, resolution_meta = self.resolve_call_to_user(name, num)
+                        matched_user, resolution_meta = self.resolve_call_to_user(
+                            name, num, defer_ad_lookup=True
+                        )
                         if matched_user:
                             self._cw_debug_log(
                                 f"resolve_call_to_user: найден {matched_user.get('pc_name')} ({resolution_meta.get('rule')})",
@@ -5473,6 +5773,8 @@ class UserButton(ttk.Frame):
 
 
         self._action_pc_name = ""
+        self._user_render_signature = self._data_signature(user)
+        self._os_badge_signature = ()
         pc_label = self.app.get_user_pc_display(user)
         # создаём tk.Button, чтобы гарантированно красить
         self.btn = tk.Button(
@@ -5508,6 +5810,28 @@ class UserButton(ttk.Frame):
         pc_label = self.app.get_user_pc_display(self.user)
         self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
+
+    @staticmethod
+    def _data_signature(user: dict) -> tuple:
+        return (
+            str(user.get("name", "")),
+            tuple(user_pc_names(user)),
+            str(user.get("ext", "")),
+            str(user.get("location", "")),
+        )
+
+    def sync_user(self, user: dict):
+        """Обновить только реально изменившиеся части карточки."""
+        data_signature = self._data_signature(user)
+        data_changed = data_signature != self._user_render_signature
+        self.user = user
+        if data_changed:
+            self._user_render_signature = data_signature
+            self.refresh_text()
+
+        os_signature = tuple(self.app.resolve_os_types_for_user(user))
+        if os_signature != self._os_badge_signature:
+            self._update_os_badge(self.btn.cget("bg"), self.btn.cget("fg"))
 
     def set_caller(self, caller):
         """Переключает карточку в режим звонка/обычный только при изменении состояния."""
@@ -5564,8 +5888,11 @@ class UserButton(ttk.Frame):
         if not os_types and self.os_type in {"windows", "linux"}:
             os_types = [self.os_type]
         if not os_types:
+            self._os_badge_signature = ()
             self.os_badge_container.place_forget()
             return
+
+        self._os_badge_signature = tuple(os_types)
 
         self.os_badge_container.configure(bg=bg_color)
         for os_type in os_types:
