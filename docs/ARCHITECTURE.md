@@ -1,0 +1,20 @@
+# Архитектура TSHelper
+
+TSHelper — Windows desktop-приложение на Python 3.11+ с интерфейсом Tkinter/ttk. Главный цикл UI остаётся однопоточным, а сетевые проверки, интеграции и длительные операции выполняются в фоновых потоках или отдельных процессах.
+
+## Основные блоки
+
+- `src/tshelper/app.py` — композиция интерфейса, карточки пользователей, CallWatcher и координация интеграций.
+- `src/tshelper/remote_ops.py` — SSH и Ubuntu automation через Paramiko/системные клиенты.
+- `src/tshelper/windows_*` — Windows deployment через локальный subprocess, PsExec и PowerShell.
+- `src/tshelper/browser_integration.py` — loopback HTTP-мост для браузерного расширения GLPI.
+- `apps/adhelper2` — отдельное PySide6-приложение для операций Active Directory через PowerShell/RSAT.
+- Print Monitor запускается отдельным процессом из закреплённой зависимости `prn-site-ping`.
+
+## Данные и безопасность
+
+Рабочие JSON-файлы и логи находятся в `%APPDATA%\TSHelper`. Пароли сохраняются через Keyring/Windows Credential Manager; резервный механизм использует DPAPI. Поставляемые каталоги ПО лежат в `config` и копируются в профиль пользователя перед редактированием.
+
+## Версионирование
+
+Версия задаётся только в `src/tshelper/version.py`. Git-тег и GitHub Release должны иметь вид `vX.Y.Z`. Клиент нормализует тег и показывает уведомление лишь тогда, когда версия релиза численно выше установленной.

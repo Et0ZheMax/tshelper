@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
-from windows_silent_presets import infer_exe_silent_preset, preset_args_for_package
+from .windows_silent_presets import infer_exe_silent_preset, preset_args_for_package
 
 _INSTALL_BY_EXT = {
     ".msi": "msi",

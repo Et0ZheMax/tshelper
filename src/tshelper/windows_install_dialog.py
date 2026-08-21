@@ -4,10 +4,10 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
-from windows_catalog import WindowsCatalogError, delete_windows_package, disable_windows_package, load_catalog_payload
-from windows_catalog_models import WindowsExecutionMode
-from windows_package_card_dialog import WindowsPackageCardDialog
+from .ui_geometry import apply_persisted_geometry, bind_geometry_persistence
+from .windows_catalog import WindowsCatalogError, delete_windows_package, disable_windows_package, load_catalog_payload
+from .windows_catalog_models import WindowsExecutionMode
+from .windows_package_card_dialog import WindowsPackageCardDialog
 
 
 class WindowsInstallDialog(tk.Toplevel):

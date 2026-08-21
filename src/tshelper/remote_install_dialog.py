@@ -4,8 +4,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
-from remote_ops import (
+from .ui_geometry import apply_persisted_geometry, bind_geometry_persistence
+from .remote_ops import (
     CatalogError,
     CatalogValidationError,
     SoftwareCatalog,

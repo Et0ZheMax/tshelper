@@ -9,8 +9,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from windows_catalog_models import BackendContext, DetectionResult, ExecutionResult, SourceKind, WindowsInstallType, WindowsPackage
-from windows_detection import run_detection_with_executor
+from .windows_catalog_models import BackendContext, DetectionResult, ExecutionResult, SourceKind, WindowsInstallType, WindowsPackage
+from .windows_detection import run_detection_with_executor
 
 
 class BackendError(RuntimeError):

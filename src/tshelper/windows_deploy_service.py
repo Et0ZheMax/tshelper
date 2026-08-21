@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from windows_catalog import WindowsSoftwareCatalog
-from windows_catalog_models import BackendContext, DeployOptions, DetectionResult, WindowsExecutionMode
-from windows_deploy_engine import WindowsDeployEngine
-from windows_execution_backends import LocalSubprocessBackend, PsExecBackend, WindowsExecutionBackend
+from .windows_catalog import WindowsSoftwareCatalog
+from .windows_catalog_models import BackendContext, DeployOptions, DetectionResult, WindowsExecutionMode
+from .windows_deploy_engine import WindowsDeployEngine
+from .windows_execution_backends import LocalSubprocessBackend, PsExecBackend, WindowsExecutionBackend
 
 
 @dataclass(slots=True)

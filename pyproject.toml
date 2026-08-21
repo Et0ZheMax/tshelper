@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tshelper-desktop"
+dynamic = ["version"]
+description = "Desktop-рабочее место инженера технической поддержки"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Et0ZheMax" }]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+tshelper = "tshelper.app:main"
+
+[project.urls]
+Repository = "https://github.com/Et0ZheMax/tshelper"
+Releases = "https://github.com/Et0ZheMax/tshelper/releases"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "tshelper.version.__version__" }

@@ -5,10 +5,10 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
-from windows_catalog import WindowsCatalogError, WindowsCatalogValidationError, upsert_windows_package
-from windows_package_assistant import DetectionSuggestion, analyze_installer, normalize_package_id, suggest_detection_from_payload
-from windows_silent_presets import EXE_SILENT_PRESET_ORDER, guess_silent_preset_from_args, normalize_silent_preset, preset_args_for_package
+from .ui_geometry import apply_persisted_geometry, bind_geometry_persistence
+from .windows_catalog import WindowsCatalogError, WindowsCatalogValidationError, upsert_windows_package
+from .windows_package_assistant import DetectionSuggestion, analyze_installer, normalize_package_id, suggest_detection_from_payload
+from .windows_silent_presets import EXE_SILENT_PRESET_ORDER, guess_silent_preset_from_args, normalize_silent_preset, preset_args_for_package
 
 
 class WindowsPackageCardDialog(tk.Toplevel):

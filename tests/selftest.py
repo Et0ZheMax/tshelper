@@ -1,16 +1,12 @@
-import importlib.util
 import os
 import tempfile
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, ROOT)
-MODULE_PATH = os.path.join(os.path.dirname(__file__), '..', 'TS HELPER V5.0.py')
-spec = importlib.util.spec_from_file_location('tshelper_v5', MODULE_PATH)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+sys.path.insert(0, os.path.join(ROOT, 'src'))
 
-from printer_monitor_launcher import (  # noqa: E402
+from tshelper import app as mod  # noqa: E402
+from tshelper.printer_monitor_launcher import (  # noqa: E402
     PrinterMonitorLauncher,
     build_printer_monitor_command,
 )
@@ -29,6 +25,13 @@ def test_normalize_phone():
 def test_canonical_pc_key():
     assert_eq(mod.canonical_pc_key('WS-ABC-01'), 'abc-01', 'canonical_pc_key ws')
     assert_eq(mod.canonical_pc_key('L-WS-ABC'), 'abc', 'canonical_pc_key nested')
+
+
+def test_release_version_comparison():
+    assert mod.is_newer_release('v5.10', 'v5.9.2')
+    assert not mod.is_newer_release('v5.9', 'v5.9.2')
+    assert not mod.is_newer_release('v5.9.2', '5.9.2')
+    assert not mod.is_newer_release('неизвестно', 'v5.9.2')
 
 
 def test_broken_json_and_safe_save():
@@ -87,7 +90,7 @@ def test_printer_monitor_launcher_contract():
 def test_embedded_adhelper2_command():
     query = 'ivanov'
     command, working_directory, show_bootstrap_console = mod.build_adhelper2_command(query)
-    assert_eq(os.path.basename(working_directory), 'ADHelper2', 'ADHelper2 working directory')
+    assert_eq(os.path.basename(working_directory), 'adhelper2', 'ADHelper2 working directory')
     batch_files = [item for item in command if str(item).lower().endswith('run_adhelper.bat')]
     assert batch_files, 'embedded ADHelper2 bootstrap not found'
     assert os.path.isfile(batch_files[0]), 'embedded ADHelper2 bootstrap path not found'
@@ -108,6 +111,7 @@ if __name__ == '__main__':
     tests = [
         test_normalize_phone,
         test_canonical_pc_key,
+        test_release_version_comparison,
         test_broken_json_and_safe_save,
         test_safe_save_json_cleans_temp_on_error,
         test_callwatcher_parse_helpers,

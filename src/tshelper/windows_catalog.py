@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict
 from typing import Any
 
-from windows_catalog_models import (
+from .windows_catalog_models import (
     Architecture,
     DetectionConfig,
     DetectionType,
@@ -18,7 +18,7 @@ from windows_catalog_models import (
     WindowsInstallType,
     WindowsPackage,
 )
-from windows_silent_presets import guess_silent_preset_from_args, normalize_silent_preset
+from .windows_silent_presets import guess_silent_preset_from_args, normalize_silent_preset
 
 
 class WindowsCatalogError(Exception):

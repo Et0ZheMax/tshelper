@@ -8,13 +8,24 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
 
-from ui_geometry import apply_persisted_geometry, bind_geometry_persistence
-from ui_operation_status import OperationStatusStrip
-from browser_integration import BrowserIntegrationServer
-from printer_monitor_launcher import PrinterMonitorLauncher, PrinterMonitorUnavailable
-
-# --- Версия приложения ---
-VERSION = "v5.9.2"
+from .browser_integration import BrowserIntegrationServer
+from .paths import (
+    ADHELPER2_DIR,
+    CONFIG_FILE,
+    DATA_DIR,
+    DOCK_ITEMS_FILE,
+    LOG_FILE,
+    PBX_DUMP_DIR,
+    USERS_FILE,
+    asset_path,
+    bundled_config_path,
+    ensure_user_catalog,
+    migrate_legacy_user_data,
+)
+from .printer_monitor_launcher import PrinterMonitorLauncher, PrinterMonitorUnavailable
+from .ui_geometry import apply_persisted_geometry, bind_geometry_persistence
+from .ui_operation_status import OperationStatusStrip
+from .version import VERSION
 
 # Цвета статусов (иконка в тексте)
 STATUS_COLORS_DEFAULT = {
@@ -54,7 +65,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 logger = logging.getLogger("app")
 logger.setLevel(logging.INFO)
-handler = RotatingFileHandler("app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+handler = RotatingFileHandler(str(LOG_FILE), maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
 logger.addHandler(handler)
 ACTION_LEVEL = logging.INFO + 1
@@ -244,8 +255,6 @@ class SecretStorage:
 
 # --- Debug dumps for PBX page ---
 PBX_DEBUG_DUMP = False
-PBX_DUMP_DIR = "./_pbx_debug"
-
 def _pbx_dump(name: str, data):
     """Сохраняем дампы в _pbx_debug/ (raw html, plain, блоки по ext)."""
     if not PBX_DEBUG_DUMP:
@@ -264,10 +273,11 @@ def _pbx_dump(name: str, data):
 
 
 # --- Константы ---
-APP_NAME = "TS HELP AD"
-CONFIG_FILE = "config.json"
-USERS_FILE  = "users.json"
-DOCK_ITEMS_FILE = "dock_items.json"
+APP_NAME = "TS HELPER"
+CONFIG_FILE = str(CONFIG_FILE)
+USERS_FILE = str(USERS_FILE)
+DOCK_ITEMS_FILE = str(DOCK_ITEMS_FILE)
+PBX_DUMP_DIR = str(PBX_DUMP_DIR)
 
 # AD defaults
 AD_SERVER   = "DC02.pak-cspmz.ru"
@@ -413,18 +423,17 @@ def clean_internal_number(num: str) -> str:
 def which(name): return shutil.which(name)
 def is_windows(): return platform.system().lower().startswith("win")
 
-ADHELPER2_DIRECTORY = "ADHelper2"
+ADHELPER2_DIRECTORY = "adhelper2"
 
 
 def build_adhelper2_command(query: str) -> tuple[list[str], str, bool]:
     """Возвращает команду, рабочую папку и признак видимой bootstrap-консоли."""
-    base_directories = []
+    base_directories = [str(ADHELPER2_DIR)]
     if getattr(sys, "frozen", False):
-        base_directories.append(os.path.dirname(sys.executable))
-    base_directories.append(os.path.dirname(os.path.abspath(__file__)))
+        base_directories.append(os.path.join(os.path.dirname(sys.executable), "apps", ADHELPER2_DIRECTORY))
     bundle_directory = getattr(sys, "_MEIPASS", "")
     if bundle_directory:
-        base_directories.append(bundle_directory)
+        base_directories.append(os.path.join(bundle_directory, "apps", ADHELPER2_DIRECTORY))
 
     checked_directories = set()
     for base_directory in base_directories:
@@ -433,7 +442,7 @@ def build_adhelper2_command(query: str) -> tuple[list[str], str, bool]:
             continue
         checked_directories.add(normalized_base)
 
-        adhelper_directory = os.path.join(base_directory, ADHELPER2_DIRECTORY)
+        adhelper_directory = base_directory
         executable_path = os.path.join(adhelper_directory, "ADHelper2.exe")
         built_executable_path = os.path.join(adhelper_directory, "dist", "ADHelper2", "ADHelper2.exe")
         ready_marker_path = os.path.join(adhelper_directory, ".venv", ".adhelper-ready")
@@ -455,7 +464,7 @@ def build_adhelper2_command(query: str) -> tuple[list[str], str, bool]:
         if os.path.isfile(script_path) and not getattr(sys, "frozen", False):
             return [sys.executable, script_path, *arguments], adhelper_directory, False
 
-    expected_path = os.path.join(base_directories[0], ADHELPER2_DIRECTORY)
+    expected_path = base_directories[0]
     raise FileNotFoundError(f"Встроенный ADHelper 2 не найден: {expected_path}")
 
 def run_as_admin(exe, args=""):
@@ -468,6 +477,25 @@ def run_as_admin(exe, args=""):
         return False
 
 # --- GitHub auto-update check (в фоне) ---
+def parse_release_version(value: str) -> tuple[int, ...] | None:
+    """Преобразовать v5.9.2/5.9.2 в кортеж для корректного сравнения."""
+    match = re.fullmatch(r"\s*[vV]?(\d+(?:\.\d+)*)\s*", str(value or ""))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def is_newer_release(latest: str, current: str = VERSION) -> bool:
+    latest_version = parse_release_version(latest)
+    current_version = parse_release_version(current)
+    if latest_version is None or current_version is None:
+        return False
+    width = max(len(latest_version), len(current_version))
+    normalized_latest = latest_version + (0,) * (width - len(latest_version))
+    normalized_current = current_version + (0,) * (width - len(current_version))
+    return normalized_latest > normalized_current
+
+
 def check_updates_async():
     try:
         import requests
@@ -482,7 +510,7 @@ def check_updates_async():
         latest = resp.json().get("tag_name") or resp.json().get("name")
         if not latest:
             return
-        if latest.strip() != VERSION.strip():
+        if is_newer_release(latest):
             def ask():
                 if messagebox.askyesno("Обновление доступно",
                                        f"Доступна новая версия: {latest}\nВы используете: {VERSION}\nОткрыть страницу релиза?"):
@@ -1513,7 +1541,7 @@ class MainWindow:
         self.browser_integration_server = None
         self.browser_integration_error = ""
         self.printer_monitor_launcher = PrinterMonitorLauncher(
-            working_directory=os.path.dirname(os.path.abspath(__file__))
+            working_directory=DATA_DIR
         )
 
         # стили (переопределяются при изменении настроек)
@@ -1684,7 +1712,7 @@ class MainWindow:
         return variants
 
     def get_remote_ops_auth(self):
-        from remote_ops import SSHAuthSettings, SSHKeySettings
+        from .remote_ops import SSHAuthSettings, SSHKeySettings
 
         return SSHAuthSettings(
             username=self.settings.get_setting("ssh_login", "").strip(),
@@ -1700,7 +1728,7 @@ class MainWindow:
         )
 
     def build_remote_host(self, user: dict):
-        from remote_ops import RemoteHost
+        from .remote_ops import RemoteHost
 
         candidates = self.build_host_candidates(user)
         fallback_host = (user.get("pc_name") or "").strip()
@@ -1751,7 +1779,7 @@ class MainWindow:
         return catalog_path
 
     def load_software_catalog(self):
-        from remote_ops import SoftwareCatalog
+        from .remote_ops import SoftwareCatalog
 
         catalog_path = self.ensure_software_catalog_exists()
         return SoftwareCatalog.load(catalog_path)
@@ -1763,7 +1791,7 @@ class MainWindow:
         if os.path.exists(catalog_path):
             return catalog_path
 
-        template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "software_catalog_windows.json")
+        template_path = bundled_config_path("software_catalog_windows.json")
         os.makedirs(os.path.dirname(catalog_path) or ".", exist_ok=True)
         if os.path.exists(template_path):
             shutil.copy2(template_path, catalog_path)
@@ -1853,8 +1881,7 @@ class MainWindow:
         return prefix_map.get(prefix, "unknown")
 
     def _get_project_asset_path(self, filename: str) -> str:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(base_dir, filename)
+        return asset_path(filename)
 
     def _load_and_resize_icon(self, path: str, size: tuple[int, int] = OS_ICON_SIZE):
         icon = tk.PhotoImage(file=path)
@@ -4864,7 +4891,7 @@ $items = foreach ($u in $users) {{
     def _show_tray_icon(self):
         if self.tray_icon:
             return
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ts-logo.ico")
+        icon_path = asset_path("ts-logo.ico")
         tooltip = f"{APP_NAME} {VERSION}"
         dispatcher = (lambda cb: self.master.after(0, cb))
         tray = SimpleSystemTray(icon_path, tooltip, self.restore_main_window, self.exit_app, dispatcher=dispatcher)
@@ -5839,7 +5866,7 @@ Write-Output "OK"
 
             def run_install():
                 def work():
-                    from remote_ops import SSHExecutor, UbuntuSoftwareInstaller
+                    from .remote_ops import SSHExecutor, UbuntuSoftwareInstaller
 
                     auth = self.app.get_remote_ops_auth()
                     if not auth.username:
@@ -5880,7 +5907,7 @@ Write-Output "OK"
 
             run_install()
 
-        from remote_install_dialog import SoftwareInstallDialog
+        from .remote_install_dialog import SoftwareInstallDialog
         SoftwareInstallDialog(self.app.master, catalog, on_submit, settings=self.app.settings)
 
     def install_windows_software_dialog(self):
@@ -5938,7 +5965,7 @@ Write-Output "OK"
             append_log("Pre-check")
 
             def work():
-                from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
+                from .windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
                 runtime_raw = _resolve_windows_runtime()
                 runtime = WindowsDeployRuntime(
@@ -5981,7 +6008,7 @@ Write-Output "OK"
             _log_window, append_log = self.app.open_action_log_window(f"Windows Deployment — {self.user.get('name', '?')}")
             append_log("Подготовка", stage="Подготовка")
             append_log(f"Старт Windows deployment: {package_id}")
-            from windows_catalog_models import WindowsExecutionMode
+            from .windows_catalog_models import WindowsExecutionMode
 
             mode = WindowsExecutionMode(execution_mode)
             if mode == WindowsExecutionMode.INTERACTIVE_USER_SESSION:
@@ -5999,8 +6026,8 @@ Write-Output "OK"
                 append_log("Оператор включил пропуск pre-detection перед установкой.")
 
             def work():
-                from windows_catalog_models import WindowsExecutionMode
-                from windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
+                from .windows_catalog_models import WindowsExecutionMode
+                from .windows_deploy_service import WindowsDeployRuntime, WindowsDeployService
 
                 runtime_raw = _resolve_windows_runtime(skip_pre_detection=skip_pre_detection, execution_mode=execution_mode)
                 runtime = WindowsDeployRuntime(
@@ -6079,7 +6106,7 @@ Write-Output "OK"
 
             self.app.run_background(work, on_success, on_error)
 
-        from windows_install_dialog import WindowsInstallDialog
+        from .windows_install_dialog import WindowsInstallDialog
         WindowsInstallDialog(
             self.app.master,
             catalog_path=catalog_path,
@@ -6112,7 +6139,7 @@ Write-Output "OK"
             return
 
         def work():
-            from remote_ops import SSHExecutor, UbuntuSoftwareInstaller
+            from .remote_ops import SSHExecutor, UbuntuSoftwareInstaller
 
             auth = self.app.get_remote_ops_auth()
             if not auth.username:
@@ -6159,7 +6186,7 @@ Write-Output "OK"
             append_log("SSH login пустой: настройка NOPASSWD пропущена")
             return
 
-        from remote_ops import RemoteOpsError, SSHExecutor, UbuntuSoftwareInstaller, validate_tshelper_username
+        from .remote_ops import RemoteOpsError, SSHExecutor, UbuntuSoftwareInstaller, validate_tshelper_username
 
         try:
             validated_login = validate_tshelper_username(ssh_login)
@@ -6211,7 +6238,7 @@ Write-Output "OK"
         append_log(f"Старт проброса SSH-ключа для {self.user.get('name', '?')}")
 
         def work():
-            from remote_ops import ActionResult, SSHExecutor
+            from .remote_ops import ActionResult, SSHExecutor
 
             auth = self.app.get_remote_ops_auth()
             if not auth.username:
@@ -6471,16 +6498,21 @@ def selftest_name_match():
     print("selftest_name_match: OK")
 
 # --- main ---
-if __name__ == "__main__":
+def main() -> None:
+    """Запустить desktop-приложение."""
+    migrate_legacy_user_data()
+    ensure_user_catalog("software_catalog.json")
+    ensure_user_catalog("software_catalog_windows.json")
+
     if "--selftest-name-match" in sys.argv:
         selftest_name_match()
         raise SystemExit(0)
 
-    try:
-        os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    except:
-        pass
-
+    global app_root
     app_root = tb.Window() if USE_BOOTSTRAP else tk.Tk()
     app = MainWindow(app_root)
     app_root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

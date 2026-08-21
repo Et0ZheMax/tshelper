@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from windows_catalog_models import (
+from .windows_catalog_models import (
     BackendContext,
     DeployOptions,
     DeployResult,
@@ -13,7 +13,7 @@ from windows_catalog_models import (
     WindowsInstallType,
     WindowsPackage,
 )
-from windows_execution_backends import BackendError, WindowsExecutionBackend
+from .windows_execution_backends import BackendError, WindowsExecutionBackend
 
 SUCCESS_CODES = {0}
 REBOOT_CODES = {3010, 1641}

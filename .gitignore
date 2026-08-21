@@ -3,6 +3,12 @@
 *.log.*
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv-build/
+build/
+dist/
 
 # Отладочные и пользовательские данные
 _pbx_debug/
@@ -10,8 +16,8 @@ users.json
 __pycache__/
 *.py[cod]
 .venv/
-ADHelper2/build/
-ADHelper2/dist/
+apps/adhelper2/build/
+apps/adhelper2/dist/
 
 # Конфигурации и секреты
 config.json

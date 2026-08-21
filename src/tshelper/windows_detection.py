@@ -5,7 +5,7 @@ import subprocess
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Sequence
 
-from windows_catalog_models import DetectionConfig, DetectionResult, DetectionType
+from .windows_catalog_models import DetectionConfig, DetectionResult, DetectionType
 
 CommandExecutor = Callable[[Sequence[str], int], subprocess.CompletedProcess[str]]
 _SUPPORTED_OPERATORS = {"==", "!=", ">", "<", ">=", "<="}
