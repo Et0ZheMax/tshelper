@@ -187,6 +187,10 @@ QLabel#Muted {{ color: {c.muted}; }}
 QLabel#CardTitle {{ font-size: 11pt; font-weight: 600; color: {c.muted}; }}
 QLabel#Metric {{ font-size: 24pt; font-weight: 700; color: {c.title}; }}
 QLabel#LinkLabel {{ color: {c.link}; font-weight: 600; }}
+QLabel#OuStatus {{ font-weight: 600; }}
+QLabel#OuStatus[state="problem"] {{ color: {c.danger}; }}
+QLabel#OuStatus[state="ok"] {{ color: {c.primary}; }}
+QLabel#OuStatus[state="neutral"] {{ color: {c.muted}; }}
 QLabel:disabled {{ color: {c.disabled_text}; }}
 
 /* Buttons */

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 from ..constants import APP_NAME, APP_VERSION
 from ..context import AppContext
 from .pages.dashboard import DashboardPage
+from .pages.access import AccessPage
 from .pages.offboarding import OffboardingPage
 from .pages.onboarding import OnboardingPage
 from .pages.operations import OperationsPage
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
         self.dashboard = DashboardPage(context)
         self.onboarding = OnboardingPage(context)
         self.users = UsersPage(context)
+        self.access = AccessPage(context)
         self.offboarding = OffboardingPage(context)
         self.recovery = RecoveryPage(context)
         self.operations = OperationsPage(context)
@@ -56,6 +58,7 @@ class MainWindow(QMainWindow):
             ("▦  Обзор", self.dashboard),
             ("＋  Создание", self.onboarding),
             ("⌕  Пользователи", self.users),
+            ("🔐  Доступы", self.access),
             ("⇥  Увольнение", self.offboarding),
             ("↶  Восстановление", self.recovery),
             ("≡  Операции", self.operations),

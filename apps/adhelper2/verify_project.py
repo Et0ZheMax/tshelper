@@ -20,6 +20,9 @@ def main() -> int:
         ROOT / "adhelper" / "scripts" / "create_user.ps1",
         ROOT / "adhelper" / "scripts" / "offboard_user.ps1",
         ROOT / "adhelper" / "scripts" / "restore_user.ps1",
+        ROOT / "adhelper" / "scripts" / "list_access_groups.ps1",
+        ROOT / "adhelper" / "scripts" / "inspect_resource_acl.ps1",
+        ROOT / "adhelper" / "scripts" / "manage_group_membership.ps1",
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:

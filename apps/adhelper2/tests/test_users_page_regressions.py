@@ -38,5 +38,17 @@ class UsersPageSourceRegressionTests(unittest.TestCase):
         self.assertNotIn('domain_login=f"{domain.netbios}\\\\{user.sam}"', self.source)
 
 
+    def test_org_attributes_have_russian_labels(self) -> None:
+        self.assertIn('division (Подразделение)', self.source)
+        self.assertIn('department (Управление)', self.source)
+        self.assertIn('section (Отдел)', self.source)
+
+    def test_users_page_has_ou_consistency_control_and_move_action(self) -> None:
+        self.assertIn('Контроль OU по оргструктуре', self.source)
+        self.assertIn('OU-контроль', self.source)
+        self.assertIn('Переместить в правильный OU', self.source)
+        self.assertIn('{"target_ou": target_dn}', self.source)
+
+
 if __name__ == "__main__":
     unittest.main()

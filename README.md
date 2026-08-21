@@ -1,4 +1,4 @@
-# TSHelper v5.10.1
+# TSHelper v5.11.0
 
 TSHelper — Windows desktop-рабочее место инженера техподдержки: поиск сотрудников и компьютеров, Active Directory, GLPI, CallWatcher, SSH/PowerShell Remote, удалённая установка ПО и мониторинг принтеров в одном интерфейсе.
 
@@ -8,7 +8,7 @@ TSHelper — Windows desktop-рабочее место инженера техп
 - **Windows и AD:** LDAP (`ldap3`), PowerShell/RSAT, WinRM/PsExec, DPAPI и Windows Credential Manager.
 - **Linux automation:** SSH/Paramiko, управляемый sudoers-профиль и JSON-каталог пакетов.
 - **Интеграции:** GLPI API, локальный browser bridge и парсинг FreePBX для CallWatcher.
-- **Встроенные приложения:** ADHelper 2.0.13 на PySide6 и Print Monitor на SNMP/HTTP.
+- **Встроенные приложения:** ADHelper 2.0.15 на PySide6 и Print Monitor на SNMP/HTTP.
 - **Хранение:** локальные JSON-файлы в `%APPDATA%\TSHelper`; секреты — в Keyring/DPAPI.
 
 ## Возможности
@@ -20,6 +20,7 @@ TSHelper — Windows desktop-рабочее место инженера техп
 - отзывчивый интерфейс: фоновые AD/GLPI Sync, ограниченная ping-очередь и инкрементальная отрисовка карточек;
 - синхронизация с Active Directory и GLPI;
 - открытие пользователя во встроенном ADHelper 2;
+- управление группами доступа и контроль соответствия OU организационным атрибутам через ADHelper 2.0.15;
 - входящие звонки FreePBX с поднятием карточки звонящего;
 - SSH, Termius, PowerShell Remote и копирование рабочих каталогов на удалённый ПК;
 - установка ПО на Ubuntu и Windows из редактируемых каталогов;

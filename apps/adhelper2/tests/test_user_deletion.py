@@ -111,7 +111,7 @@ class UserDeletionTests(unittest.TestCase):
         self.assertEqual(operation.operation_type, "delete")
         self.assertEqual(operation.data["deleted_user"]["sam"], "ivanov")
         self.assertTrue(operation.data["recovery_complete"])
-        self.assertEqual(operation.data["recovery_path"], "C:\\recovery\\recovery_ivanov.json")
+        self.assertEqual(operation.data["recovery_path"].replace("\\", "/"), "C:/recovery/recovery_ivanov.json")
         self.assertEqual(audit.recovery_calls[0][1], "ivanov")
         self.assertEqual(list(audit.recovery_calls[0][2]), ["example"])
         saved_snapshot = audit.recovery_calls[0][2]["example"]

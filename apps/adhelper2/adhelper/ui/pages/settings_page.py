@@ -36,6 +36,7 @@ class SettingsPage(QWidget):
         ("upn_suffix", "UPN-суффикс", "Например @example.ru"),
         ("email_suffix", "Почтовый суффикс", "Например @mail.example.ru"),
         ("fired_ou_dn", "OU уволенных", "Можно оставить пустым, если отдельный OU не используется"),
+        ("group_search_base", "OU групп доступа", "Например OU=Group,OU=csp,DC=example,DC=ru; пусто = модуль доступов отключён"),
     ]
 
     def __init__(self, context: AppContext) -> None:
@@ -431,6 +432,7 @@ class SettingsPage(QWidget):
             "upn_suffix": "",
             "email_suffix": "",
             "fired_ou_dn": "",
+            "group_search_base": "",
             "profile": "standard",
         })
         self.domain_select.addItem(self._domain_title(self._domain_drafts[-1], len(self._domain_drafts) - 1))

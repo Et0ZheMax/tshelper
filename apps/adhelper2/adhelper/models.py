@@ -49,6 +49,7 @@ class DomainConfig:
     upn_suffix: str
     email_suffix: str
     fired_ou_dn: str
+    group_search_base: str = ""
     profile: str = "standard"
 
     @classmethod
@@ -67,6 +68,7 @@ class DomainConfig:
             upn_suffix=str(value.get("upn_suffix") or "").strip(),
             email_suffix=str(value.get("email_suffix") or "").strip(),
             fired_ou_dn=str(value.get("fired_ou_dn") or "").strip(),
+            group_search_base=str(value.get("group_search_base") or "").strip(),
             profile=profile,
         )
 

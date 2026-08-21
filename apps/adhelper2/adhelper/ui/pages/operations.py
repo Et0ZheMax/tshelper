@@ -19,7 +19,7 @@ class OperationsPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         header = QHBoxLayout()
-        header.addWidget(PageHeader("Операции и аудит", "История создания, редактирования, увольнения и восстановления сотрудников."), 1)
+        header.addWidget(PageHeader("Операции и аудит", "История создания, редактирования, выдачи доступов, увольнения и восстановления сотрудников."), 1)
         refresh = QPushButton("Обновить")
         refresh.clicked.connect(self.load)
         header.addWidget(refresh)

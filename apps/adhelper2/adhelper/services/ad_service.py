@@ -196,6 +196,46 @@ class ADService:
         )
         return response.data if isinstance(response.data, dict) else {}
 
+
+    def list_access_groups(self, domain_name: str) -> list[dict[str, Any]]:
+        domain = self.domain_by_name.get(domain_name)
+        if domain is None:
+            raise ValueError(f"Не найдена конфигурация домена: {domain_name}")
+        if not domain.group_search_base:
+            raise ValueError(f"Для домена {domain.label} не настроен OU групп доступа")
+        response = self.ps.invoke(
+            "list_access_groups",
+            {"domain": domain.to_dict()},
+            timeout=120,
+        )
+        rows = response.data if isinstance(response.data, list) else []
+        return [item for item in rows if isinstance(item, dict)]
+
+    def inspect_resource_acl(self, path: str) -> dict[str, Any]:
+        response = self.ps.invoke(
+            "inspect_resource_acl",
+            {"path": str(path or "").strip()},
+            timeout=30,
+        )
+        return response.data if isinstance(response.data, dict) else {}
+
+    def manage_group_membership(self, user: UserRecord, group_identity: str, action: str = "add") -> dict[str, Any]:
+        domain = self.domain_by_name.get(user.domain)
+        if domain is None:
+            raise ValueError(f"Не найдена конфигурация домена: {user.domain}")
+        response = self.ps.invoke(
+            "manage_group_membership",
+            {
+                "domain": domain.to_dict(),
+                "user_identity": user.guid or user.sam,
+                "expected_sam": user.sam,
+                "group_identity": str(group_identity or "").strip(),
+                "action": action,
+            },
+            timeout=90,
+        )
+        return response.data if isinstance(response.data, dict) else {}
+
     def snapshot_user(self, domain: DomainConfig, sam: str, guid: str = "") -> dict[str, Any] | None:
         response = self.ps.invoke(
             "snapshot_user",

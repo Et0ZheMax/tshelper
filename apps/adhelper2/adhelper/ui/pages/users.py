@@ -12,27 +12,28 @@ from PySide6.QtWidgets import (
 
 from ...context import AppContext
 from ...models import UserRecord
+from ...services.ou_alignment import OUAlignment, parent_dn
 from ...services.welcome import select_welcome_domain
 from ...workers import FunctionWorker
-from ..widgets import BusyBar, PageHeader
+from ..widgets import BusyBar, PageHeader, SelectionDialog
 
 
 class UsersPage(QWidget):
     EDIT_FIELDS = [
-        ("title", "Должность"),
-        ("department", "Department"),
-        ("section", "Section"),
-        ("division", "Division"),
-        ("description", "Description"),
-        ("office", "Кабинет"),
-        ("telephone", "Стационарный"),
-        ("mobile", "Mobile"),
-        ("otp_mobile", "OTP Mobile"),
-        ("manager_name", "Руководитель"),
-        ("street_address", "Адрес"),
-        ("target_ou", "Целевой OU"),
+        ("title", "title (Должность)"),
+        ("division", "division (Подразделение)"),
+        ("department", "department (Управление)"),
+        ("section", "section (Отдел)"),
+        ("description", "description (Описание)"),
+        ("office", "physicalDeliveryOfficeName (Кабинет)"),
+        ("telephone", "telephoneNumber (Стационарный)"),
+        ("mobile", "mobile (Мобильный)"),
+        ("otp_mobile", "otpMobile (OTP Mobile)"),
+        ("manager_name", "manager (Руководитель)"),
+        ("street_address", "streetAddress (Адрес)"),
+        ("target_ou", "OU (Целевой OU)"),
     ]
-    FIELD_LABELS = dict(EDIT_FIELDS) | {"mail": "Почта"}
+    FIELD_LABELS = dict(EDIT_FIELDS) | {"mail": "mail (Почта)"}
 
     def __init__(self, context: AppContext) -> None:
         super().__init__()
@@ -47,6 +48,10 @@ class UsersPage(QWidget):
         self._mail_dirty = False
         self._loading_record = False
         self._active_worker: FunctionWorker | None = None
+        self._ou_worker: FunctionWorker | None = None
+        self._ou_cache: dict[str, OUAlignment] = {}
+        self._ou_current: OUAlignment | None = None
+        self._ou_selected_key = ""
         self._is_busy = False
         self._refresh_after_finish = False
 
@@ -76,8 +81,8 @@ class UsersPage(QWidget):
         left = QFrame()
         left.setObjectName("Card")
         left_layout = QVBoxLayout(left)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Сотрудник", "Логин", "Домен", "Отдел", "Статус", "OU"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Сотрудник", "Логин", "Домен", "department (Управление)", "Статус", "OU", "OU-контроль"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
@@ -97,6 +102,38 @@ class UsersPage(QWidget):
         self.identity_label.setObjectName("Muted")
         self.identity_label.setWordWrap(True)
         right_layout.addWidget(self.identity_label)
+
+        self.ou_card = QFrame()
+        self.ou_card.setObjectName("InsetCard")
+        ou_layout = QVBoxLayout(self.ou_card)
+        ou_layout.setContentsMargins(12, 10, 12, 10)
+        ou_title = QLabel("Контроль OU по оргструктуре")
+        ou_title.setObjectName("CardTitle")
+        ou_layout.addWidget(ou_title)
+        self.ou_status_label = QLabel("Выберите пользователя")
+        self.ou_status_label.setObjectName("OuStatus")
+        self.ou_status_label.setProperty("state", "neutral")
+        self.ou_status_label.setWordWrap(True)
+        ou_layout.addWidget(self.ou_status_label)
+        self.ou_details_label = QLabel()
+        self.ou_details_label.setObjectName("Muted")
+        self.ou_details_label.setWordWrap(True)
+        self.ou_details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        ou_layout.addWidget(self.ou_details_label)
+        ou_buttons = QHBoxLayout()
+        ou_buttons.addStretch(1)
+        self.ou_choose_button = QPushButton("Выбрать OU…")
+        self.ou_choose_button.clicked.connect(self._choose_ou_candidate)
+        self.ou_choose_button.hide()
+        ou_buttons.addWidget(self.ou_choose_button)
+        self.ou_move_button = QPushButton("Переместить в правильный OU")
+        self.ou_move_button.setObjectName("Primary")
+        self.ou_move_button.clicked.connect(self._move_to_expected_ou)
+        self.ou_move_button.hide()
+        ou_buttons.addWidget(self.ou_move_button)
+        ou_layout.addLayout(ou_buttons)
+        right_layout.addWidget(self.ou_card)
+
         form = QFormLayout()
         for key, label in self.EDIT_FIELDS:
             edit = QLineEdit()
@@ -105,7 +142,7 @@ class UsersPage(QWidget):
             form.addRow(label, edit)
         self.mail_check = QCheckBox("Корпоративная почта назначена")
         self.mail_check.toggled.connect(self._mark_mail_dirty)
-        form.addRow("Почта", self.mail_check)
+        form.addRow("mail (Почта)", self.mail_check)
         right_layout.addLayout(form)
         self.save_button = QPushButton("Сохранить изменения")
         self.save_button.setObjectName("Primary")
@@ -142,7 +179,7 @@ class UsersPage(QWidget):
         for row, user in enumerate(self.records):
             if not isinstance(user, UserRecord):
                 continue
-            ou = user.dn.split(",", 1)[1] if "," in user.dn else user.dn
+            ou = parent_dn(user.dn) or user.dn
             values = [
                 user.display_name,
                 user.sam,
@@ -150,6 +187,7 @@ class UsersPage(QWidget):
                 user.department,
                 "Активен" if user.enabled else "Отключён",
                 ou,
+                "—",
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -184,6 +222,7 @@ class UsersPage(QWidget):
         self._mail_original_checked = bool(user.mail)
         self._mail_dirty = False
         self._update_save_button()
+        self._start_ou_analysis(user)
 
     @staticmethod
     def _values_from_user(user: UserRecord) -> dict[str, str]:
@@ -199,7 +238,7 @@ class UsersPage(QWidget):
             "otp_mobile": user.otp_mobile,
             "manager_name": user.manager_name,
             "street_address": user.street_address,
-            "target_ou": user.dn.split(",", 1)[1] if "," in user.dn else "",
+            "target_ou": parent_dn(user.dn),
         }
 
     def _clear_selected_user(self) -> None:
@@ -212,12 +251,203 @@ class UsersPage(QWidget):
         try:
             self.selected_label.setText("Пользователь не выбран")
             self.identity_label.clear()
+            self._ou_selected_key = ""
+            self._ou_current = None
+            self._set_ou_panel("neutral", "Выберите пользователя", "")
             for edit in self.edits.values():
                 edit.clear()
             self.mail_check.setChecked(False)
         finally:
             self._loading_record = False
         self._update_save_button()
+
+    @staticmethod
+    def _ou_cache_key(user: UserRecord) -> str:
+        identity = user.guid or user.sam
+        return "|".join((user.domain, identity, user.dn, user.division, user.department, user.section))
+
+    def _set_ou_panel(self, state: str, status: str, details: str) -> None:
+        self.ou_status_label.setProperty("state", state)
+        self.ou_status_label.setText(status)
+        self.ou_details_label.setText(details)
+        style = self.ou_status_label.style()
+        style.unpolish(self.ou_status_label)
+        style.polish(self.ou_status_label)
+        self.ou_move_button.hide()
+        self.ou_choose_button.hide()
+
+    def _start_ou_analysis(self, user: UserRecord, refresh: bool = False) -> None:
+        key = self._ou_cache_key(user)
+        self._ou_selected_key = key
+        cached = None if refresh else self._ou_cache.get(key)
+        if cached is not None:
+            self._apply_ou_alignment(key, cached)
+            return
+        if self._ou_worker is not None:
+            # The running result is still useful for the cache; a new analysis is
+            # started when it finishes if the selected user has changed.
+            self._set_ou_panel("neutral", "Проверка OU ожидает завершения предыдущей проверки…", "")
+            return
+        domain = self.context.ad.domain_by_name.get(user.domain)
+        if domain is None:
+            self._set_ou_panel("problem", "⚠ Не найдена конфигурация домена", user.domain)
+            return
+        if domain.profile != "omg":
+            alignment = OUAlignment(
+                status="not_applicable",
+                current_dn=parent_dn(user.dn),
+                message="Автопроверка оргструктуры включена для профиля OMG.",
+            )
+            self._ou_cache[key] = alignment
+            self._apply_ou_alignment(key, alignment)
+            return
+        self._set_ou_panel("neutral", "Проверяем соответствие атрибутов и OU…", "")
+        worker = FunctionWorker(self._run_ou_analysis, user, key, refresh)
+        self._ou_worker = worker
+        worker.signals.result.connect(self._ou_analysis_ready)
+        worker.signals.error.connect(self._ou_analysis_error)
+        worker.signals.finished.connect(self._ou_analysis_finished)
+        self.pool.start(worker)
+
+    def _run_ou_analysis(self, user: UserRecord, key: str, refresh: bool = False, progress=None) -> tuple[str, OUAlignment]:
+        domain = self.context.ad.domain_by_name.get(user.domain)
+        if domain is None:
+            raise RuntimeError(f"Не найдена конфигурация домена: {user.domain}")
+        return key, self.context.ou_resolver.analyze_user(domain, user, refresh=refresh)
+
+    def _ou_analysis_ready(self, result: object) -> None:
+        if not isinstance(result, tuple) or len(result) != 2 or not isinstance(result[1], OUAlignment):
+            return
+        key, alignment = result
+        self._ou_cache[str(key)] = alignment
+        self._apply_ou_alignment(str(key), alignment)
+
+    def _ou_analysis_finished(self) -> None:
+        self._ou_worker = None
+        selected = self.selected
+        if selected is not None:
+            key = self._ou_cache_key(selected)
+            if key == self._ou_selected_key and key not in self._ou_cache:
+                QTimer.singleShot(0, lambda user=selected: self._start_ou_analysis(user))
+
+    def _ou_analysis_error(self, message: str, trace: str) -> None:
+        self.context.events.log_message.emit(trace)
+        if self.selected is not None:
+            self._set_ou_panel("problem", "⚠ Не удалось проверить OU", message)
+
+    def _apply_ou_alignment(self, key: str, alignment: OUAlignment) -> None:
+        if key != self._ou_selected_key:
+            return
+        self._ou_current = alignment
+        if alignment.status == "ok":
+            state = "ok"
+            title = "✓ OU соответствует оргструктуре"
+        elif alignment.status == "mismatch":
+            state = "problem"
+            title = "⚠ Найдено несоответствие OU"
+        elif alignment.status == "unresolved":
+            state = "problem"
+            title = "⚠ Целевой OU не определён однозначно"
+        else:
+            state = "neutral"
+            title = "OU-контроль не применяется"
+
+        details = alignment.message
+        if alignment.current_dn:
+            details += f"\nТекущий OU: {alignment.current_name or alignment.current_dn}"
+        if alignment.expected_dn:
+            details += f"\nОжидаемый OU: {alignment.expected_name or alignment.expected_dn}"
+        if alignment.matched_attribute and alignment.matched_value:
+            russian = "Отдел" if alignment.matched_attribute == "section" else "Управление"
+            details += f"\nОснование: {alignment.matched_attribute} ({russian}) = {alignment.matched_value}"
+        if alignment.confidence:
+            details += f"\nУверенность сопоставления: {alignment.confidence * 100:.0f}%"
+
+        self._set_ou_panel(state, title, details.strip())
+        self.ou_move_button.setVisible(alignment.can_move)
+        self.ou_move_button.setEnabled(not self._is_busy and self._active_worker is None)
+        self.ou_choose_button.setVisible(alignment.status == "unresolved" and bool(alignment.candidates))
+        self.ou_choose_button.setEnabled(not self._is_busy and self._active_worker is None)
+        self._set_table_ou_status(alignment)
+
+    def _set_table_ou_status(self, alignment: OUAlignment) -> None:
+        user = self.selected
+        if user is None:
+            return
+        for row, record in enumerate(self.records):
+            if record is user or (record.domain == user.domain and (record.guid or record.sam) == (user.guid or user.sam)):
+                item = self.table.item(row, 6)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self.table.setItem(row, 6, item)
+                if alignment.status == "ok":
+                    item.setText("✓ Совпадает")
+                elif alignment.status == "mismatch":
+                    item.setText("⚠ Несовпадение")
+                elif alignment.status == "unresolved":
+                    item.setText("⚠ Не определён")
+                else:
+                    item.setText("—")
+                item.setToolTip(alignment.message)
+                break
+
+    def _move_to_expected_ou(self) -> None:
+        user = self.selected
+        alignment = self._ou_current
+        if user is None or alignment is None or not alignment.can_move or self._active_worker is not None:
+            return
+        self._confirm_and_move_ou(user, alignment.expected_dn, alignment.expected_name)
+
+    def _choose_ou_candidate(self) -> None:
+        user = self.selected
+        alignment = self._ou_current
+        if user is None or alignment is None or not alignment.candidates or self._active_worker is not None:
+            return
+        rows = []
+        for item in alignment.candidates:
+            row = dict(item)
+            row["score_text"] = f"{float(item.get('score') or 0.0) * 100:.0f}%"
+            rows.append(row)
+        dialog = SelectionDialog(
+            "Выберите правильный OU",
+            rows,
+            [("name", "OU"), ("score_text", "Совпадение"), ("dn", "DistinguishedName")],
+            self,
+        )
+        if dialog.exec() and dialog.selected_row:
+            target_dn = str(dialog.selected_row.get("dn") or "")
+            target_name = str(dialog.selected_row.get("name") or "")
+            if target_dn:
+                self._confirm_and_move_ou(user, target_dn, target_name)
+
+    def _confirm_and_move_ou(self, user: UserRecord, target_dn: str, target_name: str) -> None:
+        current_dn = parent_dn(user.dn)
+        answer = QMessageBox.question(
+            self,
+            "Перемещение пользователя",
+            f"Переместить пользователя {user.display_name} в найденный OU?\n\n"
+            f"Сейчас: {current_dn}\n\n"
+            f"Будет: {target_dn}\n\n"
+            "Атрибуты пользователя не изменятся. Операция будет записана в аудит.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._busy(True, f"Перемещение {user.sam} в {target_name or target_dn}…")
+        worker = FunctionWorker(self.context.user_management.update, user, {"target_ou": target_dn})
+        self._active_worker = worker
+        worker.signals.result.connect(self._ou_move_ready)
+        worker.signals.error.connect(self._error)
+        worker.signals.finished.connect(self._worker_finished)
+        self.pool.start(worker)
+
+    def _ou_move_ready(self, result: object) -> None:
+        self.context.events.operations_changed.emit()
+        self._ou_cache.clear()
+        QMessageBox.information(self, "OU исправлен", "Пользователь перемещён в выбранный OU. Операция записана в аудит.")
+        self._refresh_after_finish = True
 
     def _mark_field_dirty(self, key: str) -> None:
         if self._loading_record or self.selected is None:
@@ -456,6 +686,9 @@ class UsersPage(QWidget):
         self.show_fired.setEnabled(not value)
         self.search_button.setEnabled(not value)
         self.table.setEnabled(not value)
+        if hasattr(self, "ou_move_button"):
+            self.ou_move_button.setEnabled(not value and self._active_worker is None)
+            self.ou_choose_button.setEnabled(not value and self._active_worker is None)
         self._update_save_button()
 
     def _update_save_button(self) -> None:

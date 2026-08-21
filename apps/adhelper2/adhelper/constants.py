@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 APP_NAME = "ADHelper"
-APP_VERSION = "2.0.13"
+APP_VERSION = "2.0.15"
 COMPANY_NAME = "ФГБУ «ЦСП» ФМБА России"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -22,6 +22,7 @@ DOMAIN_CONFIGS = [
         "upn_suffix": "@pak-cspmz.ru",
         "email_suffix": "@cspfmba.ru",
         "fired_ou_dn": "OU=Уволенные,OU=Users,OU=csp,DC=pak-cspmz,DC=ru",
+        "group_search_base": "OU=Group,OU=csp,DC=pak-cspmz,DC=ru",
         "profile": "standard",
     },
     {
@@ -34,6 +35,7 @@ DOMAIN_CONFIGS = [
         "upn_suffix": "@omg.cspfmba.ru",
         "email_suffix": "@cspfmba.ru",
         "fired_ou_dn": "OU=Уволенные,OU=Users,OU=csp,DC=omg,DC=cspfmba,DC=ru",
+        "group_search_base": "",
         "profile": "omg",
     },
 ]
@@ -101,6 +103,9 @@ OMG_OU_TREE = {
         "лаборатория опасных и социально значимых инфекций",
         "лаборатория разработки биотехнологических процессов",
         "лаборатория синтеза олигонуклеотидов и малых молекул",
+        "лаборатория экспериментальных и аналитических исследований",
+        "отдел ресурсного сопровождения лабораторий",
+        "отдел эксплуатации и обслуживания научного оборудования",
     ],
 }
 

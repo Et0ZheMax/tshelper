@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 from PySide6.QtCore import QObject, Signal
 
 from .services.ad_service import ADService
+from .services.access_management import AccessManagementService
 from .services.audit import AuditRepository
 from .services.offboarding import OffboardingService
 from .services.recovery import RecoveryService
@@ -43,6 +44,9 @@ class AppContext:
         self.offboarding = OffboardingService(self.ad, self.audit, logger=log)
         self.recovery = RecoveryService(self.ad, self.audit, logger=log)
         self.user_management = UserManagementService(self.ad, self.audit, logger=log)
+        self.access_management = AccessManagementService(
+            self.ad, self.audit, self.settings.base_dir / "access_groups_cache.json", logger=log
+        )
 
 
     def reload_domain_configs(self) -> None:

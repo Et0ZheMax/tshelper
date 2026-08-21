@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..models import DomainConfig
+from ..models import DomainConfig, UserRecord
 from ..settings import SettingsStore
 from ..utils import normalize_text
 from .powershell import PowerShellClient
+from .ou_alignment import OUAlignment, analyze_ou_alignment
 
 
 @dataclass(slots=True)
@@ -56,6 +57,12 @@ class OUResolver:
         values = response.data if isinstance(response.data, list) else []
         self._cache[key] = values
         return values
+
+    def analyze_user(self, domain: DomainConfig, user: UserRecord, refresh: bool = False) -> OUAlignment:
+        if domain.profile != "omg" or user.is_fired:
+            return analyze_ou_alignment(domain, user, [])
+        ous = self.list_ous(domain, search_base=domain.ou_dn or domain.search_base, refresh=refresh)
+        return analyze_ou_alignment(domain, user, ous)
 
     def resolve(self, domain: DomainConfig, department: str, search_base: str | None = None) -> OUResolution:
         query = normalize_text(department)

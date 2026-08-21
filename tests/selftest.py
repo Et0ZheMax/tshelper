@@ -305,6 +305,11 @@ def test_embedded_adhelper2_command():
     assert 'pythonw.exe' in batch_source, 'ADHelper2 GUI launcher missing'
     assert 'pip install -r requirements.txt' in batch_source, 'ADHelper2 dependency installation missing'
 
+    constants_source = open(os.path.join(working_directory, 'adhelper', 'constants.py'), encoding='utf-8').read()
+    package_source = open(os.path.join(working_directory, 'adhelper', '__init__.py'), encoding='utf-8').read()
+    assert 'APP_VERSION = "2.0.15"' in constants_source, 'embedded ADHelper2 application version'
+    assert '__version__ = "2.0.15"' in package_source, 'embedded ADHelper2 package version'
+
 
 if __name__ == '__main__':
     tests = [

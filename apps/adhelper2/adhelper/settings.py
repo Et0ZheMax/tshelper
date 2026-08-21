@@ -167,6 +167,7 @@ class SettingsStore:
         raw = self.get("domain_configs")
         source = raw if isinstance(raw, list) and raw else DOMAIN_CONFIGS
         result: list[dict[str, str]] = []
+        defaults_by_name = {str(item.get("name") or ""): item for item in DOMAIN_CONFIGS}
         for item in source:
             if not isinstance(item, dict):
                 continue
@@ -176,6 +177,12 @@ class SettingsStore:
             profile = str(item.get("profile") or ("omg" if name == "omg-cspfmba" else "standard")).strip().lower()
             if profile not in {"standard", "omg"}:
                 profile = "standard"
+            default_item = defaults_by_name.get(name, {})
+            group_search_base = (
+                item.get("group_search_base")
+                if "group_search_base" in item
+                else default_item.get("group_search_base", "")
+            )
             result.append({
                 "name": name,
                 "label": str(item.get("label") or name).strip(),
@@ -186,6 +193,7 @@ class SettingsStore:
                 "upn_suffix": str(item.get("upn_suffix") or "").strip(),
                 "email_suffix": str(item.get("email_suffix") or "").strip(),
                 "fired_ou_dn": str(item.get("fired_ou_dn") or "").strip(),
+                "group_search_base": str(group_search_base or "").strip(),
                 "profile": profile,
             })
         if not result:
