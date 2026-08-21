@@ -1,4 +1,4 @@
-# TS HELP AD — v5.9.2 (all-in-one + CallWatcher + GLPI browser bridge + Print Monitor)
+# TSHelper — all-in-one + CallWatcher + GLPI browser bridge + Print Monitor
 # Требуется: Python 3.11+, Windows
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
@@ -338,6 +338,44 @@ def canonical_pc_key(pc_name: str) -> str:
     return key
 
 
+def host_identity_key(pc_name: str) -> str:
+    """Точный ключ хоста: w-test и l-test должны оставаться разными ПК."""
+    return re.sub(r"\s+", "", str(pc_name or "").strip().casefold())
+
+
+def user_pc_names(user: dict) -> list[str]:
+    """Вернуть основной и дополнительные ПК без дублей, сохраняя порядок."""
+    result = []
+    seen = set()
+    for value in [user.get("pc_name", ""), *(user.get("pc_options") or [])]:
+        name = str(value or "").strip()
+        key = host_identity_key(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return result
+
+
+CONTEXT_COMMON_HOST_ACTIONS = ("rdp", "get_ip")
+CONTEXT_WINDOWS_ACTIONS = ("remote_assistance", "powershell", "explorer", "windows_deploy", "elma")
+CONTEXT_LINUX_ACTIONS = ("ssh", "ssh_key", "linux_install")
+
+
+def context_action_ids(os_type: str, combine_functionality: bool = False) -> tuple[str, ...]:
+    """Набор host-действий для меню с учётом ОС и настройки объединения."""
+    normalized = str(os_type or "unknown").strip().lower()
+    actions = list(CONTEXT_COMMON_HOST_ACTIONS)
+    if combine_functionality or normalized not in {"windows", "linux"}:
+        actions.extend(CONTEXT_WINDOWS_ACTIONS)
+        actions.extend(CONTEXT_LINUX_ACTIONS)
+    elif normalized == "windows":
+        actions.extend(CONTEXT_WINDOWS_ACTIONS)
+    else:
+        actions.extend(CONTEXT_LINUX_ACTIONS)
+    return tuple(actions)
+
+
 def parse_person_name(value: str) -> dict:
     """Нормализует ФИО/инициалы и раскладывает на составные части."""
 
@@ -392,6 +430,8 @@ def parse_person_name(value: str) -> dict:
     if len(words) >= 2:
         parsed["middle"] = words[1]
         parsed["middle_init"] = words[1][0]
+    elif words and initials:
+        parsed["middle_init"] = initials[0]
     elif len(initials) >= 2:
         parsed["middle_init"] = initials[1]
 
@@ -529,7 +569,7 @@ def get_ad_users(server, username, password, base_dn, domain):
         ldap_server = ldap3.Server(server, get_info=ldap3.ALL)
         conn = ldap3.Connection(ldap_server, user=f"{username}@{domain}", password=password, auto_bind=True)
         search_filter = "(&(objectCategory=person)(objectClass=user))"
-        attrs = ["cn", "sAMAccountName", "ipPhone", "telephoneNumber"]
+        attrs = ["cn", "sAMAccountName", "ipPhone", "telephoneNumber", "physicalDeliveryOfficeName", "l"]
         conn.search(search_base=base_dn, search_filter=search_filter, attributes=attrs)
         users = []
         for entry in conn.entries:
@@ -539,8 +579,13 @@ def get_ad_users(server, username, password, base_dn, domain):
                 (entry.ipPhone.value if hasattr(entry, "ipPhone") else "")
                 or (entry.telephoneNumber.value if hasattr(entry, "telephoneNumber") else "")
             )
+            location = str(
+                (entry.physicalDeliveryOfficeName.value if hasattr(entry, "physicalDeliveryOfficeName") else "")
+                or (entry.l.value if hasattr(entry, "l") else "")
+                or ""
+            ).strip()
             if cn and sam:
-                users.append({"name": cn, "pc_name": f"w-{sam}", "ext": ext})
+                users.append({"name": cn, "pc_name": f"w-{sam}", "ext": ext, "location": location})
         conn.unbind()
         return users
     except Exception as e:
@@ -935,7 +980,8 @@ class UserManager:
 
     def _normalize_user(self, u: dict):
         if not isinstance(u, dict):
-            return {"name":"", "pc_name":"", "ext": ""}
+            return {"name":"", "pc_name":"", "ext": "", "location": "", "pc_options": []}
+        u = dict(u)
         main = str(u.get("pc_name", "") or "")
         opts = u.get("pc_options") or []
         if not isinstance(opts, list):
@@ -953,6 +999,7 @@ class UserManager:
         u["pc_name"] = main
         u["pc_options"] = filtered
         u["ext"] = clean_internal_number(u.get("ext", ""))
+        u["location"] = str(u.get("location", "") or "").strip()
         return u
 
 class SettingsManager:
@@ -986,6 +1033,7 @@ class SettingsManager:
             "windows_skip_if_detected": True,
             "windows_prefer_system_context": False,
             "windows_remote_temp_dir": "C:\\\\Windows\\\\Temp\\\\tshelper_deploy",
+            "combine_context_functionality": False,
             "elma_sed_source_path": "",
             "plink_hostkeys": {},
             # GLPI
@@ -1684,6 +1732,10 @@ class MainWindow:
         return prefixes
 
     def build_host_candidates(self, user: dict) -> list[str]:
+        if user.get("_strict_host"):
+            strict_host = str(user.get("pc_name", "") or "").strip()
+            return [strict_host] if strict_host else []
+
         def add_variant(val: str):
             if not val:
                 return
@@ -1699,6 +1751,7 @@ class MainWindow:
         seen = set()
 
         for name in names:
+            add_variant(str(name or "").strip())
             clean, _ = self.normalize_pc_name(name)
             if clean:
                 if default_prefix:
@@ -1707,7 +1760,6 @@ class MainWindow:
                     if pref == default_prefix:
                         continue
                     add_variant(f"{pref}{clean}")
-            add_variant(name)
 
         return variants
 
@@ -1930,7 +1982,7 @@ class MainWindow:
         return {"image": None, "text": safe_text}
 
     def _ping_cache_key(self, pc_name: str) -> str:
-        return self.canonical_pc_key(pc_name)
+        return host_identity_key(pc_name)
 
     def _load_os_badge_cache(self) -> dict[str, str]:
         raw_cache = self.settings.get_setting("os_badge_cache", {})
@@ -1939,24 +1991,32 @@ class MainWindow:
 
         normalized_cache = {}
         for key, value in raw_cache.items():
-            cache_key = self.canonical_pc_key(str(key))
+            cache_key = host_identity_key(str(key))
             os_type = str(value or "").strip().lower()
             if not cache_key or os_type not in {"windows", "linux"}:
                 continue
             normalized_cache[cache_key] = os_type
         return normalized_cache
 
-    def get_cached_os_type(self, pc_name: str) -> str:
-        key = self.canonical_pc_key(pc_name)
+    def get_cached_os_type(self, pc_name: str, include_legacy: bool = True) -> str:
+        key = host_identity_key(pc_name)
         if not key:
             return "unknown"
-        return self.os_badge_cache.get(key, "unknown")
+        exact = self.os_badge_cache.get(key, "unknown")
+        if exact in {"windows", "linux"}:
+            return exact
+        if include_legacy:
+            legacy_key = self.canonical_pc_key(pc_name)
+            legacy = self.os_badge_cache.get(legacy_key, "unknown")
+            if legacy in {"windows", "linux"}:
+                return legacy
+        return "unknown"
 
     def remember_os_type(self, pc_name: str, os_type: str):
         normalized_os = (os_type or "").strip().lower()
         if normalized_os not in {"windows", "linux"}:
             return
-        key = self.canonical_pc_key(pc_name)
+        key = host_identity_key(pc_name)
         if not key:
             return
         if self.os_badge_cache.get(key) == normalized_os:
@@ -1964,55 +2024,56 @@ class MainWindow:
         self.os_badge_cache[key] = normalized_os
         self.settings.set_setting("os_badge_cache", self.os_badge_cache)
 
+    def resolve_os_type_for_host(self, host: str) -> str:
+        """Определить ОС конкретного hostname, не смешивая w-* и l-*."""
+        exact_cached = self.get_cached_os_type(host, include_legacy=False)
+        if exact_cached in {"windows", "linux"}:
+            return exact_cached
+
+        ping_state = self.ping_cache.get(self._ping_cache_key(host)) or {}
+        ping_os = str(ping_state.get("os_type", "unknown")).lower()
+        if ping_os in {"windows", "linux"}:
+            self.remember_os_type(host, ping_os)
+            return ping_os
+
+        prefix_os = self.detect_os_type_from_host(host)
+        if prefix_os in {"windows", "linux"}:
+            return prefix_os
+
+        return self.get_cached_os_type(host, include_legacy=True)
+
+    def resolve_os_contexts_for_user(self, user: dict) -> list[tuple[str, str]]:
+        """Список (hostname, ОС) для отрисовки бейджей и контекстного меню."""
+        return [(host, self.resolve_os_type_for_host(host)) for host in user_pc_names(user)]
+
+    def resolve_os_types_for_user(self, user: dict) -> list[str]:
+        types = []
+        for _host, os_type in self.resolve_os_contexts_for_user(user):
+            if os_type in {"windows", "linux"} and os_type not in types:
+                types.append(os_type)
+        return types
+
     def resolve_os_type_for_user(self, user: dict) -> str:
         """
         Определяет ОС пользователя без сетевых вызовов:
-        1) os_badge_cache по основной карточке (pc_name)
-        2) ping_cache по canonical key основного pc_name
-        3) ping_cache по всем host-кандидатам
-        4) fallback по префиксу host-кандидатов (w-/l-)
+        сначала для основного hostname, затем для дополнительных ПК.
+        Точные hostname не объединяются по логину: w-test и l-test независимы.
         """
+        contexts = self.resolve_os_contexts_for_user(user)
         primary_pc_name = str(user.get("pc_name", "")).strip()
-        candidates = self.build_host_candidates(user) or ([primary_pc_name] if primary_pc_name else [])
-        if not candidates:
-            return "unknown"
-
-        # 1) Пробуем os_badge_cache только по основной карточке.
-        if primary_pc_name:
-            cached_os = self.get_cached_os_type(primary_pc_name)
-            if cached_os in {"windows", "linux"}:
-                return cached_os
-
-        # 2) Пробуем ping_cache по canonical key основного pc_name.
-        if primary_pc_name:
-            primary_key = self._ping_cache_key(primary_pc_name)
-            primary_ping_state = self.ping_cache.get(primary_key) or {} if primary_key else {}
-            primary_ping_os = str(primary_ping_state.get("os_type", "unknown")).lower()
-            if primary_ping_os in {"windows", "linux"}:
-                self.remember_os_type(primary_pc_name, primary_ping_os)
-                return primary_ping_os
-
-        # 3) Пробуем ping_cache по всем кандидатам.
-        for host in candidates:
-            cache_key = self._ping_cache_key(host)
-            if not cache_key:
-                continue
-            ping_state = self.ping_cache.get(cache_key) or {}
-            ping_os = str(ping_state.get("os_type", "unknown")).lower()
-            if ping_os in {"windows", "linux"}:
-                if primary_pc_name:
-                    self.remember_os_type(primary_pc_name, ping_os)
-                return ping_os
-
-        # 4) Фолбэк по префиксу host-кандидатов.
-        for host in candidates:
-            detected_os = self.detect_os_type_from_host(host)
-            if detected_os in {"windows", "linux"}:
-                if primary_pc_name:
-                    self.remember_os_type(primary_pc_name, detected_os)
-                return detected_os
-
+        for host, os_type in contexts:
+            if host.casefold() == primary_pc_name.casefold() and os_type in {"windows", "linux"}:
+                return os_type
+        for _host, os_type in contexts:
+            if os_type in {"windows", "linux"}:
+                return os_type
         return "unknown"
+
+    def get_user_pc_display(self, user: dict) -> str:
+        pcs = user_pc_names(user)
+        if len(pcs) <= 1:
+            return self.get_display_pc_name(pcs[0]) if pcs else ""
+        return " · ".join(pcs)
 
     def get_display_pc_name(self, pc_name: str) -> str:
         clean, pref = self.normalize_pc_name(pc_name)
@@ -3373,8 +3434,9 @@ $items = foreach ($u in $users) {{
         return [
             u for u in all_users
             if text in u["name"].lower()
-            or text in u["pc_name"].lower()
+            or any(text in pc.lower() for pc in user_pc_names(u))
             or text in str(u.get("ext", "")).lower()
+            or text in str(u.get("location", "")).lower()
         ]
 
     def _sync_user_widgets(self):
@@ -3422,6 +3484,8 @@ $items = foreach ($u in $users) {{
                 self.user_widgets[pc_key] = widget
             else:
                 widget.user = user
+                widget.refresh_text()
+                widget._update_os_badge(widget.btn.cget("bg"), widget.btn.cget("fg"))
 
     def get_visible_users(self, search_text: str):
         all_users = self.users.get_users()
@@ -3846,9 +3910,18 @@ $items = foreach ($u in $users) {{
                 "ts": time.time(),
                 "host": host,
                 "ip": ip,
+                "os_type": resolved_os if host_identity_key(host) == host_identity_key(pc) else "unknown",
+            }
+        host_cache_key = self._ping_cache_key(host)
+        if host_cache_key:
+            self.ping_cache[host_cache_key] = {
+                "ok": ok,
+                "ts": time.time(),
+                "host": host,
+                "ip": ip,
                 "os_type": resolved_os,
             }
-        self.remember_os_type(pc, resolved_os)
+        self.remember_os_type(host or pc, resolved_os)
         self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
 
     def check_availability(self, user):
@@ -3877,19 +3950,22 @@ $items = foreach ($u in $users) {{
             win,
             self.settings,
             "edit_window_geometry",
-            "520x240+360+180",
+            "520x340+360+180",
             min_width=460,
-            min_height=220,
+            min_height=300,
         )
         _save_edit_geo = bind_geometry_persistence(win, self.settings, "edit_window_geometry")
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "edit_window_geometry", saver=_save_edit_geo))
         ttk.Label(win, text="ФИО:").pack(pady=4, anchor="w"); e_name = ttk.Entry(win); e_name.pack(fill="x", padx=4)
         ttk.Label(win, text="Имя ПК:").pack(pady=4, anchor="w"); e_pc = ttk.Entry(win); e_pc.pack(fill="x", padx=4)
+        ttk.Label(win, text="Дополнительные ПК (через запятую):").pack(pady=4, anchor="w"); e_pc_options = ttk.Entry(win); e_pc_options.pack(fill="x", padx=4)
         ttk.Label(win, text="Внутренний номер:").pack(pady=4, anchor="w"); e_ext = ttk.Entry(win); e_ext.pack(fill="x", padx=4)
+        ttk.Label(win, text="Местоположение:").pack(pady=4, anchor="w"); e_location = ttk.Entry(win); e_location.pack(fill="x", padx=4)
         def save():
-            n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
+            n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip(); location=e_location.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
-            self.users.add_user({"name":n,"pc_name":p,"ext":ext}); self.refresh_current_view(); self._close_save_geo(win, "edit_window_geometry", saver=_save_edit_geo)
+            options = [item.strip() for item in re.split(r"[,;\n]", e_pc_options.get()) if item.strip()]
+            self.users.add_user({"name":n,"pc_name":p,"pc_options":options,"ext":ext,"location":location}); self.refresh_current_view(); self._close_save_geo(win, "edit_window_geometry", saver=_save_edit_geo)
         ttk.Button(win, text="Сохранить", command=save).pack(pady=8)
 
     def open_edit_window(self, user):
@@ -3898,25 +3974,31 @@ $items = foreach ($u in $users) {{
             win,
             self.settings,
             "edit_window_geometry",
-            "520x240+360+180",
+            "520x340+360+180",
             min_width=460,
-            min_height=220,
+            min_height=300,
         )
         _save_edit_geo = bind_geometry_persistence(win, self.settings, "edit_window_geometry")
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "edit_window_geometry", saver=_save_edit_geo))
         ttk.Label(win, text="ФИО:").pack(pady=4, anchor="w"); e_name = ttk.Entry(win); e_name.insert(0,user["name"]); e_name.pack(fill="x", padx=4)
         ttk.Label(win, text="Имя ПК:").pack(pady=4, anchor="w"); e_pc = ttk.Entry(win); e_pc.insert(0,user["pc_name"]); e_pc.pack(fill="x", padx=4)
+        ttk.Label(win, text="Дополнительные ПК (через запятую):").pack(pady=4, anchor="w"); e_pc_options = ttk.Entry(win); e_pc_options.insert(0, ", ".join(user.get("pc_options", []))); e_pc_options.pack(fill="x", padx=4)
         ttk.Label(win, text="Внутренний номер:").pack(pady=4, anchor="w"); e_ext = ttk.Entry(win); e_ext.insert(0,user.get("ext","")); e_ext.pack(fill="x", padx=4)
+        ttk.Label(win, text="Местоположение:").pack(pady=4, anchor="w"); e_location = ttk.Entry(win); e_location.insert(0,user.get("location","")); e_location.pack(fill="x", padx=4)
         def save():
-            n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip()
+            n=e_name.get().strip(); p=e_pc.get().strip(); ext=e_ext.get().strip(); location=e_location.get().strip()
             if not n or not p: return messagebox.showerror("Ошибка","Заполните поля")
 
             old_pc = user.get("pc_name", "")
+            options = [item.strip() for item in re.split(r"[,;\n]", e_pc_options.get()) if item.strip()]
+            if old_pc and old_pc.casefold() != p.casefold():
+                options = self._merge_pc_options(p, options, [old_pc])
             new_user = {
                 "name": n,
                 "pc_name": p,
                 "ext": ext,
-                "pc_options": user.get("pc_options", []),
+                "location": location,
+                "pc_options": options,
             }
             self.users.update_user(old_pc, new_user)
 
@@ -4000,13 +4082,18 @@ $items = foreach ($u in $users) {{
 
     def _merge_user_records(self, existing: dict, incoming: dict):
         merged = dict(existing)
-        main_pc = incoming.get("pc_name") or existing.get("pc_name") or ""
+        # Не меняем выбранный оператором основной ПК при обычном AD Sync.
+        # Новый hostname сохраняется дополнительным, а явный GLPI Sync по-прежнему
+        # может переключить основной ПК через _apply_glpi_prefixes.
+        main_pc = existing.get("pc_name") or incoming.get("pc_name") or ""
         merged["name"] = incoming.get("name") or existing.get("name")
         merged["pc_name"] = main_pc
         merged["ext"] = incoming.get("ext") or existing.get("ext") or ""
+        merged["location"] = incoming.get("location") or existing.get("location") or ""
         options = self._merge_pc_options(main_pc, existing.get("pc_options", []), incoming.get("pc_options", []))
-        if existing.get("pc_name") and existing.get("pc_name").lower() != main_pc.lower():
-            options = self._merge_pc_options(main_pc, options, [existing.get("pc_name")])
+        incoming_pc = incoming.get("pc_name") or ""
+        if incoming_pc and incoming_pc.casefold() != main_pc.casefold():
+            options = self._merge_pc_options(main_pc, options, [incoming_pc])
         merged["pc_options"] = options
         return self.users._normalize_user(merged)
 
@@ -4044,7 +4131,10 @@ $items = foreach ($u in $users) {{
                 log_action(f"{log_prefix}: {u.get('name','?')} {old_pc} -> {new_pc} (источник {info.get('source')})")
             else:
                 log_message(f"{log_prefix}: {u.get('name','?')} — подтверждён {new_pc} (источник {info.get('source')})")
-            updated.append(self.users._normalize_user({"name": u.get("name", ""), "pc_name": new_pc, "pc_options": options}))
+            updated_user = dict(u)
+            updated_user["pc_name"] = new_pc
+            updated_user["pc_options"] = options
+            updated.append(self.users._normalize_user(updated_user))
             if set(map(str.lower, options)) != set(map(str.lower, u.get("pc_options", []))):
                 changed = True
         return updated, changed
@@ -4208,6 +4298,17 @@ $items = foreach ($u in $users) {{
         ttk.Label(tab_common, text="Допустимые префиксы ПК (через запятую):").pack(pady=4, anchor="w")
         prefixes_var = tk.StringVar(value=", ".join(self.get_allowed_prefixes()))
         ttk.Entry(tab_common, textvariable=prefixes_var).pack(fill="x")
+        combine_context_functionality = tk.BooleanVar(value=self.settings.get_setting("combine_context_functionality", False))
+        ttk.Checkbutton(
+            tab_common,
+            text="Объединить функционал контекстного меню для Windows и Linux",
+            variable=combine_context_functionality,
+        ).pack(anchor="w", pady=(10, 2))
+        ttk.Label(
+            tab_common,
+            text="Если включено, для каждого ПК показываются все действия независимо от определённой ОС.",
+            wraplength=560,
+        ).pack(anchor="w", pady=(0, 6))
         minimize_to_tray = tk.BooleanVar(value=self.settings.get_setting("minimize_to_tray", False))
         minimize_to_widget = tk.BooleanVar(value=self.settings.get_setting("minimize_to_widget", False))
         ttk.Checkbutton(tab_common, text="Сворачивать в трей при закрытии/сворачивании", variable=minimize_to_tray).pack(anchor="w", pady=4)
@@ -4458,6 +4559,7 @@ $items = foreach ($u in $users) {{
         def save_all():
             prefixes = [p.strip() for p in re.split(r"[;,]", prefixes_var.get()) if p.strip()]
             self.settings.set_setting("pc_prefixes", prefixes)
+            self.settings.set_setting("combine_context_functionality", combine_context_functionality.get())
             self.settings.set_setting("minimize_to_tray", minimize_to_tray.get())
             self.settings.set_setting("minimize_to_widget", minimize_to_widget.get())
             try:
@@ -4606,8 +4708,10 @@ $items = foreach ($u in $users) {{
                         name = row.get("name") or row.get("ФИО") or ""
                         pc   = row.get("pc_name") or row.get("ПК") or ""
                         ext  = row.get("ext") or row.get("internal_number") or row.get("Внутренний номер") or ""
+                        location = row.get("location") or row.get("Местоположение") or ""
+                        options = [item.strip() for item in re.split(r"[,;\n]", row.get("pc_options") or row.get("Дополнительные ПК") or "") if item.strip()]
                         if name and pc:
-                            users.append({"name":name.strip(),"pc_name":pc.strip(),"ext":str(ext).strip()}); added+=1
+                            users.append(self.users._normalize_user({"name":name.strip(),"pc_name":pc.strip(),"pc_options":options,"ext":str(ext).strip(),"location":str(location).strip()})); added+=1
             else:
                 try:
                     import pandas as pd
@@ -4618,8 +4722,10 @@ $items = foreach ($u in $users) {{
                     name = str(r.get("name") or r.get("ФИО") or "").strip()
                     pc   = str(r.get("pc_name") or r.get("ПК") or "").strip()
                     ext  = str(r.get("ext") or r.get("internal_number") or r.get("Внутренний номер") or "").strip()
+                    location = str(r.get("location") or r.get("Местоположение") or "").strip()
+                    options = [item.strip() for item in re.split(r"[,;\n]", str(r.get("pc_options") or r.get("Дополнительные ПК") or "")) if item.strip()]
                     if name and pc:
-                        users.append({"name":name,"pc_name":pc,"ext":ext}); added+=1
+                        users.append(self.users._normalize_user({"name":name,"pc_name":pc,"pc_options":options,"ext":ext,"location":location})); added+=1
             self.users.users = users; self.users.save(); self.populate_buttons()
             messagebox.showinfo("Импорт", f"Импортировано: {added}")
         except Exception as e:
@@ -4631,8 +4737,9 @@ $items = foreach ($u in $users) {{
         try:
             import csv
             with open(path, "w", encoding="utf-8", newline="") as f:
-                w=csv.DictWriter(f, fieldnames=["name","pc_name","ext"]); w.writeheader()
-                for u in self.users.get_users(): w.writerow({"name":u.get("name",""),"pc_name":u.get("pc_name",""),"ext":u.get("ext","")})
+                w=csv.DictWriter(f, fieldnames=["name","pc_name","pc_options","ext","location"]); w.writeheader()
+                for u in self.users.get_users():
+                    w.writerow({"name":u.get("name",""),"pc_name":u.get("pc_name",""),"pc_options":"; ".join(u.get("pc_options", [])),"ext":u.get("ext",""),"location":u.get("location","")})
             messagebox.showinfo("Экспорт", "Готово")
         except Exception as e:
             messagebox.showerror("Экспорт", str(e))
@@ -5365,7 +5472,8 @@ class UserButton(ttk.Frame):
         self.os_icon_image = None
 
 
-        pc_label = self.app.get_display_pc_name(user['pc_name'])
+        self._action_pc_name = ""
+        pc_label = self.app.get_user_pc_display(user)
         # создаём tk.Button, чтобы гарантированно красить
         self.btn = tk.Button(
             self,
@@ -5376,8 +5484,8 @@ class UserButton(ttk.Frame):
             command=self._show_menu
         )
         self.btn.pack(fill="both", expand=True)
-        self.os_badge = tk.Label(self, bd=0, highlightthickness=0, padx=0, pady=0)
-        self._update_os_visual_by_type(self.app.get_cached_os_type(self.user.get("pc_name", "")))
+        self.os_badge_container = tk.Frame(self, bd=0, highlightthickness=0, padx=0, pady=0)
+        self._update_os_visual_by_type(self.app.resolve_os_type_for_host(self.user.get("pc_name", "")))
         self.set_status(self.status_key)
         self._apply_caller_style()
         self.btn.bind("<Button-3>", self._rclick)
@@ -5397,7 +5505,7 @@ class UserButton(ttk.Frame):
         self.refresh_text()
 
     def refresh_text(self):
-        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
+        pc_label = self.app.get_user_pc_display(self.user)
         self.btn.config(text=self._compose_text(pc_label))
         self._apply_caller_style()
 
@@ -5449,47 +5557,57 @@ class UserButton(ttk.Frame):
 
 
     def _update_os_badge(self, bg_color: str, fg_color: str):
-        if self.os_type == "unknown":
-            self.os_badge.config(image="", text="")
-            self.os_badge.image = None
-            self.os_badge.place_forget()
+        for child in self.os_badge_container.winfo_children():
+            child.destroy()
+
+        os_types = self.app.resolve_os_types_for_user(self.user)
+        if not os_types and self.os_type in {"windows", "linux"}:
+            os_types = [self.os_type]
+        if not os_types:
+            self.os_badge_container.place_forget()
             return
 
-        if self.os_icon_image is not None:
-            self.os_badge.config(bg=bg_color, fg=fg_color, image=self.os_icon_image, text="")
-            self.os_badge.image = self.os_icon_image
-            self.os_badge.place(relx=1.0, rely=1.0, x=-6, y=-6, anchor="se")
-            self.os_badge.lift()
-            return
-
-        if self.os_icon:
-            self.os_badge.config(
+        self.os_badge_container.configure(bg=bg_color)
+        for os_type in os_types:
+            visual = self.app.get_os_visual(os_type)
+            label = tk.Label(
+                self.os_badge_container,
                 bg=bg_color,
                 fg=fg_color,
-                image="",
-                text=self.os_icon,
+                bd=0,
+                highlightthickness=0,
+                padx=1,
+                pady=0,
                 font=("Segoe UI Emoji", 9, "bold"),
             )
-            self.os_badge.image = None
-            self.os_badge.place(relx=1.0, rely=1.0, x=-6, y=-6, anchor="se")
-            self.os_badge.lift()
-            return
+            image = visual.get("image")
+            if image is not None:
+                label.configure(image=image, text="")
+                label.image = image
+            else:
+                label.configure(text=visual.get("text", ""))
+                label.image = None
+            label.pack(side="left")
 
-        self.os_badge.config(image="", text="")
-        self.os_badge.image = None
-        self.os_badge.place_forget()
+        self.os_badge_container.place(relx=1.0, rely=1.0, x=-6, y=-6, anchor="se")
+        self.os_badge_container.lift()
 
     def _status_label(self) -> str:
         return {"online": "Онлайн", "offline": "Оффлайн", "checking": ""}.get(self.status_key, "")
 
     def _compose_text(self, pc_label: str) -> str:
         ext = (self.user.get("ext") or "").strip()
+        location = (self.user.get("location") or "").strip()
         label = self._status_label() if self.show_status else ""
         label_prefix = f"{label} " if label else ""
         pc_line = f"({pc_label})"
 
         if ext:
-            header = f"{label_prefix}• 📞 {ext}" if label_prefix else f"📞 {ext}"
+            contact = f"{ext} -- {location}" if location else ext
+            header = f"{label_prefix}• 📞 {contact}" if label_prefix else f"📞 {contact}"
+            base = f"{header}\n{self.user['name']}\n{pc_line}"
+        elif location:
+            header = f"{label_prefix}📍 {location}"
             base = f"{header}\n{self.user['name']}\n{pc_line}"
         else:
             header = f"{label_prefix}{self.user['name']}"
@@ -5511,7 +5629,7 @@ class UserButton(ttk.Frame):
         return self.app.status_icons.get(self.status_key)
 
     def _apply_caller_style(self):
-        pc_label = self.app.get_display_pc_name(self.user["pc_name"])
+        pc_label = self.app.get_user_pc_display(self.user)
         if self.caller_info:
             gradient = self.app.get_gradient_image(220, 90, self.app.caller_bg, "#f97316")
             self.btn.config(
@@ -5563,37 +5681,86 @@ class UserButton(ttk.Frame):
 
     def _show_menu(self):
         m = tk.Menu(self, tearoff=0)
-        if self.user.get("pc_options"):
-            pc_menu = tk.Menu(m, tearoff=0)
-            all_pcs = [self.user.get("pc_name", "")] + list(self.user.get("pc_options", []))
-            for pc in all_pcs:
+        contexts = self.app.resolve_os_contexts_for_user(self.user)
+        combine = bool(self.app.settings.get_setting("combine_context_functionality", False))
+
+        if len(contexts) > 1:
+            for pc, os_type in contexts:
+                host_menu = tk.Menu(m, tearoff=0)
+                self._add_host_actions(host_menu, pc, os_type, combine)
+                os_label = {"windows": "Windows", "linux": "Linux"}.get(os_type, "ОС не определена")
+                current = " · основной" if pc.casefold() == str(self.user.get("pc_name", "")).casefold() else ""
+                m.add_cascade(label=f"{os_label} · {pc}{current}", menu=host_menu)
+
+            primary_menu = tk.Menu(m, tearoff=0)
+            for pc, _os_type in contexts:
                 label = pc
-                if pc.lower() == self.user.get("pc_name", "").lower():
+                if pc.casefold() == str(self.user.get("pc_name", "")).casefold():
                     label += " (текущий)"
-                pc_menu.add_command(label=label, command=lambda p=pc: self._switch_pc(p))
-            m.add_cascade(label="ПК", menu=pc_menu)
+                primary_menu.add_command(label=label, command=lambda p=pc: self._switch_pc(p))
+            m.add_cascade(label="Сделать основным ПК", menu=primary_menu)
             m.add_separator()
-        m.add_command(label="RDP", command=self.rdp_connect)
-        m.add_command(label="Удаленный помощник", command=self.remote_assistance)
-        m.add_command(label="PowerShell Remote", command=self.open_powershell_remote)
-        m.add_command(label="Проводник (C$)", command=self.open_explorer)
-        m.add_command(label="Получить IP", command=self.get_ip)
-        m.add_command(label="Открыть в AD", command=self.open_in_ad)
-        m.add_command(label="Открыть в GLPI", command=self.open_glpi)
-        m.add_separator()
-        m.add_command(label="Сброс пароля pak", command=lambda: self.reset_password_ps("pak"))
-        m.add_command(label="Сброс пароля omg", command=lambda: self.reset_password_ps("omg"))
-        m.add_separator()
-        m.add_command(label="Подключение по SSH", command=self.open_ssh_connection)
-        m.add_command(label="Пробросить SSH-ключ", command=self.bootstrap_ssh_key)
-        m.add_command(label="Установка ПО", command=self.install_software_dialog)
-        m.add_command(label="Windows Deployment", command=self.install_windows_software_dialog)
-        m.add_command(label="Проброс СЭД Elma", command=self.push_elma_sed)
-        m.add_separator()
-        m.add_command(label="Редактировать", command=lambda: self.app.open_edit_window(self.user))
-        m.add_command(label="Удалить", command=lambda: self.app.delete_user_from_button(self.user))
+        elif contexts:
+            pc, os_type = contexts[0]
+            self._add_host_actions(m, pc, os_type, combine)
+            m.add_separator()
+
+        self._add_identity_actions(m)
         x = self.winfo_rootx(); y = self.winfo_rooty()+self.winfo_height()
         m.post(x,y)
+
+    def _add_host_actions(self, menu, pc: str, os_type: str, combine: bool):
+        allowed = set(context_action_ids(os_type, combine))
+
+        def add(action_id: str, label: str, callback):
+            if action_id in allowed:
+                menu.add_command(label=label, command=lambda p=pc, cb=callback: self._invoke_host_action(p, cb))
+
+        add("rdp", "RDP", self.rdp_connect)
+        windows_desktop_count = sum(action in allowed for action in ("remote_assistance", "powershell", "explorer"))
+        if windows_desktop_count:
+            add("remote_assistance", "Удаленный помощник", self.remote_assistance)
+            add("powershell", "PowerShell Remote", self.open_powershell_remote)
+            add("explorer", "Проводник (C$)", self.open_explorer)
+        add("get_ip", "Получить IP", self.get_ip)
+
+        linux_count = sum(action in allowed for action in CONTEXT_LINUX_ACTIONS)
+        if linux_count:
+            menu.add_separator()
+            add("ssh", "Подключение по SSH", self.open_ssh_connection)
+            add("ssh_key", "Пробросить SSH-ключ", self.bootstrap_ssh_key)
+            add("linux_install", "Установка ПО", self.install_software_dialog)
+
+        windows_deploy_count = sum(action in allowed for action in ("windows_deploy", "elma"))
+        if windows_deploy_count:
+            menu.add_separator()
+            add("windows_deploy", "Windows Deployment", self.install_windows_software_dialog)
+            add("elma", "Проброс СЭД Elma", self.push_elma_sed)
+
+    def _add_identity_actions(self, menu):
+        menu.add_command(label="Открыть в AD", command=self.open_in_ad)
+        menu.add_command(label="Открыть в GLPI", command=self.open_glpi)
+        menu.add_separator()
+        menu.add_command(label="Сброс пароля pak", command=lambda: self.reset_password_ps("pak"))
+        menu.add_command(label="Сброс пароля omg", command=lambda: self.reset_password_ps("omg"))
+        menu.add_separator()
+        menu.add_command(label="Редактировать", command=lambda: self.app.open_edit_window(self.user))
+        menu.add_command(label="Удалить", command=lambda: self.app.delete_user_from_button(self.user))
+
+    def _invoke_host_action(self, pc: str, callback):
+        self._action_pc_name = str(pc or "").strip()
+        return callback()
+
+    def _target_pc(self) -> str:
+        return self._action_pc_name or str(self.user.get("pc_name", "") or "").strip()
+
+    def _action_user(self, strict: bool = True) -> dict:
+        target = self._target_pc()
+        action_user = dict(self.user)
+        action_user["pc_name"] = target
+        action_user["pc_options"] = []
+        action_user["_strict_host"] = bool(strict)
+        return action_user
 
     def _rclick(self, _e): self._show_menu()
     # … дальше методы действий без изменений (rdp_connect, remote_assistance, open_explorer, get_ip, reset_password_ps, open_ssh_connection)
@@ -5609,7 +5776,8 @@ class UserButton(ttk.Frame):
 
         self.app.users.update_user(old_pc, new_user)
         self.user.update(new_user)
-        self._update_os_visual_by_type(self.app.get_cached_os_type(pc))
+        self._action_pc_name = pc
+        self._update_os_visual_by_type(self.app.resolve_os_type_for_host(pc))
         self.app.rebind_user_widget_key(old_pc, pc, self)
         self.app.refresh_current_view()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
@@ -5617,14 +5785,14 @@ class UserButton(ttk.Frame):
 
     # --- Actions ---
     def _log_action(self, action: str):
-        pc_label = self.app.get_display_pc_name(self.user.get("pc_name", "?"))
+        pc_label = self.app.get_display_pc_name(self._target_pc() or "?")
         log_action(f"{self.user.get('name', '?')} ({pc_label}): {action}")
 
     def rdp_connect(self):
         try:
             self._log_action("Открыт RDP")
             if is_windows():
-                subprocess.Popen(["mstsc","/v", self.user["pc_name"]], creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.Popen(["mstsc","/v", self._target_pc()], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             messagebox.showerror("RDP", str(e))
 
@@ -5632,14 +5800,14 @@ class UserButton(ttk.Frame):
         try:
             self._log_action("Открыт удалённый помощник")
             if is_windows():
-                run_as_admin("msra.exe", "/offerRA "+self.user["pc_name"])
+                run_as_admin("msra.exe", "/offerRA "+self._target_pc())
         except Exception as e:
             messagebox.showerror("Удаленный помощник", str(e))
 
     def open_explorer(self):
         try:
             self._log_action("Открыт проводник C$")
-            os.startfile(f"\\\\{self.user['pc_name']}\\c$")
+            os.startfile(f"\\\\{self._target_pc()}\\c$")
         except Exception as e:
             messagebox.showerror("Проводник", str(e))
 
@@ -5650,14 +5818,15 @@ class UserButton(ttk.Frame):
                     "PowerShell Remote",
                     "PowerShell Remote доступен только при запуске TSHelper на Windows. Для работы также нужен включённый PowerShell Remoting/WinRM на целевом ПК.",
                 )
-            candidates = self.app.build_host_candidates(self.user)
+            action_user = self._action_user()
+            candidates = self.app.build_host_candidates(action_user)
             target_host = ""
             for host in candidates:
                 if self.app.resolve_ip(host):
                     target_host = host
                     break
             if not target_host:
-                target_host = self.user.get("pc_name", "").strip()
+                target_host = action_user.get("pc_name", "").strip()
             if not target_host:
                 return messagebox.showerror("PowerShell Remote", "Не удалось определить целевой ПК")
 
@@ -5684,7 +5853,7 @@ class UserButton(ttk.Frame):
             return messagebox.showerror("Проброс СЭД Elma", "Проброс через admin-share и robocopy доступен только на Windows.")
 
         folder_name = os.path.basename(os.path.normpath(source_path))
-        pc_name = self.user.get("pc_name", "").strip()
+        pc_name = self._target_pc()
         if not pc_name:
             return messagebox.showerror("Проброс СЭД Elma", "Не удалось определить имя целевого ПК.")
         dest_unc = f"\\\\{pc_name}\\c$\\{folder_name}"
@@ -5736,9 +5905,10 @@ class UserButton(ttk.Frame):
         self.app.open_in_ad(self.user)
 
     def get_ip(self):
+        action_user = self._action_user(strict=False)
         def task():
-            candidates = self.app.build_host_candidates(self.user) or [self.user.get("pc_name", "")]
-            default_host = candidates[0] if candidates else self.user.get("pc_name", "")
+            candidates = self.app.build_host_candidates(action_user) or [action_user.get("pc_name", "")]
+            default_host = candidates[0] if candidates else action_user.get("pc_name", "")
             found_host = ""
             found_ip = ""
 
@@ -5759,13 +5929,14 @@ class UserButton(ttk.Frame):
                 source = found_host or default_host or "?"
                 self._log_action(f"Запрошен IP: {source} -> {ip_value}")
 
-                current_pc = self.user.get("pc_name", "")
+                current_pc = action_user.get("pc_name", "")
                 if found_host and found_host.lower() != current_pc.lower():
                     msg = (
-                        f"По основному имени {current_pc or 'не задано'} ответ не получен. "
-                        f"Доступен хост {found_host}. Переключить пользователя на него?"
+                        f"По имени {current_pc or 'не задано'} ответ не получен. Доступен хост {found_host}.\n\n"
+                        f"Сохранить {found_host} как отдельный ПК и сделать его основным? "
+                        f"{current_pc or 'Предыдущее имя'} останется в списке дополнительных ПК."
                     )
-                    if messagebox.askyesno("Обновить имя ПК", msg):
+                    if messagebox.askyesno("Сохранить обнаруженный ПК", msg):
                         old_pc = self.user.get("pc_name", "")
                         self._switch_pc(found_host)
                         log_action(f"Обновлён основной ПК для {self.user.get('name','?')}: {old_pc} -> {found_host}")
@@ -5851,6 +6022,7 @@ Write-Output "OK"
             return "__TIMEOUT__"
 
     def install_software_dialog(self):
+        action_user = self._action_user()
         try:
             catalog = self.app.load_software_catalog()
         except Exception as exc:
@@ -5871,7 +6043,7 @@ Write-Output "OK"
                     auth = self.app.get_remote_ops_auth()
                     if not auth.username:
                         raise RuntimeError("Не задан SSH Login в настройках")
-                    host = self.app.build_remote_host(self.user)
+                    host = self.app.build_remote_host(action_user)
                     executor = SSHExecutor(auth, logger=append_log)
                     installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
                     return installer.install_software(
@@ -5890,7 +6062,7 @@ Write-Output "OK"
                     append_log("Post-check")
                     append_log(result.summary)
                     if getattr(result, "needs_sudo_repair", False):
-                        self._handle_sudo_repair_flow(result, catalog, item_id, force_reinstall, append_log, run_install)
+                        self._handle_sudo_repair_flow(result, catalog, item_id, force_reinstall, append_log, run_install, action_user)
                         return
                     append_log("Завершено")
                     self._log_action(f"Remote install: {item_id} -> {'OK' if result.success else 'ERROR'}")
@@ -5911,6 +6083,7 @@ Write-Output "OK"
         SoftwareInstallDialog(self.app.master, catalog, on_submit, settings=self.app.settings)
 
     def install_windows_software_dialog(self):
+        action_user = self._action_user()
         try:
             catalog_path = self.app.ensure_windows_software_catalog_exists()
         except Exception as exc:
@@ -5928,7 +6101,7 @@ Write-Output "OK"
             delivery_folder = str(self.app.settings.get_setting("windows_delivery_folder", "C:\\Installers\\TSHelper") or "C:\\Installers\\TSHelper").strip()
             preferred_session_username = str(self.app.settings.get_setting("windows_preferred_session_username", "") or "").strip()
             if backend_name == "psexec":
-                target_host = (self.user.get("pc_name") or "").strip()
+                target_host = (action_user.get("pc_name") or "").strip()
                 mode = "remote / psexec"
             else:
                 target_host = "localhost"
@@ -6117,8 +6290,8 @@ Write-Output "OK"
             settings=self.app.settings,
         )
 
-    def _handle_sudo_repair_flow(self, result, catalog, item_id: str, force_reinstall: bool, append_log, retry_install_callback):
-        host_name = result.host_used or self.user.get("pc_name", "") or "неизвестный хост"
+    def _handle_sudo_repair_flow(self, result, catalog, item_id: str, force_reinstall: bool, append_log, retry_install_callback, action_user: dict):
+        host_name = result.host_used or action_user.get("pc_name", "") or "неизвестный хост"
         append_log("Требуется донастройка sudoers")
         confirmed = messagebox.askokcancel(
             "Требуется донастройка sudo",
@@ -6144,7 +6317,7 @@ Write-Output "OK"
             auth = self.app.get_remote_ops_auth()
             if not auth.username:
                 raise RuntimeError("Не задан SSH Login в настройках")
-            host = self.app.build_remote_host(self.user)
+            host = self.app.build_remote_host(action_user)
             executor = SSHExecutor(auth, logger=append_log)
             installer = UbuntuSoftwareInstaller(executor, catalog, logger=append_log)
             return installer.repair_passwordless_sudo(host, sudo_password)
@@ -6174,7 +6347,7 @@ Write-Output "OK"
         self.app.master.after(0, show_dialog)
         return response_queue.get()
 
-    def _maybe_apply_ssh_key_nopasswd(self, bootstrap_result, append_log):
+    def _maybe_apply_ssh_key_nopasswd(self, bootstrap_result, append_log, action_user: dict):
         if not bootstrap_result.success:
             return
         if not self.app.settings.get_setting("ssh_key_push_nopasswd", False):
@@ -6195,7 +6368,7 @@ Write-Output "OK"
             messagebox.showerror("Пробросить SSH-ключ", str(exc), parent=self.app.master)
             return
 
-        target_host = bootstrap_result.host_used or self.user.get("pc_name", "") or "неизвестный хост"
+        target_host = bootstrap_result.host_used or action_user.get("pc_name", "") or "неизвестный хост"
         confirmed = messagebox.askokcancel(
             "Настройка NOPASSWD",
             f"Создать NOPASSWD sudoers для пользователя {validated_login} на хосте {target_host}?",
@@ -6209,7 +6382,7 @@ Write-Output "OK"
 
         def work():
             auth = self.app.get_remote_ops_auth()
-            host = self.app.build_remote_host(self.user)
+            host = self.app.build_remote_host(action_user)
             executor = SSHExecutor(auth, logger=append_log)
             installer = UbuntuSoftwareInstaller(executor, None, logger=append_log)
             return installer.apply_tshelper_sudoers(
@@ -6234,6 +6407,7 @@ Write-Output "OK"
         self.app.run_background(work, on_success, on_error)
 
     def bootstrap_ssh_key(self):
+        action_user = self._action_user()
         log_window, append_log = self.app.open_action_log_window(f"Проброс SSH-ключа — {self.user.get('name', '?')}")
         append_log(f"Старт проброса SSH-ключа для {self.user.get('name', '?')}")
 
@@ -6243,7 +6417,7 @@ Write-Output "OK"
             auth = self.app.get_remote_ops_auth()
             if not auth.username:
                 raise RuntimeError("Не задан SSH Login в настройках")
-            host = self.app.build_remote_host(self.user)
+            host = self.app.build_remote_host(action_user)
             executor = SSHExecutor(auth, logger=append_log)
             result = ActionResult(action_name="Проброс SSH-ключа", success=False)
             try:
@@ -6262,7 +6436,7 @@ Write-Output "OK"
             append_log(result.summary)
             self._log_action(f"SSH key bootstrap -> {'OK' if result.success else 'ERROR'}")
             self._show_action_result(result, title="Пробросить SSH-ключ")
-            self._maybe_apply_ssh_key_nopasswd(result, append_log)
+            self._maybe_apply_ssh_key_nopasswd(result, append_log, action_user)
 
         def on_error(error):
             append_log(f"Ошибка: {error}")
@@ -6341,11 +6515,12 @@ Write-Output "OK"
 
     def open_ssh_connection(self):
         # Важно: это старый интерактивный SSH-поток через терминал, не automation.
+        action_user = self._action_user()
         ssh_login = self.app.settings.get_setting("ssh_login","")
         ssh_password = self.app.settings.get_setting("ssh_password","")
         if not ssh_login:
             return messagebox.showerror("SSH", "Не задан SSH Login в настройках")
-        candidates = self.app.build_host_candidates(self.user)
+        candidates = self.app.build_host_candidates(action_user)
         if not candidates:
             return messagebox.showerror("SSH", "Не удалось определить имя хоста")
         preferred = candidates[0]

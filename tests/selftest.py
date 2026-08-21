@@ -34,6 +34,94 @@ def test_release_version_comparison():
     assert not mod.is_newer_release('неизвестно', 'v5.9.2')
 
 
+def test_os_specific_context_actions():
+    windows = set(mod.context_action_ids('windows'))
+    linux = set(mod.context_action_ids('linux'))
+    combined = set(mod.context_action_ids('windows', combine_functionality=True))
+
+    assert {'remote_assistance', 'powershell', 'explorer', 'windows_deploy', 'elma'} <= windows
+    assert not {'ssh', 'ssh_key', 'linux_install'} & windows
+    assert {'ssh', 'ssh_key', 'linux_install'} <= linux
+    assert not {'remote_assistance', 'powershell', 'explorer', 'windows_deploy', 'elma'} & linux
+    assert set(mod.CONTEXT_WINDOWS_ACTIONS + mod.CONTEXT_LINUX_ACTIONS) <= combined
+
+    class FakeMenu:
+        def __init__(self):
+            self.labels = []
+
+        def add_command(self, *, label, command):
+            self.labels.append(label)
+
+        def add_separator(self):
+            self.labels.append('---')
+
+    button = mod.UserButton.__new__(mod.UserButton)
+    windows_menu = FakeMenu()
+    linux_menu = FakeMenu()
+    button._add_host_actions(windows_menu, 'w-test', 'windows', False)
+    button._add_host_actions(linux_menu, 'l-test', 'linux', False)
+    assert 'Подключение по SSH' not in windows_menu.labels
+    assert 'Windows Deployment' not in linux_menu.labels
+    assert 'Подключение по SSH' in linux_menu.labels
+    assert 'Windows Deployment' in windows_menu.labels
+
+
+def test_multi_pc_os_cache_and_merge():
+    class DummySettings:
+        def __init__(self):
+            self.values = {'pc_prefixes': ['w-', 'l-']}
+
+        def get_setting(self, key, default=None):
+            return self.values.get(key, default)
+
+        def set_setting(self, key, value):
+            self.values[key] = value
+
+    with tempfile.TemporaryDirectory() as td:
+        manager = mod.UserManager(os.path.join(td, 'users.json'))
+        app = mod.MainWindow.__new__(mod.MainWindow)
+        app.settings = DummySettings()
+        app.users = manager
+        app.os_badge_cache = {}
+        app.ping_cache = {}
+
+        app.remember_os_type('w-test', 'windows')
+        app.remember_os_type('l-test', 'linux')
+        assert_eq(app.get_cached_os_type('w-test'), 'windows', 'windows host cache')
+        assert_eq(app.get_cached_os_type('l-test'), 'linux', 'linux host cache')
+        assert_eq(app.resolve_os_types_for_user({'pc_name': 'l-test', 'pc_options': ['w-test']}), ['linux', 'windows'], 'dual OS badges')
+        assert_eq(app.build_host_candidates({'pc_name': 'l-test', 'pc_options': []})[0], 'l-test', 'selected host has priority')
+        assert_eq(app.build_host_candidates({'pc_name': 'w-test', '_strict_host': True}), ['w-test'], 'actions use exact selected host')
+
+        existing = {'name': 'Тест', 'pc_name': 'l-test', 'pc_options': [], 'ext': '4443', 'location': 'Щ5-104'}
+        incoming = {'name': 'Тест', 'pc_name': 'w-test', 'pc_options': [], 'ext': '4443', 'location': 'Щ5-104'}
+        merged = app._merge_user_records(existing, incoming)
+        assert_eq(merged['pc_name'], 'l-test', 'AD sync keeps selected primary PC')
+        assert_eq(merged['pc_options'], ['w-test'], 'AD sync remembers second PC')
+        assert_eq(merged['location'], 'Щ5-104', 'location survives merge')
+
+        class FakeGlpi:
+            @staticmethod
+            def find_user_computers(_login, _name):
+                return {'main': 'w-test', 'options': ['l-test'], 'source': 'name'}
+
+        updated, changed = app._apply_glpi_prefixes([existing], FakeGlpi(), 'test')
+        assert changed
+        assert_eq(updated[0]['ext'], '4443', 'GLPI sync keeps extension')
+        assert_eq(updated[0]['location'], 'Щ5-104', 'GLPI sync keeps location')
+        assert_eq(updated[0]['pc_options'], ['l-test'], 'GLPI sync keeps alternate PC')
+
+
+def test_card_contact_line_with_location():
+    button = mod.UserButton.__new__(mod.UserButton)
+    button.user = {'name': 'Азарян Валентина', 'ext': '4443', 'location': 'Щ5-104'}
+    button.show_status = False
+    button.caller_info = None
+    button.status_key = 'online'
+    text = button._compose_text('w-vazaryan')
+    assert '4443 -- Щ5-104' in text
+
+
 def test_broken_json_and_safe_save():
     with tempfile.TemporaryDirectory() as td:
         p = os.path.join(td, 'broken.json')
@@ -70,6 +158,9 @@ def test_callwatcher_parse_helpers():
     num, name = parsed
     assert_eq(mod.normalize_phone(num), '79990001122', 'parse num')
     assert 'иванов' in name.lower(), 'parse name'
+    mixed_name = mod.parse_person_name('Мальцев Сергей В.')
+    assert_eq(mixed_name.get('first_init'), 'с', 'full first name initial')
+    assert_eq(mixed_name.get('middle_init'), 'в', 'middle initial after full first name')
 
 
 def test_printer_monitor_launcher_contract():
@@ -112,6 +203,9 @@ if __name__ == '__main__':
         test_normalize_phone,
         test_canonical_pc_key,
         test_release_version_comparison,
+        test_os_specific_context_actions,
+        test_multi_pc_os_cache_and_merge,
+        test_card_contact_line_with_location,
         test_broken_json_and_safe_save,
         test_safe_save_json_cleans_temp_on_error,
         test_callwatcher_parse_helpers,
