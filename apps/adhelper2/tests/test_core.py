@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from adhelper.models import ParsedRequest
-from adhelper.organization import get_omg_department_section, get_pak_department
+from adhelper.organization import (
+    canonical_unit, department_choices, departments_for_section,
+    get_omg_department_section, get_pak_department, sections_for_department,
+)
 from adhelper.parsers.request_parser import format_request_text, parse_request, validation_errors
 from adhelper.utils import normalize_phone, sam_base, sam_with_suffix, translit
 
@@ -93,11 +96,39 @@ class NormalizationTests(unittest.TestCase):
 class OrganizationTests(unittest.TestCase):
     def test_omg_hierarchy(self) -> None:
         request = ParsedRequest(
-            department="управление цифровых систем и биоинформатики / отдел системной биологии и биоинформатики"
+            department=(
+                "управление информационных систем / "
+                "отдел вычислительных методов обработки биомедицинских данных"
+            )
         )
         department, section = get_omg_department_section(request)
-        self.assertEqual(department, "управление цифровых систем и биоинформатики")
-        self.assertEqual(section, "отдел системной биологии и биоинформатики")
+        self.assertEqual(department, "управление информационных систем")
+        self.assertEqual(section, "отдел вычислительных методов обработки биомедицинских данных")
+
+    def test_department_filters_sections_from_exported_ad_hierarchy(self) -> None:
+        sections = sections_for_department("Управление информационных технологий")
+        self.assertEqual(len(sections), 3)
+        self.assertIn("отдел эксплуатации вычислительной инфраструктуры", sections)
+        self.assertIn(
+            "отдел информационной обработки цифровых данных и разработки инструментов вычислительных систем",
+            sections,
+        )
+
+    def test_section_selects_unique_parent_department(self) -> None:
+        parents = departments_for_section("Лаборатория мРНК технологий")
+        self.assertEqual(parents, ["управление экспериментальной биотехнологии и генной инженерии"])
+
+        request = ParsedRequest(department="Лаборатория мРНК технологий")
+        department, section = get_omg_department_section(request)
+        self.assertEqual(department, parents[0])
+        self.assertEqual(section, "лаборатория мРНК технологий")
+
+    def test_standalone_department_has_no_sections(self) -> None:
+        self.assertIn("отдел менеджмента качества", department_choices())
+        self.assertEqual(sections_for_department("отдел менеджмента качества"), [])
+
+    def test_unknown_legacy_value_is_not_silently_canonicalized(self) -> None:
+        self.assertEqual(canonical_unit("аппарат управления", department_choices()), "")
 
     def test_pak_department(self) -> None:
         request = ParsedRequest(department="Управление / Отдел ИТ")

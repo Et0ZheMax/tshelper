@@ -5,13 +5,17 @@ from typing import Any
 
 from PySide6.QtCore import QThreadPool, QTimer, Qt
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMenu, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from ...context import AppContext
 from ...models import UserRecord
+from ...organization import (
+    all_section_choices, canonical_unit, department_choices,
+    departments_for_section, sections_for_department,
+)
 from ...services.ou_alignment import OUAlignment, parent_dn
 from ...services.welcome import select_welcome_domain
 from ...workers import FunctionWorker
@@ -41,12 +45,14 @@ class UsersPage(QWidget):
         self.pool = QThreadPool.globalInstance()
         self.records: list[UserRecord] = []
         self.selected: UserRecord | None = None
-        self.edits: dict[str, QLineEdit] = {}
+        self.edits: dict[str, QLineEdit | QComboBox] = {}
         self._loaded_values: dict[str, str] = {}
         self._dirty_fields: set[str] = set()
         self._mail_original_checked = False
         self._mail_dirty = False
         self._loading_record = False
+        self._updating_org_fields = False
+        self._linked_org_fields = False
         self._active_worker: FunctionWorker | None = None
         self._ou_worker: FunctionWorker | None = None
         self._ou_cache: dict[str, OUAlignment] = {}
@@ -136,8 +142,19 @@ class UsersPage(QWidget):
 
         form = QFormLayout()
         for key, label in self.EDIT_FIELDS:
-            edit = QLineEdit()
-            edit.textEdited.connect(lambda _text, field=key: self._mark_field_dirty(field))
+            if key in {"department", "section"}:
+                edit = QComboBox()
+                edit.setEditable(True)
+                edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                if key == "department":
+                    edit.setToolTip("Выбор управления ограничивает список section (Отдел)")
+                    edit.currentTextChanged.connect(self._on_department_changed)
+                else:
+                    edit.setToolTip("Выбор отдела автоматически подставляет связанный department (Управление)")
+                    edit.currentTextChanged.connect(self._on_section_changed)
+            else:
+                edit = QLineEdit()
+                edit.textEdited.connect(lambda _text, field=key: self._mark_field_dirty(field))
             self.edits[key] = edit
             form.addRow(label, edit)
         self.mail_check = QCheckBox("Корпоративная почта назначена")
@@ -212,8 +229,9 @@ class UsersPage(QWidget):
         values = self._values_from_user(user)
         self._loading_record = True
         try:
+            self._configure_organization_fields(user, values)
             for key, edit in self.edits.items():
-                edit.setText(values.get(key, ""))
+                self._set_field_text(key, values.get(key, ""))
             self.mail_check.setChecked(bool(user.mail))
         finally:
             self._loading_record = False
@@ -254,8 +272,8 @@ class UsersPage(QWidget):
             self._ou_selected_key = ""
             self._ou_current = None
             self._set_ou_panel("neutral", "Выберите пользователя", "")
-            for edit in self.edits.values():
-                edit.clear()
+            for key in self.edits:
+                self._clear_field(key)
             self.mail_check.setChecked(False)
         finally:
             self._loading_record = False
@@ -449,10 +467,118 @@ class UsersPage(QWidget):
         QMessageBox.information(self, "OU исправлен", "Пользователь перемещён в выбранный OU. Операция записана в аудит.")
         self._refresh_after_finish = True
 
+    def _field_text(self, key: str) -> str:
+        widget = self.edits[key]
+        if isinstance(widget, QComboBox):
+            return widget.currentText().strip()
+        return widget.text().strip()
+
+    def _set_field_text(self, key: str, value: str) -> None:
+        widget = self.edits[key]
+        if isinstance(widget, QComboBox):
+            widget.setEditText(value or "")
+        else:
+            widget.setText(value or "")
+
+    def _clear_field(self, key: str) -> None:
+        widget = self.edits[key]
+        if isinstance(widget, QComboBox):
+            widget.clear()
+            widget.setEditText("")
+        else:
+            widget.clear()
+
+    @staticmethod
+    def _replace_combo_items(combo: QComboBox, choices: list[str], current: str = "") -> None:
+        unique: list[str] = []
+        normalized: set[str] = set()
+        for value in choices:
+            clean = str(value or "").strip()
+            key = clean.casefold().replace("ё", "е")
+            if clean and key not in normalized:
+                normalized.add(key)
+                unique.append(clean)
+        current_clean = str(current or "").strip()
+        current_key = current_clean.casefold().replace("ё", "е")
+        if current_clean and current_key not in normalized:
+            unique.append(current_clean)
+        combo.clear()
+        combo.addItem("")
+        combo.addItems(unique)
+        combo.setEditText(current_clean)
+
+    def _configure_organization_fields(self, user: UserRecord, values: dict[str, str]) -> None:
+        domain = self.context.ad.domain_by_name.get(user.domain)
+        self._linked_org_fields = bool(domain is not None and domain.profile == "omg")
+        department_combo = self.edits.get("department")
+        section_combo = self.edits.get("section")
+        if not isinstance(department_combo, QComboBox) or not isinstance(section_combo, QComboBox):
+            return
+
+        current_department = values.get("department", "")
+        current_section = values.get("section", "")
+        departments = department_choices() if self._linked_org_fields else []
+        sections = sections_for_department(current_department) if self._linked_org_fields else []
+        if self._linked_org_fields and not canonical_unit(current_department, departments):
+            sections = all_section_choices()
+
+        self._updating_org_fields = True
+        try:
+            self._replace_combo_items(department_combo, departments, current_department)
+            self._replace_combo_items(section_combo, sections, current_section)
+            section_combo.setEnabled(not self._linked_org_fields or bool(sections) or bool(current_section))
+        finally:
+            self._updating_org_fields = False
+
+    def _on_department_changed(self, value: str) -> None:
+        if self._loading_record or self._updating_org_fields:
+            return
+        section_combo = self.edits.get("section")
+        if self._linked_org_fields and isinstance(section_combo, QComboBox):
+            departments = department_choices()
+            canonical = canonical_unit(value, departments)
+            current_section = section_combo.currentText().strip()
+            if canonical:
+                sections = sections_for_department(canonical)
+                preserved = canonical_unit(current_section, sections)
+                new_section = preserved or ""
+                enabled = bool(sections)
+            else:
+                sections = all_section_choices()
+                new_section = current_section
+                enabled = True
+            self._updating_org_fields = True
+            try:
+                self._replace_combo_items(section_combo, sections, new_section)
+                section_combo.setEnabled(enabled)
+            finally:
+                self._updating_org_fields = False
+            self._mark_field_dirty("section")
+        self._mark_field_dirty("department")
+
+    def _on_section_changed(self, value: str) -> None:
+        if self._loading_record or self._updating_org_fields:
+            return
+        department_combo = self.edits.get("department")
+        section_combo = self.edits.get("section")
+        if self._linked_org_fields and isinstance(department_combo, QComboBox) and isinstance(section_combo, QComboBox):
+            parents = departments_for_section(value)
+            if len(parents) == 1:
+                parent = parents[0]
+                self._updating_org_fields = True
+                try:
+                    self._replace_combo_items(department_combo, department_choices(), parent)
+                    self._replace_combo_items(section_combo, sections_for_department(parent), value)
+                    section_combo.setEnabled(True)
+                finally:
+                    self._updating_org_fields = False
+                self._mark_field_dirty("department")
+        self._mark_field_dirty("section")
+
     def _mark_field_dirty(self, key: str) -> None:
         if self._loading_record or self.selected is None:
             return
-        value = self.edits[key].text().strip()
+        value = self._field_text(key)
         if value == self._loaded_values.get(key, ""):
             self._dirty_fields.discard(key)
         else:
@@ -472,7 +598,7 @@ class UsersPage(QWidget):
 
         changes: dict[str, Any] = {}
         for key in self._dirty_fields:
-            value = self.edits[key].text().strip()
+            value = self._field_text(key)
             if value != self._loaded_values.get(key, ""):
                 changes[key] = value
 
