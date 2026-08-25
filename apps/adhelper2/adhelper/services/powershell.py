@@ -33,6 +33,35 @@ class PowerShellResponse:
     raw_stderr: str = ""
 
 
+def _decode_json_output(stdout: str) -> tuple[Any, str]:
+    """Разбирает JSON-протокол, даже если PowerShell добавил предупреждение перед ним."""
+    text = stdout.lstrip("\ufeff")
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError as direct_error:
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(text):
+            if character not in "[{":
+                continue
+            try:
+                decoded, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            if text[end:].strip():
+                continue
+            if isinstance(decoded, (dict, list)):
+                return decoded, text[:index].strip()
+        raise direct_error
+
+
+def _safe_powershell_working_directory() -> str | None:
+    """Не наследует сетевой CWD, который ломает инициализацию PSDrive."""
+    if os.name != "nt":
+        return None
+    system_root = os.environ.get("SystemRoot", "").strip()
+    return system_root if system_root and os.path.isdir(system_root) else None
+
+
 class PowerShellClient:
     """Runs immutable PowerShell scripts and sends all user data through UTF-8 JSON stdin."""
 
@@ -72,6 +101,7 @@ class PowerShellClient:
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                cwd=_safe_powershell_working_directory(),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except subprocess.TimeoutExpired as exc:
@@ -91,7 +121,9 @@ class PowerShellClient:
         decode_error: json.JSONDecodeError | None = None
         if stdout:
             try:
-                decoded = json.loads(stdout.lstrip("\ufeff"))
+                decoded, ignored_prefix = _decode_json_output(stdout)
+                if ignored_prefix:
+                    self.logger(f"[ps:{action}:stdout-warning] {ignored_prefix[:1200]}")
             except json.JSONDecodeError as exc:
                 decode_error = exc
 

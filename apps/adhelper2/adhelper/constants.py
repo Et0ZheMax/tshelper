@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 APP_NAME = "ADHelper"
-APP_VERSION = "2.0.15"
+APP_VERSION = "2.0.16"
 COMPANY_NAME = "ФГБУ «ЦСП» ФМБА России"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_ROOT = Path(__file__).resolve().parent
