@@ -82,6 +82,35 @@ def log_action(msg):
 def log_call(msg):
     logger.log(CALL_LEVEL, msg)
 
+
+def decode_json_output(raw_output: str):
+    """Извлекает итоговый JSON, игнорируя диагностический префикс PowerShell."""
+    text = (raw_output or "").strip().lstrip("\ufeff")
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError as direct_error:
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(text):
+            if character not in "[{":
+                continue
+            try:
+                decoded, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            if text[end:].strip():
+                continue
+            if isinstance(decoded, (dict, list)):
+                return decoded, text[:index].strip()
+        raise direct_error
+
+
+def safe_powershell_working_directory():
+    """Возвращает локальный CWD, чтобы PowerShell не восстанавливал недоступный сетевой диск."""
+    if os.name != "nt":
+        return None
+    system_root = os.environ.get("SystemRoot", "").strip()
+    return system_root if system_root and os.path.isdir(system_root) else None
+
 # --- Локаль для сортировки ФИО ---
 try:
     locale.setlocale(locale.LC_COLLATE, 'ru_RU.UTF-8')
@@ -564,6 +593,7 @@ def check_updates_async():
 
 # --- AD: получить пользователей через ldap3 ---
 def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: bool = False):
+    conn = None
     try:
         import ldap3
         # Для списка карточек схема AD не нужна; NONE заметно сокращает handshake.
@@ -571,23 +601,42 @@ def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: b
         conn = ldap3.Connection(ldap_server, user=f"{username}@{domain}", password=password, auto_bind=True)
         search_filter = "(&(objectCategory=person)(objectClass=user))"
         attrs = ["cn", "sAMAccountName", "ipPhone", "telephoneNumber", "physicalDeliveryOfficeName", "l"]
-        conn.search(search_base=base_dn, search_filter=search_filter, attributes=attrs)
         users = []
-        for entry in conn.entries:
-            cn = entry.cn.value if entry.cn else ""
-            sam= entry.sAMAccountName.value if entry.sAMAccountName else ""
+
+        # AD обычно ограничивает один LDAP-ответ 1000 объектами. Без paged search
+        # пользователи за первой страницей терялись, и синхронизация считала, что
+        # новых записей нет.
+        entries = conn.extend.standard.paged_search(
+            search_base=base_dn,
+            search_filter=search_filter,
+            search_scope=ldap3.SUBTREE,
+            attributes=attrs,
+            paged_size=500,
+            generator=True,
+        )
+        for entry in entries:
+            if entry.get("type") != "searchResEntry":
+                continue
+            attributes = entry.get("attributes") or {}
+
+            def first_value(name):
+                value = attributes.get(name, "")
+                if isinstance(value, (list, tuple)):
+                    return value[0] if value else ""
+                return value or ""
+
+            cn = str(first_value("cn")).strip()
+            sam = str(first_value("sAMAccountName")).strip()
             ext = clean_internal_number(
-                (entry.ipPhone.value if hasattr(entry, "ipPhone") else "")
-                or (entry.telephoneNumber.value if hasattr(entry, "telephoneNumber") else "")
+                first_value("ipPhone") or first_value("telephoneNumber")
             )
             location = str(
-                (entry.physicalDeliveryOfficeName.value if hasattr(entry, "physicalDeliveryOfficeName") else "")
-                or (entry.l.value if hasattr(entry, "l") else "")
+                first_value("physicalDeliveryOfficeName")
+                or first_value("l")
                 or ""
             ).strip()
             if cn and sam:
                 users.append({"name": cn, "pc_name": f"w-{sam}", "ext": ext, "location": location})
-        conn.unbind()
         return users
     except Exception as e:
         log_message(f"AD error: {e}")
@@ -595,6 +644,12 @@ def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: b
             raise RuntimeError(f"Не удалось получить пользователей из AD: {e}") from e
         messagebox.showerror("Ошибка AD", f"Не удалось получить пользователей из AD: {e}")
         return []
+    finally:
+        if conn is not None:
+            try:
+                conn.unbind()
+            except Exception:
+                pass
 
 
 class GLPIClient:
@@ -2304,6 +2359,7 @@ class MainWindow:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            cwd=safe_powershell_working_directory(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         out = (result.stdout or "").strip()
@@ -2312,20 +2368,9 @@ class MainWindow:
             raise RuntimeError(err or out or f"PowerShell rc={result.returncode}")
         if not out:
             return []
-        try:
-            data = json.loads(out)
-        except json.JSONDecodeError:
-            start = out.find("[")
-            end = out.rfind("]")
-            if start != -1 and end > start:
-                data = json.loads(out[start:end+1])
-            else:
-                start = out.find("{")
-                end = out.rfind("}")
-                if start != -1 and end > start:
-                    data = json.loads(out[start:end+1])
-                else:
-                    raise
+        data, ignored_prefix = decode_json_output(out)
+        if ignored_prefix:
+            log_message(f"PowerShell stdout warning: {ignored_prefix[:1200]}")
         if isinstance(data, dict):
             return [data]
         if isinstance(data, list):

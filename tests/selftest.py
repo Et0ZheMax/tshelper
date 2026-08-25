@@ -1,6 +1,7 @@
 import os
 import tempfile
 import sys
+import types
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
@@ -32,6 +33,65 @@ def test_release_version_comparison():
     assert not mod.is_newer_release('v5.9', 'v5.9.2')
     assert not mod.is_newer_release('v5.9.2', '5.9.2')
     assert not mod.is_newer_release('неизвестно', 'v5.9.2')
+
+
+def test_noisy_powershell_json_and_paged_ad_search():
+    noisy = (
+        'ПРЕДУПРЕЖДЕНИЕ: Ошибка при инициализации диска по умолчанию: '
+        '"Сервер неработоспособен".\n[{"sam":"new.user"}]'
+    )
+    decoded, warning = mod.decode_json_output(noisy)
+    assert_eq(decoded, [{'sam': 'new.user'}], 'PowerShell JSON after warning')
+    assert 'ПРЕДУПРЕЖДЕНИЕ' in warning, 'PowerShell warning should be preserved for logging'
+
+    created_connections = []
+
+    class FakePagedSearch:
+        def __init__(self):
+            self.kwargs = None
+
+        def paged_search(self, **kwargs):
+            self.kwargs = kwargs
+            return iter([
+                {'type': 'searchResEntry', 'attributes': {
+                    'cn': 'Старый Пользователь', 'sAMAccountName': 'old.user',
+                    'ipPhone': '4100', 'physicalDeliveryOfficeName': 'Щ5-101',
+                }},
+                {'type': 'searchResRef', 'uri': ['ldap://example.test']},
+                {'type': 'searchResEntry', 'attributes': {
+                    'cn': 'Новый Пользователь', 'sAMAccountName': 'new.user',
+                    'telephoneNumber': '4200', 'l': 'Щ5-104',
+                }},
+            ])
+
+    class FakeConnection:
+        def __init__(self, *_args, **_kwargs):
+            self.standard = FakePagedSearch()
+            self.extend = types.SimpleNamespace(standard=self.standard)
+            self.unbound = False
+            created_connections.append(self)
+
+        def unbind(self):
+            self.unbound = True
+
+    fake_ldap3 = types.SimpleNamespace(
+        NONE=object(), SUBTREE=object(), Server=lambda *_args, **_kwargs: object(), Connection=FakeConnection
+    )
+    previous_ldap3 = sys.modules.get('ldap3')
+    sys.modules['ldap3'] = fake_ldap3
+    try:
+        users = mod.get_ad_users('dc.test', 'operator', 'secret', 'DC=test', 'test', raise_errors=True)
+    finally:
+        if previous_ldap3 is None:
+            sys.modules.pop('ldap3', None)
+        else:
+            sys.modules['ldap3'] = previous_ldap3
+
+    assert_eq([user['pc_name'] for user in users], ['w-old.user', 'w-new.user'], 'all AD pages')
+    assert_eq(users[1]['location'], 'Щ5-104', 'paged AD location')
+    assert_eq(created_connections[0].standard.kwargs['paged_size'], 500, 'AD page size')
+    assert created_connections[0].standard.kwargs['generator'], 'paged search generator'
+    assert created_connections[0].unbound, 'LDAP connection should be closed'
 
 
 def test_os_specific_context_actions():
@@ -307,8 +367,8 @@ def test_embedded_adhelper2_command():
 
     constants_source = open(os.path.join(working_directory, 'adhelper', 'constants.py'), encoding='utf-8').read()
     package_source = open(os.path.join(working_directory, 'adhelper', '__init__.py'), encoding='utf-8').read()
-    assert 'APP_VERSION = "2.0.15"' in constants_source, 'embedded ADHelper2 application version'
-    assert '__version__ = "2.0.15"' in package_source, 'embedded ADHelper2 package version'
+    assert 'APP_VERSION = "2.0.16"' in constants_source, 'embedded ADHelper2 application version'
+    assert '__version__ = "2.0.16"' in package_source, 'embedded ADHelper2 package version'
 
 
 if __name__ == '__main__':
@@ -316,6 +376,7 @@ if __name__ == '__main__':
         test_normalize_phone,
         test_canonical_pc_key,
         test_release_version_comparison,
+        test_noisy_powershell_json_and_paged_ad_search,
         test_os_specific_context_actions,
         test_multi_pc_os_cache_and_merge,
         test_card_contact_line_with_location,

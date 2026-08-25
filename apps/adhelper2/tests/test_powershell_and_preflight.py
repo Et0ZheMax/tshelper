@@ -48,6 +48,27 @@ class PowerShellClientTests(unittest.TestCase):
                 response = client.invoke("dummy")
             self.assertEqual(response.data, {"value": 42})
 
+    def test_powershell_drive_warning_before_json_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scripts = Path(temp_dir)
+            (scripts / "dummy.ps1").write_text("", encoding="utf-8")
+            log: list[str] = []
+            client = PowerShellClient(scripts_dir=scripts, logger=log.append)
+            completed = subprocess.CompletedProcess(
+                args=["powershell"],
+                returncode=0,
+                stdout=(
+                    'ПРЕДУПРЕЖДЕНИЕ: Ошибка при инициализации диска по умолчанию: '
+                    '"Сервер неработоспособен".\n'
+                    '{"ok":true,"data":[{"sam":"new.user"}],"message":"","warnings":[]}'
+                ),
+                stderr="",
+            )
+            with patch("subprocess.run", return_value=completed):
+                response = client.invoke("dummy")
+            self.assertEqual(response.data, [{"sam": "new.user"}])
+            self.assertTrue(any("stdout-warning" in item for item in log))
+
 
 class FakePowerShell:
     def __init__(self) -> None:
