@@ -367,8 +367,8 @@ def test_embedded_adhelper2_command():
 
     constants_source = open(os.path.join(working_directory, 'adhelper', 'constants.py'), encoding='utf-8').read()
     package_source = open(os.path.join(working_directory, 'adhelper', '__init__.py'), encoding='utf-8').read()
-    assert 'APP_VERSION = "2.0.16"' in constants_source, 'embedded ADHelper2 application version'
-    assert '__version__ = "2.0.16"' in package_source, 'embedded ADHelper2 package version'
+    assert 'APP_VERSION = "2.1.0"' in constants_source, 'embedded ADHelper2 application version'
+    assert '__version__ = "2.1.0"' in package_source, 'embedded ADHelper2 package version'
 
 
 if __name__ == '__main__':

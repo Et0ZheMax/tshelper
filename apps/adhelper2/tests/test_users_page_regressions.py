@@ -43,6 +43,14 @@ class UsersPageSourceRegressionTests(unittest.TestCase):
         self.assertIn('department (Управление)', self.source)
         self.assertIn('section (Отдел)', self.source)
 
+    def test_department_and_section_are_linked_editable_combos(self) -> None:
+        self.assertIn('if key in {"department", "section"}', self.source)
+        self.assertIn("edit.setEditable(True)", self.source)
+        self.assertIn("edit.currentTextChanged.connect(self._on_department_changed)", self.source)
+        self.assertIn("edit.currentTextChanged.connect(self._on_section_changed)", self.source)
+        self.assertIn("departments_for_section(value)", self.source)
+        self.assertIn("sections_for_department(canonical)", self.source)
+
     def test_users_page_has_ou_consistency_control_and_move_action(self) -> None:
         self.assertIn('Контроль OU по оргструктуре', self.source)
         self.assertIn('OU-контроль', self.source)
