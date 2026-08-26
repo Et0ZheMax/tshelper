@@ -1,4 +1,4 @@
-# TSHelper v5.13.0
+# TSHelper v5.13.1
 
 TSHelper — Windows desktop-рабочее место инженера техподдержки: поиск сотрудников и компьютеров, Active Directory, GLPI, CallWatcher, SSH/PowerShell Remote, удалённая установка ПО и мониторинг принтеров в одном интерфейсе.
 
