@@ -162,7 +162,7 @@ def test_secure_portable_update_contract():
         (install_root / '.git').mkdir()
         assert_eq(
             find_update_launcher(install_root),
-            install_root / 'scripts/run_tshelper.bat',
+            (install_root / 'scripts/run_tshelper.bat').resolve(),
             'source checkout launcher',
         )
         if os.name == 'nt':
