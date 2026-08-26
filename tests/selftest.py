@@ -1,7 +1,12 @@
+import hashlib
 import os
+import shutil
+import subprocess
 import tempfile
 import sys
 import types
+import zipfile
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
@@ -10,6 +15,14 @@ from tshelper import app as mod  # noqa: E402
 from tshelper.printer_monitor_launcher import (  # noqa: E402
     PrinterMonitorLauncher,
     build_printer_monitor_command,
+)
+from tshelper.updater import (  # noqa: E402
+    MANAGED_DIRECTORIES,
+    ReleaseInfo,
+    UpdateError,
+    download_release,
+    extract_release_archive,
+    select_release_asset,
 )
 
 
@@ -33,6 +46,118 @@ def test_release_version_comparison():
     assert not mod.is_newer_release('v5.9', 'v5.9.2')
     assert not mod.is_newer_release('v5.9.2', '5.9.2')
     assert not mod.is_newer_release('неизвестно', 'v5.9.2')
+
+
+def test_secure_portable_update_contract():
+    digest = 'a' * 64
+    payload = {
+        'tag_name': 'v9.9.9',
+        'html_url': 'https://github.com/Et0ZheMax/tshelper/releases/tag/v9.9.9',
+        'assets': [{
+            'name': 'TSHelper-v9.9.9-portable.zip',
+            'browser_download_url': (
+                'https://github.com/Et0ZheMax/tshelper/releases/download/'
+                'v9.9.9/TSHelper-v9.9.9-portable.zip'
+            ),
+            'digest': f'sha256:{digest}',
+            'size': 123,
+        }],
+    }
+    release = select_release_asset(payload)
+    assert_eq(release.version, '9.9.9', 'updater release version')
+    assert_eq(release.asset_digest, digest, 'updater release digest')
+
+    missing_digest = dict(payload)
+    missing_digest['assets'] = [dict(payload['assets'][0], digest='')]
+    try:
+        select_release_asset(missing_digest)
+        raise AssertionError('release without digest was accepted')
+    except UpdateError:
+        pass
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        content = b'portable-update'
+
+        class FakeResponse:
+            status_code = 200
+
+            def iter_content(self, chunk_size):
+                del chunk_size
+                yield content[:5]
+                yield content[5:]
+
+            def close(self):
+                pass
+
+        class FakeClient:
+            @staticmethod
+            def get(*args, **kwargs):
+                del args, kwargs
+                return FakeResponse()
+
+        download_info = ReleaseInfo(
+            tag='v9.9.9', version='9.9.9', html_url='', asset_name='download.zip', asset_url='https://example.invalid/update',
+            asset_digest=hashlib.sha256(content).hexdigest(), asset_size=len(content),
+        )
+        downloaded = download_release(
+            download_info, Path(temp_dir) / 'download', http_client=FakeClient()
+        )
+        assert_eq(downloaded.read_bytes(), content, 'verified updater download')
+
+        root = os.path.join(temp_dir, 'work')
+        os.makedirs(root)
+        archive = os.path.join(temp_dir, 'update.zip')
+        package = 'TSHelper-v9.9.9'
+        with zipfile.ZipFile(archive, 'w') as bundle:
+            for directory in MANAGED_DIRECTORIES:
+                bundle.writestr(f'{package}/{directory}/', '')
+            bundle.writestr(f'{package}/src/tshelper/version.py', '__version__ = "9.9.9"\n')
+            bundle.writestr(f'{package}/scripts/apply_update.ps1', '# updater\n')
+            bundle.writestr(f'{package}/requirements.txt', 'requests\n')
+            bundle.writestr(f'{package}/pyproject.toml', '[project]\nname="tshelper"\n')
+            bundle.writestr(f'{package}/run_tshelper.bat', '@echo off\n')
+        archive_digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
+        archive_size = os.path.getsize(archive)
+        archive_release = ReleaseInfo(
+            tag='v9.9.9', version='9.9.9', html_url='', asset_name='update.zip', asset_url='',
+            asset_digest=archive_digest, asset_size=archive_size,
+        )
+        extracted = extract_release_archive(
+            archive_release, Path(archive), Path(root)
+        )
+        assert os.path.isfile(os.path.join(extracted, 'scripts', 'apply_update.ps1'))
+
+        unsafe_archive = os.path.join(temp_dir, 'unsafe.zip')
+        with zipfile.ZipFile(unsafe_archive, 'w') as bundle:
+            bundle.writestr('../escape.txt', 'blocked')
+        try:
+            extract_release_archive(archive_release, Path(unsafe_archive), Path(root))
+            raise AssertionError('path traversal archive was accepted')
+        except UpdateError:
+            pass
+
+        unsafe_ads_archive = os.path.join(temp_dir, 'unsafe-ads.zip')
+        with zipfile.ZipFile(unsafe_ads_archive, 'w') as bundle:
+            bundle.writestr(f'{package}/src/evil:stream', 'blocked')
+        try:
+            extract_release_archive(
+                archive_release, Path(unsafe_ads_archive), Path(root)
+            )
+            raise AssertionError('NTFS alternate data stream was accepted')
+        except UpdateError:
+            pass
+
+    updater_script = os.path.join(ROOT, 'scripts', 'apply_update.ps1')
+    powershell = shutil.which('powershell.exe') or shutil.which('powershell')
+    assert powershell, 'Windows PowerShell not found for updater parser test'
+    escaped_updater_script = updater_script.replace("'", "''")
+    parse_command = (
+        "$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{escaped_updater_script}', [ref]$null, [ref]$errors) | Out-Null; "
+        "if ($errors.Count) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }"
+    )
+    parsed = subprocess.run([powershell, '-NoProfile', '-Command', parse_command], capture_output=True, text=True)
+    assert_eq(parsed.returncode, 0, f'updater PowerShell syntax: {parsed.stderr}')
 
 
 def test_noisy_powershell_json_and_paged_ad_search():
@@ -376,6 +501,7 @@ if __name__ == '__main__':
         test_normalize_phone,
         test_canonical_pc_key,
         test_release_version_comparison,
+        test_secure_portable_update_contract,
         test_noisy_powershell_json_and_paged_ad_search,
         test_os_specific_context_actions,
         test_multi_pc_os_cache_and_merge,
