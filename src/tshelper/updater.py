@@ -250,8 +250,13 @@ def extract_release_archive(
             if roots != {f"TSHelper-v{release.version}"}:
                 raise UpdateError("Архив должен содержать один корневой каталог версии")
             if progress:
-                progress("Проверка и распаковка архива", 0, total_size)
-            bundle.extractall(extracting)
+                progress("Проверка архива", 1, 1)
+            extracted_size = 0
+            for member in members:
+                bundle.extract(member, extracting)
+                extracted_size += member.file_size
+                if progress:
+                    progress("Распаковка обновления", extracted_size, total_size)
 
         package_root = extracting / f"TSHelper-v{release.version}"
         validate_package_root(package_root, release.version)
@@ -280,9 +285,23 @@ def prepare_update(
     return PreparedUpdate(release, archive, package_root, work_directory)
 
 
+def find_update_launcher(install_root: Path | None = None) -> Path | None:
+    root = (install_root or INSTALL_ROOT).resolve()
+    for relative_path in ("run_tshelper.bat", "scripts/run_tshelper.bat"):
+        candidate = root / relative_path
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def can_self_update(install_root: Path | None = None) -> bool:
     root = (install_root or INSTALL_ROOT).resolve()
-    return os.name == "nt" and (root / "run_tshelper.bat").is_file() and not (root / ".git").exists()
+    return (
+        os.name == "nt"
+        and (root / "src/tshelper/version.py").is_file()
+        and (root / "pyproject.toml").is_file()
+        and find_update_launcher(root) is not None
+    )
 
 
 def launch_prepared_update(
@@ -294,7 +313,10 @@ def launch_prepared_update(
         raise UpdateError("Автоматическая установка обновлений поддерживается только в Windows")
     target = (install_root or INSTALL_ROOT).resolve()
     if not can_self_update(target):
-        raise UpdateError("Самообновление доступно только для portable-установки TSHelper")
+        raise UpdateError("Не удалось определить каталог и launcher установленного TSHelper")
+    launcher = find_update_launcher(target)
+    if launcher is None:
+        raise UpdateError("Не найден штатный launcher TSHelper")
 
     source_script = prepared.package_root / "scripts/apply_update.ps1"
     updater_copy = prepared.work_directory / f"apply-update-{prepared.release.version}.ps1"
@@ -314,7 +336,7 @@ def launch_prepared_update(
         "-TargetDirectory", str(target),
         "-WaitForPid", str(current_pid or os.getpid()),
         "-ExpectedVersion", prepared.release.version,
-        "-LauncherPath", str(target / "run_tshelper.bat"),
+        "-LauncherPath", str(launcher),
         "-LogPath", str(log_path),
     ]
     return subprocess.Popen(
