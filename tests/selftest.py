@@ -20,8 +20,10 @@ from tshelper.updater import (  # noqa: E402
     MANAGED_DIRECTORIES,
     ReleaseInfo,
     UpdateError,
+    can_self_update,
     download_release,
     extract_release_archive,
+    find_update_launcher,
     select_release_asset,
 )
 
@@ -49,6 +51,11 @@ def test_release_version_comparison():
 
 
 def test_secure_portable_update_contract():
+    assert_eq(
+        mod.UPDATE_CHECK_INTERVAL_MS,
+        3 * 60 * 60 * 1000,
+        'periodic update interval',
+    )
     digest = 'a' * 64
     payload = {
         'tag_name': 'v9.9.9',
@@ -122,10 +129,20 @@ def test_secure_portable_update_contract():
             tag='v9.9.9', version='9.9.9', html_url='', asset_name='update.zip', asset_url='',
             asset_digest=archive_digest, asset_size=archive_size,
         )
+        extraction_progress = []
         extracted = extract_release_archive(
-            archive_release, Path(archive), Path(root)
+            archive_release,
+            Path(archive),
+            Path(root),
+            progress=lambda stage, current, total: extraction_progress.append(
+                (stage, current, total)
+            ),
         )
         assert os.path.isfile(os.path.join(extracted, 'scripts', 'apply_update.ps1'))
+        assert any(
+            stage == 'Распаковка обновления' and current == total
+            for stage, current, total in extraction_progress
+        ), 'archive extraction progress did not reach completion'
 
         unsafe_archive = os.path.join(temp_dir, 'unsafe.zip')
         with zipfile.ZipFile(unsafe_archive, 'w') as bundle:
@@ -135,6 +152,21 @@ def test_secure_portable_update_contract():
             raise AssertionError('path traversal archive was accepted')
         except UpdateError:
             pass
+
+        install_root = Path(temp_dir) / 'source-layout'
+        (install_root / 'src/tshelper').mkdir(parents=True)
+        (install_root / 'src/tshelper/version.py').write_text('__version__ = "9.9.9"\n')
+        (install_root / 'pyproject.toml').write_text('[project]\nname="tshelper"\n')
+        (install_root / 'scripts').mkdir()
+        (install_root / 'scripts/run_tshelper.bat').write_text('@echo off\n')
+        (install_root / '.git').mkdir()
+        assert_eq(
+            find_update_launcher(install_root),
+            install_root / 'scripts/run_tshelper.bat',
+            'source checkout launcher',
+        )
+        if os.name == 'nt':
+            assert can_self_update(install_root), 'source checkout update was disabled'
 
         unsafe_ads_archive = os.path.join(temp_dir, 'unsafe-ads.zip')
         with zipfile.ZipFile(unsafe_ads_archive, 'w') as bundle:
@@ -158,6 +190,9 @@ def test_secure_portable_update_contract():
     )
     parsed = subprocess.run([powershell, '-NoProfile', '-Command', parse_command], capture_output=True, text=True)
     assert_eq(parsed.returncode, 0, f'updater PowerShell syntax: {parsed.stderr}')
+    updater_source = Path(updater_script).read_text(encoding='utf-8-sig')
+    assert 'Initialize-ProgressWindow' in updater_source, 'installer progress window is missing'
+    assert 'scripts\\run_tshelper.bat' in updater_source, 'source launcher is not supported'
 
 
 def test_noisy_powershell_json_and_paged_ad_search():

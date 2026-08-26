@@ -35,6 +35,8 @@ from .updater import (
 )
 from .version import VERSION
 
+UPDATE_CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000
+
 # Цвета статусов (иконка в тексте)
 STATUS_COLORS_DEFAULT = {
     "checking": "#f59e0b",
@@ -1659,6 +1661,9 @@ class MainWindow:
         self._sync_in_progress = False
         self._update_in_progress = False
         self._update_window = None
+        self._update_check_job = None
+        self._update_check_running = False
+        self._update_prompted_version = ""
         self.browser_integration_server = None
         self.browser_integration_error = ""
         self.printer_monitor_launcher = PrinterMonitorLauncher(
@@ -1752,25 +1757,66 @@ class MainWindow:
         self.master.bind("<Map>", self._on_map)
 
         # авто-проверка обновлений и preflight
-        threading.Thread(target=self._check_updates_background, daemon=True).start()
+        self._start_update_check()
         threading.Thread(target=self.preflight_check, daemon=True).start()
 
         # Запуск колл-вотчера
         if self.settings.get_setting("cw_enabled", True):
             self.start_call_watcher()
 
+    def _start_update_check(self):
+        self._update_check_job = None
+        if self._update_check_running or self._update_in_progress:
+            self._schedule_next_update_check()
+            return
+        self._update_check_running = True
+        threading.Thread(
+            target=self._check_updates_background,
+            daemon=True,
+            name="tshelper-update-check",
+        ).start()
+
+    def _schedule_next_update_check(self):
+        if self._update_check_job is not None:
+            try:
+                self.master.after_cancel(self._update_check_job)
+            except Exception:
+                pass
+        try:
+            self._update_check_job = self.master.after(
+                UPDATE_CHECK_INTERVAL_MS,
+                self._start_update_check,
+            )
+        except Exception:
+            self._update_check_job = None
+
     def _check_updates_background(self):
+        release = None
+        error = None
         try:
             release = get_latest_release(timeout=10)
         except Exception as exc:
-            log_message(f"Ошибка проверки обновлений: {exc}")
-            return
-        if not is_newer_release(release.tag):
-            return
+            error = str(exc)
         try:
-            self.master.after(0, lambda item=release: self._offer_update(item))
+            self.master.after(
+                0,
+                lambda item=release, message=error: self._finish_update_check(item, message),
+            )
         except Exception as exc:
-            log_message(f"Не удалось показать предложение обновления: {exc}")
+            log_message(f"Не удалось завершить проверку обновлений: {exc}")
+
+    def _finish_update_check(self, release: ReleaseInfo | None, error: str | None):
+        self._update_check_running = False
+        self._schedule_next_update_check()
+        if error:
+            log_message(f"Ошибка проверки обновлений: {error}")
+            return
+        if release is None or not is_newer_release(release.tag):
+            return
+        if self._update_prompted_version == release.version:
+            return
+        self._update_prompted_version = release.version
+        self._offer_update(release)
 
     def _offer_update(self, release: ReleaseInfo):
         if self._update_in_progress or not self.master.winfo_exists():
@@ -1779,7 +1825,7 @@ class MainWindow:
             if messagebox.askyesno(
                 "Обновление доступно",
                 f"Доступна версия {release.tag}.\nУстановлена: {VERSION}.\n\n"
-                "Автоустановка доступна в portable-версии. Открыть страницу релиза?",
+                "Не удалось определить штатный launcher этой копии. Открыть страницу релиза?",
             ):
                 webbrowser.open(release.html_url)
             return
@@ -1802,11 +1848,29 @@ class MainWindow:
         window.protocol("WM_DELETE_WINDOW", lambda: None)
         frame = ttk.Frame(window, padding=18)
         frame.pack(fill="both", expand=True)
-        status_var = tk.StringVar(value=f"Подготовка обновления {release.tag}…")
-        ttk.Label(frame, textvariable=status_var, width=58).pack(anchor="w", pady=(0, 10))
+        ttk.Label(
+            frame,
+            text=f"TSHelper {release.tag}",
+            font=("Segoe UI", 16, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text="Безопасная загрузка и подготовка обновления",
+            foreground="#667085",
+        ).pack(anchor="w", pady=(2, 18))
+        steps_var = tk.StringVar(value="● Загрузка     ○ Проверка     ○ Подготовка     ○ Установка")
+        ttk.Label(frame, textvariable=steps_var, foreground="#2474c6").pack(anchor="w", pady=(0, 14))
+        status_row = ttk.Frame(frame)
+        status_row.pack(fill="x", pady=(0, 7))
+        status_var = tk.StringVar(value="Подготовка загрузки…")
+        ttk.Label(status_row, textvariable=status_var).pack(side="left")
+        percent_var = tk.StringVar(value="0%")
+        ttk.Label(status_row, textvariable=percent_var, font=("Segoe UI", 9, "bold")).pack(side="right")
         progress_var = tk.DoubleVar(value=0)
         progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, length=440)
         progress_bar.pack(fill="x")
+        detail_var = tk.StringVar(value="Проверяем доступность файла релиза")
+        ttk.Label(frame, textvariable=detail_var, foreground="#7d8794").pack(anchor="w", pady=(8, 0))
         window.update_idletasks()
         x = self.master.winfo_rootx() + max(0, (self.master.winfo_width() - window.winfo_width()) // 2)
         y = self.master.winfo_rooty() + max(0, (self.master.winfo_height() - window.winfo_height()) // 2)
@@ -1818,7 +1882,28 @@ class MainWindow:
                 if not window.winfo_exists():
                     return
                 status_var.set(stage)
-                progress_var.set(min(100.0, current * 100.0 / total) if total > 0 else 0.0)
+                fraction = min(1.0, current / total) if total > 0 else 0.0
+                lower_stage = stage.lower()
+                if "загруз" in lower_stage and "провер" not in lower_stage:
+                    overall = 5 + fraction * 60
+                    steps_var.set("● Загрузка     ○ Проверка     ○ Подготовка     ○ Установка")
+                    detail_var.set(
+                        f"{current / 1024 / 1024:.1f} из {total / 1024 / 1024:.1f} МБ"
+                    )
+                elif "провер" in lower_stage:
+                    overall = 70
+                    steps_var.set("✓ Загрузка     ● Проверка     ○ Подготовка     ○ Установка")
+                    detail_var.set("Контроль целостности и структуры пакета")
+                elif "распаков" in lower_stage:
+                    overall = 72 + fraction * 23
+                    steps_var.set("✓ Загрузка     ✓ Проверка     ● Подготовка     ○ Установка")
+                    detail_var.set(f"Подготовлено {fraction * 100:.0f}% файлов")
+                else:
+                    overall = 96
+                    steps_var.set("✓ Загрузка     ✓ Проверка     ✓ Подготовка     ○ Установка")
+                    detail_var.set("Пакет готов к безопасной установке")
+                progress_var.set(overall)
+                percent_var.set(f"{overall:.0f}%")
             try:
                 self.master.after(0, apply_progress)
             except Exception:
@@ -5291,6 +5376,12 @@ $items = foreach ($u in $users) {{
     def _perform_exit(self):
         self.master.update_idletasks()
         self._save_main_geometry()
+        if self._update_check_job is not None:
+            try:
+                self.master.after_cancel(self._update_check_job)
+            except Exception:
+                pass
+            self._update_check_job = None
         if self._os_badge_cache_save_job:
             try:
                 self.master.after_cancel(self._os_badge_cache_save_job)
