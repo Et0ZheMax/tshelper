@@ -25,6 +25,14 @@ from .paths import (
 from .printer_monitor_launcher import PrinterMonitorLauncher, PrinterMonitorUnavailable
 from .ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from .ui_operation_status import OperationStatusStrip
+from .updater import (
+    PreparedUpdate,
+    ReleaseInfo,
+    can_self_update,
+    get_latest_release,
+    launch_prepared_update,
+    prepare_update,
+)
 from .version import VERSION
 
 # Цвета статусов (иконка в тексте)
@@ -564,32 +572,6 @@ def is_newer_release(latest: str, current: str = VERSION) -> bool:
     normalized_current = current_version + (0,) * (width - len(current_version))
     return normalized_latest > normalized_current
 
-
-def check_updates_async():
-    try:
-        import requests
-    except:
-        log_message("requests не установлен — пропускаем проверку обновлений")
-        return
-    try:
-        resp = requests.get("https://api.github.com/repos/Et0ZheMax/tshelper/releases/latest", timeout=6)
-        if resp.status_code != 200:
-            log_message(f"GitHub API {resp.status_code}")
-            return
-        latest = resp.json().get("tag_name") or resp.json().get("name")
-        if not latest:
-            return
-        if is_newer_release(latest):
-            def ask():
-                if messagebox.askyesno("Обновление доступно",
-                                       f"Доступна новая версия: {latest}\nВы используете: {VERSION}\nОткрыть страницу релиза?"):
-                    webbrowser.open(resp.json().get("html_url", "https://github.com/Et0ZheMax/tshelper/releases"))
-            try:
-                app_root.after(0, ask)
-            except:
-                pass
-    except Exception as e:
-        log_message(f"Ошибка проверки обновлений: {e}")
 
 # --- AD: получить пользователей через ldap3 ---
 def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: bool = False):
@@ -1675,6 +1657,8 @@ class MainWindow:
         self._idle_last_activity = time.time()
         self.idle_timeout_minutes = 0
         self._sync_in_progress = False
+        self._update_in_progress = False
+        self._update_window = None
         self.browser_integration_server = None
         self.browser_integration_error = ""
         self.printer_monitor_launcher = PrinterMonitorLauncher(
@@ -1768,12 +1752,130 @@ class MainWindow:
         self.master.bind("<Map>", self._on_map)
 
         # авто-проверка обновлений и preflight
-        threading.Thread(target=check_updates_async, daemon=True).start()
+        threading.Thread(target=self._check_updates_background, daemon=True).start()
         threading.Thread(target=self.preflight_check, daemon=True).start()
 
         # Запуск колл-вотчера
         if self.settings.get_setting("cw_enabled", True):
             self.start_call_watcher()
+
+    def _check_updates_background(self):
+        try:
+            release = get_latest_release(timeout=10)
+        except Exception as exc:
+            log_message(f"Ошибка проверки обновлений: {exc}")
+            return
+        if not is_newer_release(release.tag):
+            return
+        try:
+            self.master.after(0, lambda item=release: self._offer_update(item))
+        except Exception as exc:
+            log_message(f"Не удалось показать предложение обновления: {exc}")
+
+    def _offer_update(self, release: ReleaseInfo):
+        if self._update_in_progress or not self.master.winfo_exists():
+            return
+        if not can_self_update():
+            if messagebox.askyesno(
+                "Обновление доступно",
+                f"Доступна версия {release.tag}.\nУстановлена: {VERSION}.\n\n"
+                "Автоустановка доступна в portable-версии. Открыть страницу релиза?",
+            ):
+                webbrowser.open(release.html_url)
+            return
+        if not messagebox.askyesno(
+            "Обновление TSHelper",
+            f"Доступна версия {release.tag}.\nУстановлена: {VERSION}.\n\n"
+            "Скачать, проверить и установить обновление сейчас?\n\n"
+            "TSHelper сохранит резервную копию, перезапустится и не затронет данные в %APPDATA%.",
+        ):
+            return
+        self._start_update_download(release)
+
+    def _start_update_download(self, release: ReleaseInfo):
+        self._update_in_progress = True
+        window = tk.Toplevel(self.master)
+        self._update_window = window
+        window.title("Обновление TSHelper")
+        window.transient(self.master)
+        window.resizable(False, False)
+        window.protocol("WM_DELETE_WINDOW", lambda: None)
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill="both", expand=True)
+        status_var = tk.StringVar(value=f"Подготовка обновления {release.tag}…")
+        ttk.Label(frame, textvariable=status_var, width=58).pack(anchor="w", pady=(0, 10))
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, length=440)
+        progress_bar.pack(fill="x")
+        window.update_idletasks()
+        x = self.master.winfo_rootx() + max(0, (self.master.winfo_width() - window.winfo_width()) // 2)
+        y = self.master.winfo_rooty() + max(0, (self.master.winfo_height() - window.winfo_height()) // 2)
+        window.geometry(f"+{x}+{y}")
+        window.grab_set()
+
+        def report(stage: str, current: int, total: int):
+            def apply_progress():
+                if not window.winfo_exists():
+                    return
+                status_var.set(stage)
+                progress_var.set(min(100.0, current * 100.0 / total) if total > 0 else 0.0)
+            try:
+                self.master.after(0, apply_progress)
+            except Exception:
+                pass
+
+        def work():
+            try:
+                prepared = prepare_update(release, progress=report)
+            except Exception as exc:
+                message = str(exc)
+                try:
+                    self.master.after(0, lambda text=message: self._update_download_failed(release, text))
+                except Exception:
+                    pass
+                return
+            try:
+                self.master.after(0, lambda item=prepared: self._install_prepared_update(item))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True, name="tshelper-update-download").start()
+
+    def _close_update_window(self):
+        window = self._update_window
+        self._update_window = None
+        if window is not None:
+            try:
+                window.grab_release()
+                window.destroy()
+            except Exception:
+                pass
+
+    def _update_download_failed(self, release: ReleaseInfo, message: str):
+        self._close_update_window()
+        self._update_in_progress = False
+        log_message(f"Ошибка подготовки обновления {release.tag}: {message}")
+        if messagebox.askyesno(
+            "Ошибка обновления",
+            f"Не удалось подготовить обновление:\n\n{message}\n\nОткрыть страницу релиза?",
+        ):
+            webbrowser.open(release.html_url)
+
+    def _install_prepared_update(self, prepared: PreparedUpdate):
+        self._close_update_window()
+        messagebox.showinfo(
+            "Обновление готово",
+            f"TSHelper {prepared.release.tag} загружен и проверен.\n\n"
+            "После нажатия «ОК» приложение закроется, заменит файлы и запустится снова.",
+        )
+        try:
+            launch_prepared_update(prepared, current_pid=os.getpid())
+        except Exception as exc:
+            self._update_in_progress = False
+            log_message(f"Не удалось запустить установщик обновления: {exc}")
+            messagebox.showerror("Ошибка обновления", f"Не удалось запустить установщик:\n\n{exc}")
+            return
+        self.exit_app()
 
     def _build_status_icons(self) -> dict:
         icons = {}
