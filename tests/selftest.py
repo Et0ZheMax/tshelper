@@ -426,6 +426,14 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         first_id = state.enqueue(user, 'full_sync', priority=10)
         assert first_id
         assert_eq(state.enqueue(user, 'ping_failed', priority=100), first_id, 'queue deduplicates login')
+        pause_result = state.pause()
+        assert pause_result['manually_paused']
+        assert not pause_result['finishing_current']
+        assert state.status()['manually_paused']
+        assert_eq(state.next_job()['job'], None, 'manual pause blocks claiming jobs')
+        assert InventoryBridgeState(state_path).status()['manually_paused'], 'manual pause persists'
+        state.resume()
+        assert not state.status()['manually_paused']
         job = state.next_job()['job']
         assert_eq(job['id'], first_id, 'queued job can be claimed')
         state.progress({
@@ -452,6 +460,17 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         assert_eq(state.hosts_for_login('test'), ['l-test'], 'inventory host cache')
         assert_eq(state.os_for_host('l-test'), 'linux', 'inventory OS cache')
         assert_eq(state.status()['processed'], 1, 'completed inventory progress count')
+        state.pause()
+        queued_while_paused = dict(user, ad_login='paused-test', pc_name='w-paused-test')
+        state.enqueue(queued_while_paused, 'full_sync', force=True)
+        assert state.status()['manually_paused'], 'forced enqueue must not cancel manual pause'
+        assert_eq(state.next_job()['job'], None, 'paused queue keeps newly added jobs pending')
+        state.resume()
+        paused_job = state.next_job()['job']
+        state.complete({
+            'job_id': paused_job['id'], 'login': 'paused-test',
+            'status': 'not_found', 'resolution': 'exact-login'
+        })
         reloaded = InventoryBridgeState(state_path)
         assert_eq(reloaded.record_for_login('test')['glpi_user_id'], 42, 'inventory cache persists')
 
@@ -510,6 +529,7 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     extension_dir = Path(ROOT) / 'extensions' / 'tshelper-glpi-inventory-bridge'
     content = (extension_dir / 'content.js').read_text(encoding='utf-8')
     background = (extension_dir / 'background.js').read_text(encoding='utf-8')
+    app_source = (Path(ROOT) / 'src' / 'tshelper' / 'app.py').read_text(encoding='utf-8')
     manifest = json.loads((extension_dir / 'manifest.json').read_text(encoding='utf-8'))
     assert '/front/user.php?is_deleted=0' in content, 'HTML User search fallback missing'
     assert '/front/search.php?globalsearch=' in content, 'global HTML search fallback missing'
@@ -519,6 +539,8 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     assert content.index('searchUsersViaHtml(wanted)') < content.index('loadUserSearchDescriptor()'), 'HTML search must run before AJAX fallback'
     assert 'TSH_INVENTORY_REPORT_PROGRESS' in content, 'content progress reporting missing'
     assert '/inventory/jobs/progress' in background, 'background progress bridge missing'
+    assert 'text="Пауза", command=self.pause_glpi_inventory' in app_source, 'live monitor pause button missing'
+    assert 'text="Продолжить", command=self.resume_glpi_inventory' in app_source, 'live monitor resume button missing'
     assert_eq(manifest['version'], '0.1.2', 'inventory extension patch version')
 
 

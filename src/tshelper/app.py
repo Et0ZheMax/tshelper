@@ -4745,6 +4745,19 @@ $items = foreach ($u in $users) {{
         added = self.glpi_inventory.enqueue_many(users, "retry_error", priority=900, force=True)
         self.show_toast("GLPI Inventory", f"Повторно поставлено в очередь: {added}")
 
+    def pause_glpi_inventory(self):
+        result = self.glpi_inventory.pause()
+        message = (
+            "Пауза включена. Текущая карточка завершится, новые задания выдаваться не будут."
+            if result.get("finishing_current")
+            else "Пауза включена. Очередь сохранена."
+        )
+        self.show_toast("GLPI Inventory", message)
+
+    def resume_glpi_inventory(self):
+        self.glpi_inventory.resume()
+        self.show_toast("GLPI Inventory", "Проверка продолжена с сохранённой позиции.")
+
     def show_glpi_inventory_monitor(self):
         existing = self._glpi_inventory_monitor_window
         if existing and existing.winfo_exists():
@@ -4802,6 +4815,10 @@ $items = foreach ($u in $users) {{
             text="Повторить ошибки",
             command=lambda: self.retry_glpi_inventory_errors(parent=win),
         ).pack(side="left", padx=6)
+        pause_button = ttk.Button(footer, text="Пауза", command=self.pause_glpi_inventory)
+        pause_button.pack(side="left")
+        resume_button = ttk.Button(footer, text="Продолжить", command=self.resume_glpi_inventory)
+        resume_button.pack(side="left", padx=(6, 0))
         ttk.Button(footer, text="Открыть полный отчёт", command=self.show_glpi_inventory_report).pack(side="left")
         close_button = ttk.Button(footer, text="Закрыть", command=win.destroy)
         close_button.pack(side="right")
@@ -4824,9 +4841,13 @@ $items = foreach ($u in $users) {{
             total = max(1, int(status.get("total") or 0))
             processed = int(status.get("processed") or 0)
             counts = status.get("status_counts") or {}
+            manually_paused = bool(status.get("manually_paused"))
+            pause_button.configure(state="disabled" if manually_paused else "normal")
+            resume_button.configure(state="normal" if manually_paused else "disabled")
             progress.configure(maximum=total, value=min(total, processed))
+            pause_prefix = "ПАУЗА   " if manually_paused else ""
             summary_var.set(
-                f"Обработано: {processed}/{int(status.get('total') or 0)}   "
+                f"{pause_prefix}Обработано: {processed}/{int(status.get('total') or 0)}   "
                 f"Ожидает: {status['pending']}   Успешно: {counts.get('ok', 0)}   "
                 f"Без ПК: {counts.get('no_computers', 0)}   Не найдено: {counts.get('not_found', 0)}   "
                 f"Ошибки: {counts.get('error', 0)}"
@@ -4839,6 +4860,8 @@ $items = foreach ($u in $users) {{
                 connection_text = f"Расширение на связи · последний запрос {poll_age:g} сек. назад"
             else:
                 connection_text = f"Расширение не отвечает · последний запрос {poll_age:g} сек. назад"
+            if manually_paused:
+                connection_text += " · очередь приостановлена вручную"
             if paused:
                 connection_text += f" · пауза после потери сессии: {paused} сек."
             parser_version = ""
@@ -4859,6 +4882,13 @@ $items = foreach ($u in $users) {{
                 stage = current.get("progress_stage") or "Обработка"
                 message = current.get("progress_message") or ""
                 current_stage_var.set(f"{stage}{': ' + message if message else ''}")
+                if manually_paused:
+                    current_stage_var.set(
+                        f"{current_stage_var.get()} · после этой карточки обработка остановится"
+                    )
+            elif manually_paused:
+                current_user_var.set("Сверка приостановлена")
+                current_stage_var.set("Нажмите «Продолжить», чтобы возобновить обработку с текущей позиции.")
             else:
                 current_user_var.set("Сейчас активного задания нет")
                 current_stage_var.set("Откройте авторизованную вкладку GLPI и оставьте её открытой.")

@@ -274,6 +274,7 @@ class InventoryBridgeState:
             "records": {},
             "jobs": [],
             "pause_until": 0,
+            "manually_paused": False,
             "stats": {"completed": 0, "failed": 0},
         }
 
@@ -291,6 +292,7 @@ class InventoryBridgeState:
             state["pause_until"] = float(payload.get("pause_until") or 0)
         except (TypeError, ValueError):
             state["pause_until"] = 0
+        state["manually_paused"] = bool(payload.get("manually_paused", False))
         state["stats"].update(payload.get("stats") if isinstance(payload.get("stats"), dict) else {})
         for job in state["jobs"]:
             if isinstance(job, dict) and job.get("status") == "running":
@@ -419,10 +421,27 @@ class InventoryBridgeState:
                 job["status"] = "pending"
                 job["claimed_at"] = 0
 
+    def pause(self) -> dict:
+        """Остановить выдачу новых заданий, сохранив очередь и текущий результат."""
+        with self._lock:
+            self._state["manually_paused"] = True
+            self._save_locked()
+            running = any(job.get("status") == "running" for job in self._state["jobs"])
+            return {"ok": True, "manually_paused": True, "finishing_current": running}
+
+    def resume(self) -> dict:
+        """Продолжить выдачу заданий с сохранённой позиции очереди."""
+        with self._lock:
+            self._state["manually_paused"] = False
+            self._save_locked()
+            return {"ok": True, "manually_paused": False}
+
     def next_job(self) -> dict:
         with self._lock:
             self._last_poll_at = time.time()
             self._requeue_expired_locked()
+            if self._state.get("manually_paused"):
+                return {"ok": True, "job": None}
             if time.time() < float(self._state.get("pause_until") or 0):
                 return {"ok": True, "job": None}
             if any(job.get("status") == "running" for job in self._state["jobs"]):
@@ -529,6 +548,7 @@ class InventoryBridgeState:
                     if self._last_poll_at
                     else None
                 ),
+                "manually_paused": bool(self._state.get("manually_paused")),
                 "paused_seconds": max(0, round(float(self._state.get("pause_until") or 0) - time.time())),
                 "stats": deepcopy(self._state["stats"]),
             }
