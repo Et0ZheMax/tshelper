@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "TSHelper GLPI Inventory Bridge",
+  "version": "0.1.0",
+  "description": "Read-only сверка пользователей и компьютеров GLPI с TSHelper через текущую браузерную сессию.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://inv.pak-cspmz.ru/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://inv.pak-cspmz.ru/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "TSHelper GLPI Inventory",
+    "default_popup": "options.html"
+  },
+  "options_page": "options.html"
+}

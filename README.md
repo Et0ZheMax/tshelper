@@ -1,4 +1,4 @@
-# TSHelper v5.13.2
+# TSHelper v5.14.0
 
 TSHelper — Windows desktop-рабочее место инженера техподдержки: поиск сотрудников и компьютеров, Active Directory, GLPI, CallWatcher, SSH/PowerShell Remote, удалённая установка ПО и мониторинг принтеров в одном интерфейсе.
 
@@ -19,6 +19,7 @@ TSHelper — Windows desktop-рабочее место инженера техп
 - внутренний номер и местоположение пользователя в одной строке карточки;
 - отзывчивый интерфейс: фоновые AD/GLPI Sync, ограниченная ping-очередь и инкрементальная отрисовка карточек;
 - синхронизация с Active Directory и GLPI;
+- read-only HTML-сверка с GLPI через браузерную сессию без API-токенов: персистентная очередь, dry-run отчёт и безопасное исправление единственного подтверждённого ПК;
 - открытие пользователя во встроенном ADHelper 2;
 - управление группами доступа и контроль соответствия OU организационным атрибутам через ADHelper 2.1.0;
 - связанные списки `department` и `section` в карточке AD: управление фильтрует отделы, а отдел подставляет своё управление;
@@ -68,6 +69,7 @@ py -3.11 -m venv .venv
 - `dock_items.json` — кнопки док-панели;
 - `software_catalog*.json` — редактируемые копии каталогов ПО;
 - `app.log` и `_pbx_debug` — журнал и диагностические дампы.
+- `glpi_inventory_state.json` — очередь и кэш HTML-сверки оборудования GLPI.
 
 При первом запуске TSHelper копирует найденные файлы старой раскладки из корня установки. Альтернативный каталог можно задать переменной `TSHELPER_DATA_DIR`.
 
@@ -97,5 +99,7 @@ python tests/selftest.py
 ```powershell
 .\scripts\build_release.ps1
 ```
+
+Скрипт также создаёт отдельный архив расширения `TSHelper-GLPI-Inventory-Bridge-v0.1.0.zip`. Инструкция по установке находится в `extensions/tshelper-glpi-inventory-bridge/README.md`.
 
 История изменений: [CHANGELOG.md](CHANGELOG.md). Готовые версии: [GitHub Releases](https://github.com/Et0ZheMax/tshelper/releases).

@@ -16,7 +16,7 @@ from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 
-MAX_BODY_BYTES = 16 * 1024
+MAX_BODY_BYTES = 64 * 1024
 ALLOWED_EXTENSION_SCHEMES = {"chrome-extension", "moz-extension", "edge-extension"}
 
 
@@ -40,6 +40,9 @@ class BrowserIntegrationServer:
         port: int,
         token: str,
         open_user_callback: Callable[[dict], dict],
+        inventory_next_callback: Optional[Callable[[], dict]] = None,
+        inventory_result_callback: Optional[Callable[[dict], dict]] = None,
+        inventory_status_callback: Optional[Callable[[], dict]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -50,6 +53,9 @@ class BrowserIntegrationServer:
         self.address = BrowserIntegrationAddress(host=host, port=int(port))
         self.token = str(token)
         self.open_user_callback = open_user_callback
+        self.inventory_next_callback = inventory_next_callback
+        self.inventory_result_callback = inventory_result_callback
+        self.inventory_status_callback = inventory_status_callback
         self.log_callback = log_callback or (lambda _message: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -118,7 +124,8 @@ class BrowserIntegrationServer:
                 self.end_headers()
 
             def do_GET(self) -> None:  # noqa: N802
-                if self.path.rstrip("/") != "/health":
+                path = urlsplit(self.path).path.rstrip("/") or "/"
+                if path not in {"/health", "/inventory/jobs/next", "/inventory/status"}:
                     self._send_json(404, {"ok": False, "error": "Маршрут не найден"})
                     return
                 if not self._origin_is_allowed():
@@ -127,10 +134,29 @@ class BrowserIntegrationServer:
                 if not self._authorized():
                     self._send_json(401, {"ok": False, "error": "Неверный токен TSHelper"})
                     return
-                self._send_json(200, {"ok": True, "service": "TSHelper", "bridge": "1.0"})
+                if path == "/health":
+                    self._send_json(200, {"ok": True, "service": "TSHelper", "bridge": "1.1"})
+                    return
+
+                callback = (
+                    integration.inventory_next_callback
+                    if path == "/inventory/jobs/next"
+                    else integration.inventory_status_callback
+                )
+                if callback is None:
+                    self._send_json(404, {"ok": False, "error": "GLPI Inventory bridge отключён"})
+                    return
+                try:
+                    result = callback()
+                except Exception as exc:
+                    integration.log_callback(f"Browser inventory callback error: {exc}")
+                    self._send_json(500, {"ok": False, "error": "TSHelper не смог обработать запрос"})
+                    return
+                self._send_json(200 if result.get("ok") else 400, result)
 
             def do_POST(self) -> None:  # noqa: N802
-                if self.path.rstrip("/") != "/open-user":
+                path = urlsplit(self.path).path.rstrip("/") or "/"
+                if path not in {"/open-user", "/inventory/jobs/result"}:
                     self._send_json(404, {"ok": False, "error": "Маршрут не найден"})
                     return
                 if not self._origin_is_allowed():
@@ -157,6 +183,23 @@ class BrowserIntegrationServer:
 
                 if not isinstance(payload, dict):
                     self._send_json(400, {"ok": False, "error": "Ожидался JSON-объект"})
+                    return
+
+                if path == "/inventory/jobs/result":
+                    callback = integration.inventory_result_callback
+                    if callback is None:
+                        self._send_json(404, {"ok": False, "error": "GLPI Inventory bridge отключён"})
+                        return
+                    try:
+                        result = callback(payload)
+                    except (KeyError, ValueError) as exc:
+                        self._send_json(400, {"ok": False, "error": str(exc)})
+                        return
+                    except Exception as exc:
+                        integration.log_callback(f"Browser inventory result error: {exc}")
+                        self._send_json(500, {"ok": False, "error": "TSHelper не смог сохранить результат"})
+                        return
+                    self._send_json(200 if result.get("ok") else 400, result)
                     return
 
                 allowed_fields = {"glpi_user_id", "name", "login", "email", "extension", "location", "source_url"}

@@ -39,6 +39,7 @@ USERS_FILE = DATA_DIR / "users.json"
 DOCK_ITEMS_FILE = DATA_DIR / "dock_items.json"
 LOG_FILE = DATA_DIR / "app.log"
 PBX_DUMP_DIR = DATA_DIR / "_pbx_debug"
+GLPI_INVENTORY_STATE_FILE = DATA_DIR / "glpi_inventory_state.json"
 
 
 def asset_path(*parts: str) -> str:

@@ -1,17 +1,26 @@
 import hashlib
+import json
 import os
+import socket
 import shutil
 import subprocess
 import tempfile
 import sys
 import types
 import zipfile
+from urllib import request
 from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(ROOT, 'src'))
 
 from tshelper import app as mod  # noqa: E402
+from tshelper.glpi_inventory import (  # noqa: E402
+    InventoryBridgeState,
+    apply_recommendation,
+    recommend_inventory_update,
+)
+from tshelper.browser_integration import BrowserIntegrationServer  # noqa: E402
 from tshelper.printer_monitor_launcher import (  # noqa: E402
     PrinterMonitorLauncher,
     build_printer_monitor_command,
@@ -314,10 +323,13 @@ def test_multi_pc_os_cache_and_merge():
         assert_eq(app.build_host_candidates({'pc_name': 'w-test', '_strict_host': True}), ['w-test'], 'actions use exact selected host')
 
         existing = {'name': 'Тест', 'pc_name': 'l-test', 'pc_options': [], 'ext': '4443', 'location': 'Щ5-104'}
-        incoming = {'name': 'Тест', 'pc_name': 'w-test', 'pc_options': [], 'ext': '4443', 'location': 'Щ5-104'}
+        incoming = {
+            'name': 'Тест', 'pc_name': 'w-test', 'pc_options': [], 'ad_login': 'test',
+            'pc_source': 'ad_guess', 'ext': '4443', 'location': 'Щ5-104'
+        }
         merged = app._merge_user_records(existing, incoming)
         assert_eq(merged['pc_name'], 'l-test', 'AD sync keeps selected primary PC')
-        assert_eq(merged['pc_options'], ['w-test'], 'AD sync remembers second PC')
+        assert_eq(merged['pc_options'], [], 'AD guess does not create opposite-prefix duplicate')
         assert_eq(merged['location'], 'Щ5-104', 'location survives merge')
 
         class FakeGlpi:
@@ -330,6 +342,103 @@ def test_multi_pc_os_cache_and_merge():
         assert_eq(updated[0]['ext'], '4443', 'GLPI sync keeps extension')
         assert_eq(updated[0]['location'], 'Щ5-104', 'GLPI sync keeps location')
         assert_eq(updated[0]['pc_options'], ['l-test'], 'GLPI sync keeps alternate PC')
+
+
+def test_glpi_inventory_queue_and_safe_reconciliation():
+    user = {
+        'name': 'Тест', 'ad_login': 'test', 'pc_name': 'w-test',
+        'pc_options': ['l-test', 'w-shared'], 'ext': '4443'
+    }
+    record = {
+        'login': 'test', 'status': 'ok', 'resolution': 'exact-login',
+        'glpi_user_id': 42, 'checked_at': '2026-08-27T10:00:00+00:00',
+        'computers': [{
+            'asset_id': 101, 'hostname': 'l-test', 'os_family': 'linux',
+            'os_name': 'Astra Linux', 'is_active': True
+        }]
+    }
+    recommendation = recommend_inventory_update(user, record)
+    assert recommendation['safe']
+    assert recommendation['changed']
+    assert_eq(recommendation['new_main'], 'l-test', 'GLPI exact Computer becomes primary')
+    assert_eq(recommendation['new_options'], ['w-shared'], 'unrelated PC survives reconciliation')
+    updated = apply_recommendation(user, recommendation)
+    assert_eq(updated['pc_source'], 'glpi_html', 'reconciled source is stored')
+    assert_eq(updated['glpi_user_id'], 42, 'GLPI identity is stored')
+
+    ambiguous = dict(record)
+    ambiguous['computers'] = record['computers'] + [{
+        'asset_id': 102, 'hostname': 'w-test2', 'os_family': 'windows', 'is_active': True
+    }]
+    assert not recommend_inventory_update(user, ambiguous)['safe']
+
+    with tempfile.TemporaryDirectory() as td:
+        state_path = os.path.join(td, 'inventory.json')
+        state = InventoryBridgeState(state_path)
+        first_id = state.enqueue(user, 'full_sync', priority=10)
+        assert first_id
+        assert_eq(state.enqueue(user, 'ping_failed', priority=100), first_id, 'queue deduplicates login')
+        job = state.next_job()['job']
+        assert_eq(job['id'], first_id, 'queued job can be claimed')
+        completed = state.complete({
+            'job_id': first_id, 'login': 'test', 'status': 'ok',
+            'resolution': 'exact-login', 'glpi_user_id': 42,
+            'computers': [{
+                'itemtype': 'Computer', 'id': 101, 'name': 'l-test',
+                'os': 'Astra Linux', 'status': 'В работе', 'relation': 'Пользователь'
+            }]
+        })
+        assert completed['ok']
+        assert_eq(state.hosts_for_login('test'), ['l-test'], 'inventory host cache')
+        assert_eq(state.os_for_host('l-test'), 'linux', 'inventory OS cache')
+        reloaded = InventoryBridgeState(state_path)
+        assert_eq(reloaded.record_for_login('test')['glpi_user_id'], 42, 'inventory cache persists')
+
+        session_user = dict(user, ad_login='session-test', pc_name='w-session-test')
+        session_job_id = reloaded.enqueue(session_user, 'full_sync')
+        reloaded.next_job()
+        reloaded.complete({
+            'job_id': session_job_id, 'login': 'session-test',
+            'status': 'session_required', 'error': 'login required'
+        })
+        session_status = reloaded.status()
+        assert_eq(session_status['pending'], 1, 'expired GLPI session keeps job queued')
+        assert session_status['paused_seconds'] > 0
+        assert_eq(reloaded.next_job()['job'], None, 'expired GLPI session pauses whole queue')
+
+
+def test_browser_bridge_inventory_routes_and_legacy_open_user():
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+
+    received = []
+    server = BrowserIntegrationServer(
+        host='127.0.0.1', port=port, token='x' * 32,
+        open_user_callback=lambda payload: {'ok': payload.get('login') == 'test'},
+        inventory_next_callback=lambda: {'ok': True, 'job': {'id': 'job-1', 'login': 'test'}},
+        inventory_result_callback=lambda payload: received.append(payload) or {'ok': True},
+        inventory_status_callback=lambda: {'ok': True, 'pending': 1},
+    )
+    server.start()
+
+    def call(path, payload=None):
+        body = json.dumps(payload).encode('utf-8') if payload is not None else None
+        req = request.Request(
+            f'http://127.0.0.1:{port}{path}', data=body,
+            headers={'X-TSHelper-Token': 'x' * 32, 'Content-Type': 'application/json'},
+        )
+        return json.loads(request.urlopen(req, timeout=3).read().decode('utf-8'))
+
+    try:
+        assert_eq(call('/health')['bridge'], '1.1', 'browser bridge protocol version')
+        assert_eq(call('/inventory/jobs/next')['job']['id'], 'job-1', 'inventory job route')
+        assert_eq(call('/inventory/status')['pending'], 1, 'inventory status route')
+        assert call('/inventory/jobs/result', {'job_id': 'job-1', 'status': 'ok'})['ok']
+        assert_eq(received[0]['job_id'], 'job-1', 'inventory result callback')
+        assert call('/open-user', {'login': 'test'})['ok']
+    finally:
+        server.stop()
 
 
 def test_card_contact_line_with_location():
@@ -355,19 +464,22 @@ def test_batched_settings_and_glpi_timeout():
     calls = []
 
     class FakeResponse:
-        content = b'{}'
+        def __init__(self, payload=None):
+            self.payload = payload or {'data': []}
+            self.content = b'{}'
 
         @staticmethod
         def raise_for_status():
             return None
 
-        @staticmethod
-        def json():
-            return {'data': []}
+        def json(self):
+            return self.payload
 
     class FakeSession:
         def get(self, url, **kwargs):
             calls.append((url, kwargs))
+            if url.endswith('/initSession'):
+                return FakeResponse({'session_token': 'opened-with-get'})
             return FakeResponse()
 
     client = mod.GLPIClient('https://glpi.invalid/apirest.php', 'app', 'user', request_timeout=7)
@@ -375,6 +487,11 @@ def test_batched_settings_and_glpi_timeout():
     client.session_token = 'session'
     client._search('User', 'test')
     assert_eq(calls[0][1].get('timeout'), 7, 'GLPI request timeout')
+
+    session_client = mod.GLPIClient('https://glpi.invalid/apirest.php', 'app', 'user')
+    session_client.session = FakeSession()
+    assert session_client._init_session()
+    assert_eq(session_client.session_token, 'opened-with-get', 'GLPI initSession uses GET response')
 
 
 def test_incremental_card_sync_and_deferred_ad_lookup():
@@ -540,6 +657,8 @@ if __name__ == '__main__':
         test_noisy_powershell_json_and_paged_ad_search,
         test_os_specific_context_actions,
         test_multi_pc_os_cache_and_merge,
+        test_glpi_inventory_queue_and_safe_reconciliation,
+        test_browser_bridge_inventory_routes_and_legacy_open_user,
         test_card_contact_line_with_location,
         test_batched_settings_and_glpi_timeout,
         test_incremental_card_sync_and_deferred_ad_lookup,

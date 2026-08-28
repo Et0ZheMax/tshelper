@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TSHelper GLPI Inventory</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <h1>TSHelper GLPI Inventory</h1>
+    <label><input id="enabled" type="checkbox"> Включить обработку очереди</label>
+    <label for="bridgeUrl">Адрес TSHelper</label>
+    <input id="bridgeUrl" type="url" spellcheck="false" value="http://127.0.0.1:8766">
+    <label for="token">Токен браузерной интеграции</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false">
+    <div class="buttons">
+      <button id="save">Сохранить</button>
+      <button id="test" class="secondary">Проверить</button>
+    </div>
+    <p id="status" role="status"></p>
+    <p class="hint">TSHelper должен быть запущен, а в соседней вкладке должна быть открыта авторизованная сессия GLPI.</p>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

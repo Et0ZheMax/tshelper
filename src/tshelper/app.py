@@ -9,11 +9,19 @@ from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
 
 from .browser_integration import BrowserIntegrationServer
+from .glpi_inventory import (
+    InventoryBridgeState,
+    apply_recommendation,
+    login_from_hostname,
+    login_from_user,
+    recommend_inventory_update,
+)
 from .paths import (
     ADHELPER2_DIR,
     CONFIG_FILE,
     DATA_DIR,
     DOCK_ITEMS_FILE,
+    GLPI_INVENTORY_STATE_FILE,
     LOG_FILE,
     PBX_DUMP_DIR,
     USERS_FILE,
@@ -620,7 +628,15 @@ def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: b
                 or ""
             ).strip()
             if cn and sam:
-                users.append({"name": cn, "pc_name": f"w-{sam}", "ext": ext, "location": location})
+                users.append({
+                    "name": cn,
+                    "pc_name": f"w-{sam}",
+                    "pc_options": [],
+                    "ad_login": sam,
+                    "pc_source": "ad_guess",
+                    "ext": ext,
+                    "location": location,
+                })
         return users
     except Exception as e:
         log_message(f"AD error: {e}")
@@ -688,7 +704,7 @@ class GLPIClient:
         if not self._ensure_session():
             return False
         try:
-            resp = self.session.post(
+            resp = self.session.get(
                 f"{self.api_url}/initSession",
                 headers=self._headers(),
                 timeout=self.request_timeout,
@@ -1102,6 +1118,10 @@ class SettingsManager:
             "plink_hostkeys": {},
             # GLPI
             "glpi_api_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_prefix_field": "name", "glpi_verify_ssl": True,
+            "glpi_inventory_bridge_enabled": True,
+            "glpi_inventory_auto_apply_single": True,
+            "glpi_inventory_positive_ttl_sec": 86400,
+            "glpi_inventory_negative_ttl_sec": 1800,
             # OMG defaults
             "omg_domain":"omg.cspfmba.ru", "omg_base_dn":"DC=omg,DC=cspfmba,DC=ru",
             # --- CallWatcher settings ---
@@ -1691,6 +1711,10 @@ class MainWindow:
         self.dock_side_var = tk.StringVar(master=self.master, value=self._normalize_dock_side(self.settings.get_setting("dock_side", "left")))
 
         self.users = UserManager(USERS_FILE)
+        self.glpi_inventory = InventoryBridgeState(GLPI_INVENTORY_STATE_FILE)
+        self._glpi_inventory_auto_backup_created = False
+        self._glpi_ping_pending = {}
+        self._glpi_ping_flush_job = None
         self.ping_max_workers = max(2, min(32, int(self.settings.get_setting("ping_max_workers", 8) or 8)))
         self.executor = ThreadPoolExecutor(max_workers=self.ping_max_workers)
         self.buttons = {}
@@ -2028,14 +2052,21 @@ class MainWindow:
                 seen.add(low)
                 variants.append(val)
 
-        prefixes = self.get_allowed_prefixes()
-        default_prefix = prefixes[0] if prefixes else ""
         names = [user.get("pc_name", "")] + list(user.get("pc_options", []))
         variants = []
         seen = set()
 
         for name in names:
             add_variant(str(name or "").strip())
+
+        inventory = getattr(self, "glpi_inventory", None)
+        if inventory:
+            for hostname in inventory.hosts_for_login(login_from_user(user)):
+                add_variant(hostname)
+
+        prefixes = self.get_allowed_prefixes()
+        default_prefix = prefixes[0] if prefixes else ""
+        for name in names:
             clean, _ = self.normalize_pc_name(name)
             if clean:
                 if default_prefix:
@@ -2340,6 +2371,13 @@ class MainWindow:
 
     def resolve_os_type_for_host(self, host: str) -> str:
         """Определить ОС конкретного hostname, не смешивая w-* и l-*."""
+        inventory = getattr(self, "glpi_inventory", None)
+        if inventory:
+            inventory_os = inventory.os_for_host(host)
+            if inventory_os in {"windows", "linux"}:
+                self.remember_os_type(host, inventory_os)
+                return inventory_os
+
         exact_cached = self.get_cached_os_type(host, include_legacy=False)
         if exact_cached in {"windows", "linux"}:
             return exact_cached
@@ -2959,6 +2997,10 @@ $items = foreach ($u in $users) {{
         toolsm.add_command(label="Браузерная интеграция: статус", command=self.show_browser_integration_status)
         toolsm.add_command(label="Скопировать токен интеграции", command=self.copy_browser_integration_token)
         toolsm.add_command(label="Перезапустить браузерную интеграцию", command=self.restart_browser_integration)
+        toolsm.add_separator()
+        toolsm.add_command(label="GLPI Inventory: сверить всех (dry-run)", command=self.enqueue_full_glpi_inventory_scan)
+        toolsm.add_command(label="GLPI Inventory: результаты сверки", command=self.show_glpi_inventory_report)
+        toolsm.add_command(label="GLPI Inventory: статус очереди", command=self.show_glpi_inventory_status)
         menubar.add_cascade(label="Инструменты", menu=toolsm)
         self.master.config(menu=menubar)
 
@@ -4343,6 +4385,8 @@ $items = foreach ($u in $users) {{
                 "os_type": resolved_os,
             }
         self.remember_os_type(host or pc, resolved_os)
+        if not ok:
+            self.master.after(0, self._queue_glpi_inventory_from_failed_ping, dict(user))
         self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
 
     def check_availability(self, user):
@@ -4511,12 +4555,228 @@ $items = foreach ($u in $users) {{
         merged["pc_name"] = main_pc
         merged["ext"] = incoming.get("ext") or existing.get("ext") or ""
         merged["location"] = incoming.get("location") or existing.get("location") or ""
+        merged["ad_login"] = incoming.get("ad_login") or existing.get("ad_login") or login_from_user(incoming)
+        merged["pc_source"] = existing.get("pc_source") or incoming.get("pc_source") or ""
         options = self._merge_pc_options(main_pc, existing.get("pc_options", []), incoming.get("pc_options", []))
         incoming_pc = incoming.get("pc_name") or ""
-        if incoming_pc and incoming_pc.casefold() != main_pc.casefold():
+        incoming_is_guess = incoming.get("pc_source") == "ad_guess"
+        same_login_guess = (
+            incoming_is_guess
+            and login_from_hostname(incoming_pc)
+            and login_from_hostname(incoming_pc) == login_from_hostname(main_pc)
+        )
+        if same_login_guess:
+            options = [item for item in options if item.casefold() != incoming_pc.casefold()]
+        elif incoming_pc and incoming_pc.casefold() != main_pc.casefold():
             options = self._merge_pc_options(main_pc, options, [incoming_pc])
         merged["pc_options"] = options
         return self.users._normalize_user(merged)
+
+    def _inventory_ttls(self) -> tuple[int, int]:
+        try:
+            positive = int(self.settings.get_setting("glpi_inventory_positive_ttl_sec", 86400) or 86400)
+        except (TypeError, ValueError):
+            positive = 86400
+        try:
+            negative = int(self.settings.get_setting("glpi_inventory_negative_ttl_sec", 1800) or 1800)
+        except (TypeError, ValueError):
+            negative = 1800
+        return max(60, positive), max(60, negative)
+
+    def _enqueue_glpi_inventory_if_stale(self, user: dict, reason: str, *, priority: int = 0) -> str:
+        if not self.settings.get_setting("glpi_inventory_bridge_enabled", True):
+            return ""
+        login = login_from_user(user)
+        if not login:
+            return ""
+        positive_ttl, negative_ttl = self._inventory_ttls()
+        if self.glpi_inventory.is_fresh(
+            login,
+            positive_ttl=positive_ttl,
+            negative_ttl=negative_ttl,
+        ):
+            return ""
+        return self.glpi_inventory.enqueue(user, reason, priority=priority)
+
+    def _enqueue_glpi_inventory_users(self, users: list[dict], reason: str, *, priority: int = 0) -> int:
+        if not self.settings.get_setting("glpi_inventory_bridge_enabled", True):
+            return 0
+        positive_ttl, negative_ttl = self._inventory_ttls()
+        stale_users = []
+        for user in users:
+            login = login_from_user(user)
+            if login and not self.glpi_inventory.is_fresh(
+                login,
+                positive_ttl=positive_ttl,
+                negative_ttl=negative_ttl,
+            ):
+                stale_users.append(user)
+        return self.glpi_inventory.enqueue_many(stale_users, reason, priority=priority)
+
+    def _queue_glpi_inventory_from_failed_ping(self, user: dict):
+        login = login_from_user(user)
+        if not login:
+            return
+        self._glpi_ping_pending[login] = user
+        if self._glpi_ping_flush_job is None:
+            self._glpi_ping_flush_job = self.master.after(750, self._flush_glpi_ping_inventory_queue)
+
+    def _flush_glpi_ping_inventory_queue(self):
+        self._glpi_ping_flush_job = None
+        users = list(self._glpi_ping_pending.values())
+        self._glpi_ping_pending.clear()
+        if users:
+            self._enqueue_glpi_inventory_users(users, "ping_failed", priority=100)
+
+    def enqueue_full_glpi_inventory_scan(self):
+        if not self.settings.get_setting("glpi_inventory_bridge_enabled", True):
+            return messagebox.showwarning("GLPI Inventory", "HTML-сверка GLPI отключена в настройках.")
+        users = [dict(user) for user in self.users.get_users()]
+        added = self.glpi_inventory.enqueue_many(users, "full_sync", priority=10, force=True)
+        status = self.glpi_inventory.status()
+        messagebox.showinfo(
+            "GLPI Inventory",
+            f"Поставлено в очередь: {added}.\nВсего ожидает: {status['pending'] + status['running']}.\n\n"
+            "Откройте GLPI в браузере, войдите в систему и оставьте вкладку открытой. "
+            "Это dry-run: карточки автоматически не меняются.",
+        )
+
+    def _handle_glpi_inventory_completed(self, job: dict, record: dict):
+        login = login_from_user({"ad_login": record.get("login", "")})
+        if not login:
+            return
+        if job.get("reason") not in {"ad_sync", "ping_failed"}:
+            return
+        if not self.settings.get_setting("glpi_inventory_auto_apply_single", True):
+            return
+        for index, user in enumerate(self.users.get_users()):
+            if login_from_user(user) != login:
+                continue
+            recommendation = recommend_inventory_update(user, record)
+            if not recommendation.get("safe") or not recommendation.get("changed"):
+                return
+            old_host = user.get("pc_name", "")
+            updated = self.users._normalize_user(apply_recommendation(user, recommendation))
+            self._ensure_glpi_inventory_auto_backup()
+            self.users.users[index] = updated
+            self.users.save()
+            self.populate_buttons()
+            log_action(
+                f"GLPI Inventory ({job.get('reason')}): {user.get('name', '?')} "
+                f"{old_host} -> {updated.get('pc_name', '')}"
+            )
+            return
+
+    def _ensure_glpi_inventory_auto_backup(self):
+        if self._glpi_inventory_auto_backup_created:
+            return
+        if os.path.exists(USERS_FILE):
+            backup = DATA_DIR / f"users_before_glpi_inventory_auto_{datetime.datetime.now():%Y%m%d_%H%M%S}.json"
+            shutil.copy2(USERS_FILE, backup)
+            log_message(f"GLPI Inventory: создана резервная копия {backup}")
+        self._glpi_inventory_auto_backup_created = True
+
+    def _handle_glpi_inventory_result(self, payload: dict) -> dict:
+        completed = self.glpi_inventory.complete(payload)
+        try:
+            self.master.after(
+                0,
+                self._handle_glpi_inventory_completed,
+                completed["job"],
+                completed["record"],
+            )
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def show_glpi_inventory_status(self):
+        status = self.glpi_inventory.status()
+        messagebox.showinfo(
+            "GLPI Inventory",
+            f"Ожидает: {status['pending']}\n"
+            f"Обрабатывается: {status['running']}\n"
+            f"Результатов в кэше: {status['records']}\n"
+            f"Пауза из-за сессии: {status.get('paused_seconds', 0)} сек.\n"
+            f"Завершено: {status['stats'].get('completed', 0)}\n"
+            f"Ошибок/нет сессии: {status['stats'].get('failed', 0)}",
+        )
+
+    def show_glpi_inventory_report(self):
+        rows = []
+        for user in self.users.get_users():
+            login = login_from_user(user)
+            record = self.glpi_inventory.record_for_login(login)
+            recommendation = recommend_inventory_update(user, record)
+            rows.append((user, recommendation))
+
+        win = tk.Toplevel(self.master)
+        win.title("GLPI Inventory — результаты сверки")
+        win.geometry("1100x620+180+100")
+        columns = ("name", "login", "current", "glpi", "decision")
+        tree = ttk.Treeview(win, columns=columns, show="headings")
+        titles = {
+            "name": "Пользователь",
+            "login": "Login",
+            "current": "Сейчас",
+            "glpi": "GLPI",
+            "decision": "Решение",
+        }
+        widths = {"name": 240, "login": 130, "current": 150, "glpi": 170, "decision": 360}
+        for column in columns:
+            tree.heading(column, text=titles[column])
+            tree.column(column, width=widths[column], anchor="w")
+        scrollbar = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+        scrollbar.pack(side="left", fill="y", pady=10)
+
+        safe_changes = []
+        for user, recommendation in rows:
+            record = recommendation.get("record") or {}
+            hosts = ", ".join(item.get("hostname", "") for item in record.get("computers", [])) or "—"
+            tree.insert("", "end", values=(
+                user.get("name", ""),
+                recommendation.get("login", ""),
+                user.get("pc_name", ""),
+                hosts,
+                recommendation.get("reason", ""),
+            ))
+            if recommendation.get("safe") and recommendation.get("changed"):
+                safe_changes.append((user, recommendation))
+
+        controls = ttk.Frame(win, padding=(8, 10))
+        controls.pack(side="right", fill="y")
+        ttk.Label(controls, text=f"Безопасных изменений: {len(safe_changes)}", wraplength=220).pack(anchor="w", pady=(0, 10))
+
+        def apply_safe_changes():
+            if not safe_changes:
+                return messagebox.showinfo("GLPI Inventory", "Безопасных изменений нет.", parent=win)
+            if not messagebox.askyesno(
+                "GLPI Inventory",
+                f"Применить {len(safe_changes)} изменений? Перед этим будет создана резервная копия users.json.",
+                parent=win,
+            ):
+                return
+            backup = DATA_DIR / f"users_before_glpi_inventory_{datetime.datetime.now():%Y%m%d_%H%M%S}.json"
+            if os.path.exists(USERS_FILE):
+                shutil.copy2(USERS_FILE, backup)
+            by_login = {recommendation["login"]: recommendation for _user, recommendation in safe_changes}
+            changed = 0
+            updated_users = []
+            for current in self.users.get_users():
+                recommendation = by_login.get(login_from_user(current))
+                if recommendation:
+                    current = apply_recommendation(current, recommendation)
+                    changed += 1
+                updated_users.append(self.users._normalize_user(current))
+            self.users.users = updated_users
+            self.users.save()
+            self.populate_buttons()
+            win.destroy()
+            messagebox.showinfo("GLPI Inventory", f"Применено: {changed}.\nРезервная копия: {backup}")
+
+        ttk.Button(controls, text="Применить безопасные", command=apply_safe_changes).pack(fill="x")
+        ttk.Button(controls, text="Закрыть", command=win.destroy).pack(fill="x", pady=(8, 0))
 
     def _make_glpi_client(self, silent: bool = False, notify_errors: bool = True):
         url = self.settings.get_setting("glpi_api_url", "").strip()
@@ -4654,7 +4914,11 @@ $items = foreach ($u in $users) {{
                 self.users.users = list(by_norm.values())
                 self.users.save()
                 self.populate_buttons()
-                return messagebox.showinfo("AD Sync", "Новых пользователей нет. Обновления применены.")
+                queued = self._enqueue_glpi_inventory_users(self.users.get_users(), "ad_sync", priority=50)
+                return messagebox.showinfo(
+                    "AD Sync",
+                    f"Новых пользователей нет. Обновления применены.\nНа HTML-сверку GLPI поставлено: {queued}.",
+                )
             self.show_ad_sync_selection(new_candidates, by_norm)
 
         self._run_sync_background("AD Sync", "Подключение к Active Directory…", work, apply_result)
@@ -4690,6 +4954,7 @@ $items = foreach ($u in $users) {{
                 merged_map[norm_name(u["name"])] = u
             self.users.users = list(merged_map.values()); self.users.save()
             self.populate_buttons()
+            self._enqueue_glpi_inventory_users(sel, "ad_sync", priority=50)
             self._close_save_geo(win, "ad_sync_select_geometry", saver=_save_ad_sync_geo)
         ttk.Button(win, text="Добавить выбранных", command=apply_sel).pack(pady=8)
 
@@ -4881,6 +5146,28 @@ $items = foreach ($u in $users) {{
         ttk.Checkbutton(tab_glpi, text="Проверять SSL-сертификат (снимите галочку для self-signed)", variable=glpi_verify_ssl).pack(pady=4, anchor="w")
         glpi_use_in_ad_sync = tk.BooleanVar(value=self.settings.get_setting("glpi_use_in_ad_sync", True))
         ttk.Checkbutton(tab_glpi, text="Использовать сверку с GLPI во время AD Sync", variable=glpi_use_in_ad_sync).pack(pady=4, anchor="w")
+        ttk.Separator(tab_glpi).pack(fill="x", pady=10)
+        ttk.Label(
+            tab_glpi,
+            text="HTML Inventory Bridge работает через уже открытую авторизованную вкладку GLPI и не требует API-токенов.",
+            wraplength=520,
+        ).pack(pady=4, anchor="w")
+        glpi_inventory_bridge_enabled = tk.BooleanVar(
+            value=self.settings.get_setting("glpi_inventory_bridge_enabled", True)
+        )
+        ttk.Checkbutton(
+            tab_glpi,
+            text="Разрешить HTML-сверку оборудования через расширение",
+            variable=glpi_inventory_bridge_enabled,
+        ).pack(pady=4, anchor="w")
+        glpi_inventory_auto_apply_single = tk.BooleanVar(
+            value=self.settings.get_setting("glpi_inventory_auto_apply_single", True)
+        )
+        ttk.Checkbutton(
+            tab_glpi,
+            text="Автоматически исправлять ПК после AD Sync/ошибки ping, только если найден ровно один активный Computer",
+            variable=glpi_inventory_auto_apply_single,
+        ).pack(pady=4, anchor="w")
 
         # Reset password
         tab_rst = make_scrollable_tab("Пароль для сброса")
@@ -5166,6 +5453,8 @@ $items = foreach ($u in $users) {{
                 "glpi_prefix_field": e_glpi_prefix.get().strip() or "name",
                 "glpi_verify_ssl": glpi_verify_ssl.get(),
                 "glpi_use_in_ad_sync": glpi_use_in_ad_sync.get(),
+                "glpi_inventory_bridge_enabled": glpi_inventory_bridge_enabled.get(),
+                "glpi_inventory_auto_apply_single": glpi_inventory_auto_apply_single.get(),
             }
             self.settings.set_settings(settings_values)
             self._apply_idle_timeout_setting(max(0, idle_minutes))
@@ -5318,6 +5607,9 @@ $items = foreach ($u in $users) {{
                 port=port,
                 token=token,
                 open_user_callback=self._handle_browser_open_user_request,
+                inventory_next_callback=self.glpi_inventory.next_job,
+                inventory_result_callback=self._handle_glpi_inventory_result,
+                inventory_status_callback=self.glpi_inventory.status,
                 log_callback=log_message,
             )
             server.start()
@@ -5353,7 +5645,8 @@ $items = foreach ($u in $users) {{
         messagebox.showinfo(
             "Браузерная интеграция",
             "Токен скопирован в буфер обмена.\n\n"
-            "Откройте настройки расширения «TSHelper для GLPI», вставьте токен и нажмите «Проверить подключение».",
+            "Откройте настройки расширения «TSHelper для GLPI» или «TSHelper GLPI Inventory Bridge», "
+            "вставьте токен и нажмите «Проверить подключение».",
         )
 
     def show_browser_integration_status(self):
@@ -5363,6 +5656,11 @@ $items = foreach ($u in $users) {{
         port = int(self.settings.get_setting("browser_integration_port", 8766) or 8766)
         state = "работает" if running else "не запущена"
         details = f"Статус: {state}\nАдрес: http://{host}:{port}"
+        inventory_status = self.glpi_inventory.status()
+        details += (
+            f"\nGLPI Inventory: ожидает {inventory_status['pending']}, "
+            f"обрабатывается {inventory_status['running']}, результатов {inventory_status['records']}"
+        )
         if self.browser_integration_error:
             details += f"\nОшибка: {self.browser_integration_error}"
         messagebox.showinfo("Браузерная интеграция GLPI", details)
@@ -5397,6 +5695,13 @@ $items = foreach ($u in $users) {{
                 pass
             self._ping_queue_job = None
         self._pending_ping_users = []
+        if self._glpi_ping_flush_job:
+            try:
+                self.master.after_cancel(self._glpi_ping_flush_job)
+            except Exception:
+                pass
+            self._glpi_ping_flush_job = None
+        self._glpi_ping_pending.clear()
         try: self.executor.shutdown(wait=False)
         except: pass
         try: self._ad_lookup_executor.shutdown(wait=False, cancel_futures=True)
