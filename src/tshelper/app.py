@@ -12,6 +12,7 @@ from .browser_integration import BrowserIntegrationServer
 from .glpi_inventory import (
     InventoryBridgeState,
     apply_recommendation,
+    is_remote_access_hostname,
     login_from_hostname,
     login_from_user,
     recommend_inventory_update,
@@ -397,7 +398,7 @@ def user_pc_names(user: dict) -> list[str]:
     for value in [user.get("pc_name", ""), *(user.get("pc_options") or [])]:
         name = str(value or "").strip()
         key = host_identity_key(name)
-        if not key or key in seen:
+        if not key or key in seen or is_remote_access_hostname(name):
             continue
         seen.add(key)
         result.append(name)
@@ -1789,14 +1790,31 @@ class MainWindow:
         if self.settings.get_setting("cw_enabled", True):
             self.start_call_watcher()
 
-    def _start_update_check(self):
-        self._update_check_job = None
-        if self._update_check_running or self._update_in_progress:
-            self._schedule_next_update_check()
+    def check_for_updates(self):
+        """Запустить ручную проверку GitHub Release с обязательным результатом для пользователя."""
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, manual: bool = False):
+        if self._update_check_running:
+            if manual:
+                messagebox.showinfo("Проверка обновлений", "Проверка обновлений уже выполняется.")
             return
+        if self._update_in_progress:
+            if manual:
+                messagebox.showinfo("Обновление TSHelper", "Обновление уже загружается или устанавливается.")
+            else:
+                self._schedule_next_update_check()
+            return
+        if self._update_check_job is not None:
+            try:
+                self.master.after_cancel(self._update_check_job)
+            except Exception:
+                pass
+        self._update_check_job = None
         self._update_check_running = True
         threading.Thread(
             target=self._check_updates_background,
+            args=(manual,),
             daemon=True,
             name="tshelper-update-check",
         ).start()
@@ -1815,7 +1833,7 @@ class MainWindow:
         except Exception:
             self._update_check_job = None
 
-    def _check_updates_background(self):
+    def _check_updates_background(self, manual: bool = False):
         release = None
         error = None
         try:
@@ -1825,20 +1843,41 @@ class MainWindow:
         try:
             self.master.after(
                 0,
-                lambda item=release, message=error: self._finish_update_check(item, message),
+                lambda item=release, message=error, requested=manual: self._finish_update_check(
+                    item,
+                    message,
+                    manual=requested,
+                ),
             )
         except Exception as exc:
             log_message(f"Не удалось завершить проверку обновлений: {exc}")
 
-    def _finish_update_check(self, release: ReleaseInfo | None, error: str | None):
+    def _finish_update_check(
+        self,
+        release: ReleaseInfo | None,
+        error: str | None,
+        *,
+        manual: bool = False,
+    ):
         self._update_check_running = False
         self._schedule_next_update_check()
         if error:
             log_message(f"Ошибка проверки обновлений: {error}")
+            if manual:
+                messagebox.showerror(
+                    "Проверка обновлений",
+                    f"Не удалось проверить обновления.\n\n{error}",
+                )
             return
         if release is None or not is_newer_release(release.tag):
+            if manual:
+                latest_text = f"\nПоследний релиз: {release.tag}." if release is not None else ""
+                messagebox.showinfo(
+                    "Проверка обновлений",
+                    f"Установлена актуальная версия {VERSION}.{latest_text}",
+                )
             return
-        if self._update_prompted_version == release.version:
+        if not manual and self._update_prompted_version == release.version:
             return
         self._update_prompted_version = release.version
         self._offer_update(release)
@@ -2043,17 +2082,17 @@ class MainWindow:
     def build_host_candidates(self, user: dict) -> list[str]:
         if user.get("_strict_host"):
             strict_host = str(user.get("pc_name", "") or "").strip()
-            return [strict_host] if strict_host else []
+            return [strict_host] if strict_host and not is_remote_access_hostname(strict_host) else []
 
         def add_variant(val: str):
-            if not val:
+            if not val or is_remote_access_hostname(val):
                 return
             low = val.lower()
             if low not in seen:
                 seen.add(low)
                 variants.append(val)
 
-        names = [user.get("pc_name", "")] + list(user.get("pc_options", []))
+        names = user_pc_names(user)
         variants = []
         seen = set()
 
@@ -2100,7 +2139,7 @@ class MainWindow:
 
         candidates = self.build_host_candidates(user)
         fallback_host = (user.get("pc_name") or "").strip()
-        if not candidates and fallback_host:
+        if not candidates and fallback_host and not is_remote_access_hostname(fallback_host):
             candidates = [fallback_host]
         return RemoteHost(candidates=candidates, port=22, os_family="ubuntu")
 
@@ -2994,6 +3033,7 @@ $items = foreach ($u in $users) {{
         toolsm.add_separator()
         toolsm.add_command(label="Проверка окружения", command=self.show_env_check)
         toolsm.add_command(label="Просмотр логов", command=self.open_log_viewer)
+        toolsm.add_command(label="Проверить обновления", command=self.check_for_updates)
         toolsm.add_separator()
         toolsm.add_command(label="Браузерная интеграция: статус", command=self.show_browser_integration_status)
         toolsm.add_command(label="Скопировать токен интеграции", command=self.copy_browser_integration_token)
@@ -4391,7 +4431,7 @@ $items = foreach ($u in $users) {{
         self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
 
     def check_availability(self, user):
-        candidates = self.build_host_candidates(user) or [user.get("pc_name", "")]
+        candidates = self.build_host_candidates(user)
         last_ip = ""
         for host in candidates:
             if not host:
@@ -4401,7 +4441,7 @@ $items = foreach ($u in $users) {{
                 return True, host, ip, self.detect_os_type_from_host(host)
             if ip:
                 last_ip = ip
-        fallback_host = candidates[0] if candidates else user.get("pc_name", "")
+        fallback_host = candidates[0] if candidates else ""
         return False, fallback_host, last_ip, "unknown"
 
     def _update_btn_style(self, pc, ok, os_type="unknown"):
@@ -4836,7 +4876,9 @@ $items = foreach ($u in $users) {{
                 for item in recent:
                     result_status = str(item.get("status") or "unknown")
                     computers = ", ".join(
-                        computer.get("hostname", "") for computer in item.get("computers", []) if computer.get("hostname")
+                        computer.get("hostname", "")
+                        for computer in item.get("computers", [])
+                        if computer.get("hostname") and not is_remote_access_hostname(computer.get("hostname"))
                     ) or "—"
                     detail = item.get("error") or item.get("glpi_name") or ""
                     checked_at = str(item.get("checked_at") or "")
@@ -4910,7 +4952,11 @@ $items = foreach ($u in $users) {{
         users_by_row = {}
         for user, recommendation in rows:
             record = recommendation.get("record") or {}
-            hosts = ", ".join(item.get("hostname", "") for item in record.get("computers", [])) or "—"
+            hosts = ", ".join(
+                item.get("hostname", "")
+                for item in record.get("computers", [])
+                if item.get("hostname") and not is_remote_access_hostname(item.get("hostname"))
+            ) or "—"
             row_id = tree.insert("", "end", values=(
                 user.get("name", ""),
                 recommendation.get("login", ""),
@@ -6663,18 +6709,18 @@ class UserButton(ttk.Frame):
         location = (self.user.get("location") or "").strip()
         label = self._status_label() if self.show_status else ""
         label_prefix = f"{label} " if label else ""
-        pc_line = f"({pc_label})"
+        pc_line = f"\n({pc_label})" if pc_label else ""
 
         if ext:
             contact = f"{ext} -- {location}" if location else ext
             header = f"{label_prefix}• 📞 {contact}" if label_prefix else f"📞 {contact}"
-            base = f"{header}\n{self.user['name']}\n{pc_line}"
+            base = f"{header}\n{self.user['name']}{pc_line}"
         elif location:
             header = f"{label_prefix}📍 {location}"
-            base = f"{header}\n{self.user['name']}\n{pc_line}"
+            base = f"{header}\n{self.user['name']}{pc_line}"
         else:
             header = f"{label_prefix}{self.user['name']}"
-            base = f"{header}\n{pc_line}"
+            base = f"{header}{pc_line}"
 
         if not self.caller_info:
             return base

@@ -1,6 +1,6 @@
 'use strict';
 
-const COLLECT_TIMEOUT_MS = 12000;
+const COLLECT_TIMEOUT_MS = 8000;
 const DEFAULTS = { enabled: true, bridgeUrl: 'http://127.0.0.1:8766', token: '' };
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

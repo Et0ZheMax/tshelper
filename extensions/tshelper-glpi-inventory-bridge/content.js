@@ -1,9 +1,12 @@
 'use strict';
 
 (() => {
-  const PARSER_VERSION = '0.1.1';
+  const PARSER_VERSION = '0.1.2';
   const POLL_MS = 3000;
   const IDLE_POLL_MS = 5000;
+  const REQUEST_TIMEOUT_MS = 7000;
+  const RENDERED_EMPTY_READY_MS = 4000;
+  const USER_VERIFY_CONCURRENCY = 5;
   if (window.__TSHELPER_GLPI_INVENTORY_BRIDGE__) return;
   window.__TSHELPER_GLPI_INVENTORY_BRIDGE__ = PARSER_VERSION;
   const renderedPageStartedAt = Date.now();
@@ -28,7 +31,7 @@
       usedTab.dataset.tshelperInventoryClicked = '1';
       try { usedTab.click(); } catch (_) {}
     }
-    sendResponse({ ready: Date.now() - renderedPageStartedAt > 6500, computers: [] });
+    sendResponse({ ready: Date.now() - renderedPageStartedAt > RENDERED_EMPTY_READY_MS, computers: [] });
   });
 
   if (new URLSearchParams(location.search).get('tshelper_inventory_helper') === '1') return;
@@ -75,8 +78,11 @@
 
       await reportProgress(job, 'Чтение оборудования', `User #${user.id}: ${user.name || user.login}`);
       const rows = await loadUsedComputers(user.id);
-      if (!rows.length) {
-        await reportProgress(job, 'Оборудование не найдено', `User #${user.id}: нет прямых Computer`);
+      const actionableRows = rows.filter((item) => !isRemoteAccessHostname(item.name));
+      if (!actionableRows.length) {
+        const remoteCount = rows.length - actionableRows.length;
+        const detail = remoteCount ? `; исключено удалённых lr-/wr-: ${remoteCount}` : '';
+        await reportProgress(job, 'Оборудование не найдено', `User #${user.id}: нет рабочих Computer${detail}`);
         return {
           ...base,
           status: 'no_computers',
@@ -85,8 +91,19 @@
           glpi_name: user.name || ''
         };
       }
-      await reportProgress(job, 'Чтение карточек Computer', `Найдено компьютеров: ${rows.length}`);
-      const computers = await mapWithConcurrency(rows, 3, enrichComputer);
+      await reportProgress(job, 'Чтение карточек Computer', `Рабочих компьютеров: ${actionableRows.length}`);
+      const computers = (await mapWithConcurrency(actionableRows, 3, enrichComputer))
+        .filter((item) => !isRemoteAccessHostname(item.hostname));
+      if (!computers.length) {
+        await reportProgress(job, 'Оборудование не найдено', 'После чтения карточек остались только lr-/wr-');
+        return {
+          ...base,
+          status: 'no_computers',
+          resolution: 'exact-login',
+          glpi_user_id: user.id,
+          glpi_name: user.name || ''
+        };
+      }
       await reportProgress(job, 'Готово', computers.map((item) => item.hostname).filter(Boolean).join(', '));
       return {
         ...base,
@@ -118,27 +135,37 @@
 
     let candidates = [];
     try {
-      const descriptor = await loadUserSearchDescriptor();
-      candidates = await searchUsers(wanted, descriptor);
+      candidates = await searchUsersViaHtml(wanted);
     } catch (error) {
       if (error instanceof SessionRequiredError) throw error;
-      console.debug('[TSHelper Inventory] AJAX-поиск User недоступен, использую HTML fallback:', error);
-      await reportProgress(job, 'HTML fallback поиска', String(error?.message || error));
+      console.debug('[TSHelper Inventory] HTML-поиск User недоступен:', error);
+      await reportProgress(job, 'Резервный AJAX-поиск', String(error?.message || error));
     }
     if (!candidates.length) {
-      candidates = await searchUsersViaHtml(wanted);
+      await reportProgress(job, 'Резервный AJAX-поиск', `HTML-поиск не нашёл login ${wanted}`);
+    }
+    try {
+      if (!candidates.length) {
+        const descriptor = await loadUserSearchDescriptor();
+        candidates = await searchUsers(wanted, descriptor);
+      }
+    } catch (error) {
+      if (error instanceof SessionRequiredError) throw error;
+      console.debug('[TSHelper Inventory] Резервный AJAX-поиск User недоступен:', error);
+      await reportProgress(job, 'Резервный поиск недоступен', String(error?.message || error));
     }
     await reportProgress(job, 'Проверка login кандидатов', `Кандидатов User: ${candidates.length}`);
-    const verified = [];
-    for (const candidate of candidates.slice(0, 25)) {
+    const checked = await mapWithConcurrency(candidates.slice(0, 25), USER_VERIFY_CONCURRENCY, async (candidate) => {
       try {
         const identity = await fetchUserIdentity(candidate.id);
-        if (normalizeLogin(identity.login) === wanted) verified.push(identity);
+        return normalizeLogin(identity.login) === wanted ? identity : null;
       } catch (error) {
         if (error instanceof SessionRequiredError) throw error;
         console.debug('[TSHelper Inventory] Не удалось проверить User', candidate.id, error);
+        return null;
       }
-    }
+    });
+    const verified = checked.filter(Boolean);
     if (verified.length === 1) return verified[0];
     if (verified.length > 1) return { ambiguous: true };
     return null;
@@ -152,7 +179,7 @@
     const candidates = [];
     const seen = new Set();
     for (const url of urls) {
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
       });
       const html = await response.text();
@@ -204,7 +231,7 @@
   }
 
   async function loadUserSearchDescriptor() {
-    const response = await fetch('/front/ticket.form.php', {
+    const response = await fetchWithTimeout('/front/ticket.form.php', {
       credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
     });
     const html = await response.text();
@@ -239,7 +266,7 @@
       item: descriptor.item, returned_itemtypes: ['User'], page: 1
     };
     Object.entries(payload).forEach(([key, value]) => appendFormValue(body, key, value));
-    const response = await fetch('/ajax/actors.php', {
+    const response = await fetchWithTimeout('/ajax/actors.php', {
       method: 'POST', credentials: 'same-origin', cache: 'no-store',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -279,7 +306,7 @@
 
   async function loadUsedComputers(userId) {
     const userPageUrl = `/front/user.form.php?id=${encodeURIComponent(userId)}&forcetab=${encodeURIComponent('User$1')}`;
-    const response = await fetch(userPageUrl, {
+    const response = await fetchWithTimeout(userPageUrl, {
       credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
     });
     const html = await response.text();
@@ -299,7 +326,7 @@
       tabUrl = `/ajax/common.tabs.php?${params}`;
     }
     try {
-      const tabResponse = await fetch(new URL(tabUrl, location.origin), {
+      const tabResponse = await fetchWithTimeout(new URL(tabUrl, location.origin), {
         credentials: 'same-origin', cache: 'no-store', redirect: 'follow',
         headers: { 'X-Requested-With': 'XMLHttpRequest' }
       });
@@ -384,7 +411,7 @@
 
   async function fetchFormDocument(itemtype, id) {
     const path = itemtype === 'User' ? '/front/user.form.php' : '/front/computer.form.php';
-    const response = await fetch(`${path}?id=${encodeURIComponent(id)}&forcetab=${encodeURIComponent(`${itemtype}$main`)}`, {
+    const response = await fetchWithTimeout(`${path}?id=${encodeURIComponent(id)}&forcetab=${encodeURIComponent(`${itemtype}$main`)}`, {
       credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
     });
     const html = await response.text();
@@ -399,7 +426,7 @@
       }) || shellDoc.querySelector('a[data-glpi-ajax-content]');
       const ajaxUrl = mainTab?.getAttribute('data-glpi-ajax-content');
       if (ajaxUrl) {
-        const tabResponse = await fetch(new URL(ajaxUrl, location.origin), {
+        const tabResponse = await fetchWithTimeout(new URL(ajaxUrl, location.origin), {
           credentials: 'same-origin', cache: 'no-store', redirect: 'follow',
           headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
@@ -436,7 +463,7 @@
       const url = link.getAttribute('data-glpi-ajax-content') || link.getAttribute('href');
       if (!url) continue;
       try {
-        const response = await fetch(new URL(url, location.origin), {
+        const response = await fetchWithTimeout(new URL(url, location.origin), {
           credentials: 'same-origin', cache: 'no-store',
           headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
@@ -469,6 +496,26 @@
     if (/(windows|microsoft|win 10|win 11)/i.test(text)) return 'windows';
     if (/(linux|ubuntu|debian|astra|centos|fedora)/i.test(text)) return 'linux';
     return 'unknown';
+  }
+
+  function isRemoteAccessHostname(value) {
+    const shortName = String(value || '').trim().split('.', 1)[0].toLowerCase();
+    return shortName.startsWith('lr-') || shortName.startsWith('wr-');
+  }
+
+  async function fetchWithTimeout(resource, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(resource, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`GLPI не ответил за ${Math.round(timeoutMs / 1000)} сек.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   function normalizeLogin(value) {

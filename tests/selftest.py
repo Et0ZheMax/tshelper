@@ -18,6 +18,8 @@ from tshelper import app as mod  # noqa: E402
 from tshelper.glpi_inventory import (  # noqa: E402
     InventoryBridgeState,
     apply_recommendation,
+    is_remote_access_hostname,
+    login_from_hostname,
     recommend_inventory_update,
 )
 from tshelper.browser_integration import BrowserIntegrationServer  # noqa: E402
@@ -57,6 +59,38 @@ def test_release_version_comparison():
     assert not mod.is_newer_release('v5.9', 'v5.9.2')
     assert not mod.is_newer_release('v5.9.2', '5.9.2')
     assert not mod.is_newer_release('неизвестно', 'v5.9.2')
+
+
+def test_manual_update_check_feedback():
+    window = mod.MainWindow.__new__(mod.MainWindow)
+    window._update_check_running = True
+    window._update_prompted_version = ''
+    window._schedule_next_update_check = lambda: None
+    offered = []
+    window._offer_update = lambda release: offered.append(release.tag)
+    notices = []
+    errors = []
+    original_showinfo = mod.messagebox.showinfo
+    original_showerror = mod.messagebox.showerror
+    try:
+        mod.messagebox.showinfo = lambda title, message: notices.append((title, message))
+        mod.messagebox.showerror = lambda title, message: errors.append((title, message))
+        current_release = types.SimpleNamespace(tag=mod.VERSION, version=mod.VERSION.lstrip('v'))
+        window._finish_update_check(current_release, None, manual=True)
+        assert notices and 'актуальная версия' in notices[-1][1]
+
+        newer_release = types.SimpleNamespace(tag='v99.0.0', version='99.0.0')
+        window._finish_update_check(newer_release, None, manual=True)
+        assert_eq(offered, ['v99.0.0'], 'manual update check offers newer release')
+
+        window._finish_update_check(None, 'network unavailable', manual=True)
+        assert errors and 'network unavailable' in errors[-1][1]
+    finally:
+        mod.messagebox.showinfo = original_showinfo
+        mod.messagebox.showerror = original_showerror
+
+    app_source = (Path(ROOT) / 'src' / 'tshelper' / 'app.py').read_text(encoding='utf-8')
+    assert 'label="Проверить обновления", command=self.check_for_updates' in app_source
 
 
 def test_secure_portable_update_contract():
@@ -321,6 +355,8 @@ def test_multi_pc_os_cache_and_merge():
         assert_eq(app.resolve_os_types_for_user({'pc_name': 'l-test', 'pc_options': ['w-test']}), ['linux', 'windows'], 'dual OS badges')
         assert_eq(app.build_host_candidates({'pc_name': 'l-test', 'pc_options': []})[0], 'l-test', 'selected host has priority')
         assert_eq(app.build_host_candidates({'pc_name': 'w-test', '_strict_host': True}), ['w-test'], 'actions use exact selected host')
+        assert_eq(mod.user_pc_names({'pc_name': 'wr-test', 'pc_options': ['lr-test', 'w-test']}), ['w-test'], 'remote PCs are hidden')
+        assert_eq(app.build_host_candidates({'pc_name': 'wr-test', 'pc_options': ['lr-test']}), [], 'remote PCs have no actions')
 
         existing = {'name': 'Тест', 'pc_name': 'l-test', 'pc_options': [], 'ext': '4443', 'location': 'Щ5-104'}
         incoming = {
@@ -345,6 +381,10 @@ def test_multi_pc_os_cache_and_merge():
 
 
 def test_glpi_inventory_queue_and_safe_reconciliation():
+    assert is_remote_access_hostname('LR-test.example.local')
+    assert is_remote_access_hostname('wr-test')
+    assert not is_remote_access_hostname('w-test')
+    assert_eq(login_from_hostname('wr-test'), 'test', 'remote prefix login normalization')
     user = {
         'name': 'Тест', 'ad_login': 'test', 'pc_name': 'w-test',
         'pc_options': ['l-test', 'w-shared'], 'ext': '4443'
@@ -365,6 +405,14 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
     updated = apply_recommendation(user, recommendation)
     assert_eq(updated['pc_source'], 'glpi_html', 'reconciled source is stored')
     assert_eq(updated['glpi_user_id'], 42, 'GLPI identity is stored')
+
+    remote_record = dict(record)
+    remote_record['computers'] = record['computers'] + [{
+        'asset_id': 103, 'hostname': 'wr-test', 'os_family': 'windows', 'is_active': True
+    }]
+    remote_recommendation = recommend_inventory_update(user, remote_record)
+    assert remote_recommendation['safe'], 'remote PC must not make reconciliation ambiguous'
+    assert_eq(remote_recommendation['new_main'], 'l-test', 'remote PC is ignored by reconciliation')
 
     ambiguous = dict(record)
     ambiguous['computers'] = record['computers'] + [{
@@ -389,10 +437,16 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         completed = state.complete({
             'job_id': first_id, 'login': 'test', 'status': 'ok',
             'resolution': 'exact-login', 'glpi_user_id': 42,
-            'computers': [{
-                'itemtype': 'Computer', 'id': 101, 'name': 'l-test',
-                'os': 'Astra Linux', 'status': 'В работе', 'relation': 'Пользователь'
-            }]
+            'computers': [
+                {
+                    'itemtype': 'Computer', 'id': 101, 'name': 'l-test',
+                    'os': 'Astra Linux', 'status': 'В работе', 'relation': 'Пользователь'
+                },
+                {
+                    'itemtype': 'Computer', 'id': 102, 'name': 'wr-test',
+                    'os': 'Windows 11', 'status': 'В работе', 'relation': 'Пользователь'
+                },
+            ]
         })
         assert completed['ok']
         assert_eq(state.hosts_for_login('test'), ['l-test'], 'inventory host cache')
@@ -459,10 +513,13 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     manifest = json.loads((extension_dir / 'manifest.json').read_text(encoding='utf-8'))
     assert '/front/user.php?is_deleted=0' in content, 'HTML User search fallback missing'
     assert '/front/search.php?globalsearch=' in content, 'global HTML search fallback missing'
-    assert 'fetchUserIdentity(candidate.id)' in content, 'exact login verification missing'
+    assert 'mapWithConcurrency(candidates.slice(0, 25), USER_VERIFY_CONCURRENCY' in content, 'parallel exact login verification missing'
+    assert 'fetchWithTimeout' in content, 'GLPI request timeout missing'
+    assert 'isRemoteAccessHostname' in content, 'remote PC filtering missing'
+    assert content.index('searchUsersViaHtml(wanted)') < content.index('loadUserSearchDescriptor()'), 'HTML search must run before AJAX fallback'
     assert 'TSH_INVENTORY_REPORT_PROGRESS' in content, 'content progress reporting missing'
     assert '/inventory/jobs/progress' in background, 'background progress bridge missing'
-    assert_eq(manifest['version'], '0.1.1', 'inventory extension patch version')
+    assert_eq(manifest['version'], '0.1.2', 'inventory extension patch version')
 
 
 def test_card_contact_line_with_location():
@@ -473,6 +530,7 @@ def test_card_contact_line_with_location():
     button.status_key = 'online'
     text = button._compose_text('w-vazaryan')
     assert '4443 -- Щ5-104' in text
+    assert '()' not in button._compose_text(''), 'empty remote-only PC must not leave empty brackets'
 
 
 def test_batched_settings_and_glpi_timeout():
@@ -677,6 +735,7 @@ if __name__ == '__main__':
         test_normalize_phone,
         test_canonical_pc_key,
         test_release_version_comparison,
+        test_manual_update_check_feedback,
         test_secure_portable_update_contract,
         test_noisy_powershell_json_and_paged_ad_search,
         test_os_specific_context_actions,

@@ -39,6 +39,7 @@ INACTIVE_STATUS_MARKERS = (
     "неактив",
     "inactive",
 )
+REMOTE_ACCESS_PREFIXES = ("lr-", "wr-")
 
 
 def utc_now_iso() -> str:
@@ -57,7 +58,7 @@ def login_from_hostname(value: str) -> str:
     if not hostname:
         return ""
     short = hostname.split(".", 1)[0]
-    return normalize_login(re.sub(r"^(?:ws|lt|w|l)-", "", short, flags=re.IGNORECASE))
+    return normalize_login(re.sub(r"^(?:ws|lt|wr|lr|w|l)-", "", short, flags=re.IGNORECASE))
 
 
 def login_from_user(user: dict) -> str:
@@ -69,6 +70,12 @@ def login_from_user(user: dict) -> str:
 
 def host_identity(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "").strip().casefold())
+
+
+def is_remote_access_hostname(value: str) -> bool:
+    """Проверить hostname удалённого рабочего места, не управляемого TSHelper."""
+    short_name = str(value or "").strip().split(".", 1)[0].casefold()
+    return short_name.startswith(REMOTE_ACCESS_PREFIXES)
 
 
 def os_family_from_text(value: str) -> str:
@@ -103,7 +110,7 @@ def normalize_computers(items) -> list[dict]:
         except (TypeError, ValueError):
             asset_id = 0
         hostname = _valid_hostname(raw.get("hostname") or raw.get("name"))
-        if asset_id <= 0 or not hostname:
+        if asset_id <= 0 or not hostname or is_remote_access_hostname(hostname):
             continue
         key = asset_id
         if key in seen:
@@ -166,7 +173,11 @@ def normalize_inventory_result(payload: dict, job: dict) -> dict:
 
 
 def active_computers(record: dict) -> list[dict]:
-    return [item for item in record.get("computers", []) if item.get("is_active", True)]
+    return [
+        item
+        for item in record.get("computers", [])
+        if item.get("is_active", True) and not is_remote_access_hostname(item.get("hostname", ""))
+    ]
 
 
 def recommend_inventory_update(user: dict, record: dict | None) -> dict:
@@ -210,7 +221,7 @@ def recommend_inventory_update(user: dict, record: dict | None) -> dict:
     seen = {target_key}
     for old_host in [current_main, *current_options]:
         old_key = host_identity(old_host)
-        if not old_key or old_key in seen:
+        if not old_key or old_key in seen or is_remote_access_hostname(old_host):
             continue
         # w-login/l-login от AD были только догадками. Если GLPI подтвердил один
         # Computer, противоположный префикс с тем же login не является вторым ПК.
@@ -240,7 +251,11 @@ def apply_recommendation(user: dict, recommendation: dict) -> dict:
     updated["pc_source"] = "glpi_html"
     updated["glpi_user_id"] = int(record.get("glpi_user_id") or 0)
     updated["glpi_checked_at"] = record.get("checked_at", "")
-    updated["glpi_computers"] = deepcopy(record.get("computers") or [])
+    updated["glpi_computers"] = deepcopy([
+        item
+        for item in record.get("computers", [])
+        if not is_remote_access_hostname(item.get("hostname", ""))
+    ])
     return updated
 
 
@@ -320,7 +335,7 @@ class InventoryBridgeState:
             "current_hosts": [
                 str(value).strip()
                 for value in [user.get("pc_name", ""), *(user.get("pc_options") or [])]
-                if str(value).strip()
+                if str(value).strip() and not is_remote_access_hostname(value)
             ],
             "reason": str(reason or "manual")[:50],
             "priority": int(priority),
@@ -564,6 +579,8 @@ class InventoryBridgeState:
         return [item["hostname"] for item in active_computers(record) if item.get("hostname")]
 
     def os_for_host(self, hostname: str) -> str:
+        if is_remote_access_hostname(hostname):
+            return "unknown"
         wanted = host_identity(hostname)
         if not wanted:
             return "unknown"
