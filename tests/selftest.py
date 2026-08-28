@@ -380,6 +380,12 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         assert_eq(state.enqueue(user, 'ping_failed', priority=100), first_id, 'queue deduplicates login')
         job = state.next_job()['job']
         assert_eq(job['id'], first_id, 'queued job can be claimed')
+        state.progress({
+            'job_id': first_id, 'login': 'test',
+            'stage': 'Проверка login', 'message': 'User #42'
+        })
+        live_status = state.status()
+        assert_eq(live_status['current_job']['progress_stage'], 'Проверка login', 'live inventory stage')
         completed = state.complete({
             'job_id': first_id, 'login': 'test', 'status': 'ok',
             'resolution': 'exact-login', 'glpi_user_id': 42,
@@ -391,6 +397,7 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         assert completed['ok']
         assert_eq(state.hosts_for_login('test'), ['l-test'], 'inventory host cache')
         assert_eq(state.os_for_host('l-test'), 'linux', 'inventory OS cache')
+        assert_eq(state.status()['processed'], 1, 'completed inventory progress count')
         reloaded = InventoryBridgeState(state_path)
         assert_eq(reloaded.record_for_login('test')['glpi_user_id'], 42, 'inventory cache persists')
 
@@ -404,6 +411,7 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         session_status = reloaded.status()
         assert_eq(session_status['pending'], 1, 'expired GLPI session keeps job queued')
         assert session_status['paused_seconds'] > 0
+        assert_eq(reloaded.queue_info_for_login('session-test')['position'], 1, 'pending queue position')
         assert_eq(reloaded.next_job()['job'], None, 'expired GLPI session pauses whole queue')
 
 
@@ -418,6 +426,7 @@ def test_browser_bridge_inventory_routes_and_legacy_open_user():
         open_user_callback=lambda payload: {'ok': payload.get('login') == 'test'},
         inventory_next_callback=lambda: {'ok': True, 'job': {'id': 'job-1', 'login': 'test'}},
         inventory_result_callback=lambda payload: received.append(payload) or {'ok': True},
+        inventory_progress_callback=lambda payload: received.append(payload) or {'ok': True},
         inventory_status_callback=lambda: {'ok': True, 'pending': 1},
     )
     server.start()
@@ -434,11 +443,26 @@ def test_browser_bridge_inventory_routes_and_legacy_open_user():
         assert_eq(call('/health')['bridge'], '1.1', 'browser bridge protocol version')
         assert_eq(call('/inventory/jobs/next')['job']['id'], 'job-1', 'inventory job route')
         assert_eq(call('/inventory/status')['pending'], 1, 'inventory status route')
+        assert call('/inventory/jobs/progress', {'job_id': 'job-1', 'stage': 'search'})['ok']
         assert call('/inventory/jobs/result', {'job_id': 'job-1', 'status': 'ok'})['ok']
-        assert_eq(received[0]['job_id'], 'job-1', 'inventory result callback')
+        assert_eq(received[0]['stage'], 'search', 'inventory progress callback')
+        assert_eq(received[1]['job_id'], 'job-1', 'inventory result callback')
         assert call('/open-user', {'login': 'test'})['ok']
     finally:
         server.stop()
+
+
+def test_glpi_inventory_extension_fallback_and_progress_contract():
+    extension_dir = Path(ROOT) / 'extensions' / 'tshelper-glpi-inventory-bridge'
+    content = (extension_dir / 'content.js').read_text(encoding='utf-8')
+    background = (extension_dir / 'background.js').read_text(encoding='utf-8')
+    manifest = json.loads((extension_dir / 'manifest.json').read_text(encoding='utf-8'))
+    assert '/front/user.php?is_deleted=0' in content, 'HTML User search fallback missing'
+    assert '/front/search.php?globalsearch=' in content, 'global HTML search fallback missing'
+    assert 'fetchUserIdentity(candidate.id)' in content, 'exact login verification missing'
+    assert 'TSH_INVENTORY_REPORT_PROGRESS' in content, 'content progress reporting missing'
+    assert '/inventory/jobs/progress' in background, 'background progress bridge missing'
+    assert_eq(manifest['version'], '0.1.1', 'inventory extension patch version')
 
 
 def test_card_contact_line_with_location():
@@ -659,6 +683,7 @@ if __name__ == '__main__':
         test_multi_pc_os_cache_and_merge,
         test_glpi_inventory_queue_and_safe_reconciliation,
         test_browser_bridge_inventory_routes_and_legacy_open_user,
+        test_glpi_inventory_extension_fallback_and_progress_contract,
         test_card_contact_line_with_location,
         test_batched_settings_and_glpi_timeout,
         test_incremental_card_sync_and_deferred_ad_lookup,

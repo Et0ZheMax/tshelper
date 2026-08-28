@@ -250,6 +250,7 @@ class InventoryBridgeState:
     def __init__(self, path: str | os.PathLike):
         self.path = Path(path)
         self._lock = threading.RLock()
+        self._last_poll_at = 0.0
         self._state = self._load()
 
     def _empty_state(self) -> dict:
@@ -327,6 +328,9 @@ class InventoryBridgeState:
             "created_at": time.time(),
             "claimed_at": 0,
             "attempts": 0,
+            "progress_stage": "Ожидает",
+            "progress_message": "",
+            "progress_at": "",
         }
 
     def enqueue(self, user: dict, reason: str, *, priority: int = 0, force: bool = False) -> str:
@@ -341,8 +345,16 @@ class InventoryBridgeState:
                     existing["reason"] = str(reason or existing.get("reason") or "manual")[:50]
                     self._save_locked()
                 return str(existing.get("id") or "")
+            if existing and existing.get("status") == "running":
+                existing["priority"] = max(int(existing.get("priority") or 0), int(priority))
+                existing["reason"] = str(reason or existing.get("reason") or "manual")[:50]
+                self._state["pause_until"] = 0
+                self._save_locked()
+                return str(existing.get("id") or "")
             if existing:
                 self._state["jobs"].remove(existing)
+            if force:
+                self._state["pause_until"] = 0
             job = self._job_payload(user, reason, priority)
             self._state["jobs"].append(job)
             self._save_locked()
@@ -394,6 +406,7 @@ class InventoryBridgeState:
 
     def next_job(self) -> dict:
         with self._lock:
+            self._last_poll_at = time.time()
             self._requeue_expired_locked()
             if time.time() < float(self._state.get("pause_until") or 0):
                 return {"ok": True, "job": None}
@@ -407,6 +420,9 @@ class InventoryBridgeState:
             job["status"] = "running"
             job["claimed_at"] = time.time()
             job["attempts"] = int(job.get("attempts") or 0) + 1
+            job["progress_stage"] = "Задание получено расширением"
+            job["progress_message"] = ""
+            job["progress_at"] = utc_now_iso()
             self._save_locked()
             public = {key: deepcopy(value) for key, value in job.items() if key not in {"status", "claimed_at", "attempts", "priority"}}
             return {"ok": True, "job": public}
@@ -420,6 +436,10 @@ class InventoryBridgeState:
             if not job:
                 raise KeyError("Задание не найдено или уже завершено")
             record = normalize_inventory_result(payload, job)
+            record["name"] = str(job.get("name") or "")[:300]
+            record["reason"] = str(job.get("reason") or "")[:50]
+            record["attempts"] = int(job.get("attempts") or 0)
+            record["duration_sec"] = max(0, round(time.time() - float(job.get("claimed_at") or time.time()), 1))
             self._state["records"][job["login"]] = record
             if record["status"] == "session_required":
                 job["status"] = "pending"
@@ -432,16 +452,68 @@ class InventoryBridgeState:
             self._save_locked()
             return {"ok": True, "job": deepcopy(job), "record": deepcopy(record)}
 
+    def progress(self, payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            raise ValueError("Прогресс GLPI Inventory должен быть JSON-объектом")
+        job_id = str(payload.get("job_id") or "").strip()
+        if not job_id:
+            raise ValueError("Не указан job_id")
+        with self._lock:
+            job = next((item for item in self._state["jobs"] if item.get("id") == job_id), None)
+            if not job:
+                raise KeyError("Задание не найдено или уже завершено")
+            login = normalize_login(payload.get("login", ""))
+            if login and login != job.get("login"):
+                raise ValueError("Расширение передало прогресс для другого login")
+            job["progress_stage"] = str(payload.get("stage") or "Обработка").strip()[:120]
+            job["progress_message"] = str(payload.get("message") or "").strip()[:500]
+            job["parser_version"] = str(payload.get("parser_version") or "").strip()[:50]
+            job["progress_at"] = str(payload.get("updated_at") or utc_now_iso()).strip()[:80]
+            return {"ok": True}
+
     def status(self) -> dict:
         with self._lock:
             self._requeue_expired_locked()
             pending = sum(job.get("status") == "pending" for job in self._state["jobs"])
             running = sum(job.get("status") == "running" for job in self._state["jobs"])
+            job_logins = {normalize_login(job.get("login", "")) for job in self._state["jobs"]}
+            completed_records = [
+                deepcopy(record)
+                for login, record in self._state["records"].items()
+                if normalize_login(login) not in job_logins and isinstance(record, dict)
+            ]
+            completed_records.sort(key=lambda record: str(record.get("checked_at") or ""), reverse=True)
+            current = next((job for job in self._state["jobs"] if job.get("status") == "running"), None)
+            current_job = None
+            if current:
+                current_job = {
+                    key: deepcopy(current.get(key))
+                    for key in (
+                        "id", "login", "name", "reason", "current_hosts", "attempts",
+                        "progress_stage", "progress_message", "progress_at", "claimed_at",
+                        "parser_version",
+                    )
+                }
+            status_counts = {}
+            for record in completed_records:
+                key = str(record.get("status") or "unknown")
+                status_counts[key] = status_counts.get(key, 0) + 1
+            all_logins = job_logins | {normalize_login(login) for login in self._state["records"]}
             return {
                 "ok": True,
                 "pending": pending,
                 "running": running,
                 "records": len(self._state["records"]),
+                "total": len(all_logins),
+                "processed": len(completed_records),
+                "current_job": current_job,
+                "recent_results": completed_records[:100],
+                "status_counts": status_counts,
+                "last_poll_age_sec": (
+                    max(0, round(time.time() - self._last_poll_at, 1))
+                    if self._last_poll_at
+                    else None
+                ),
                 "paused_seconds": max(0, round(float(self._state.get("pause_until") or 0) - time.time())),
                 "stats": deepcopy(self._state["stats"]),
             }
@@ -450,6 +522,24 @@ class InventoryBridgeState:
         with self._lock:
             record = self._state["records"].get(normalize_login(login))
             return deepcopy(record) if isinstance(record, dict) else None
+
+    def queue_info_for_login(self, login: str) -> dict | None:
+        wanted = normalize_login(login)
+        if not wanted:
+            return None
+        with self._lock:
+            job = next((item for item in self._state["jobs"] if item.get("login") == wanted), None)
+            if not job:
+                return None
+            result = deepcopy(job)
+            if job.get("status") == "pending":
+                pending = [item for item in self._state["jobs"] if item.get("status") == "pending"]
+                pending.sort(key=lambda item: (-int(item.get("priority") or 0), float(item.get("created_at") or 0)))
+                result["position"] = next(
+                    (index for index, item in enumerate(pending, start=1) if item.get("id") == job.get("id")),
+                    0,
+                )
+            return result
 
     def records(self) -> dict:
         with self._lock:

@@ -21,7 +21,7 @@ MAX_ARCHIVE_SIZE = 300 * 1024 * 1024
 MAX_EXTRACTED_SIZE = 1024 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 20_000
 
-MANAGED_DIRECTORIES = ("src", "apps", "assets", "config", "scripts")
+MANAGED_DIRECTORIES = ("src", "apps", "assets", "config", "scripts", "extensions")
 MANAGED_FILES = (
     "README.md",
     "CHANGELOG.md",

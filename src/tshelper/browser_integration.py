@@ -42,6 +42,7 @@ class BrowserIntegrationServer:
         open_user_callback: Callable[[dict], dict],
         inventory_next_callback: Optional[Callable[[], dict]] = None,
         inventory_result_callback: Optional[Callable[[dict], dict]] = None,
+        inventory_progress_callback: Optional[Callable[[dict], dict]] = None,
         inventory_status_callback: Optional[Callable[[], dict]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -55,6 +56,7 @@ class BrowserIntegrationServer:
         self.open_user_callback = open_user_callback
         self.inventory_next_callback = inventory_next_callback
         self.inventory_result_callback = inventory_result_callback
+        self.inventory_progress_callback = inventory_progress_callback
         self.inventory_status_callback = inventory_status_callback
         self.log_callback = log_callback or (lambda _message: None)
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -156,7 +158,7 @@ class BrowserIntegrationServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 path = urlsplit(self.path).path.rstrip("/") or "/"
-                if path not in {"/open-user", "/inventory/jobs/result"}:
+                if path not in {"/open-user", "/inventory/jobs/result", "/inventory/jobs/progress"}:
                     self._send_json(404, {"ok": False, "error": "Маршрут не найден"})
                     return
                 if not self._origin_is_allowed():
@@ -185,8 +187,12 @@ class BrowserIntegrationServer:
                     self._send_json(400, {"ok": False, "error": "Ожидался JSON-объект"})
                     return
 
-                if path == "/inventory/jobs/result":
-                    callback = integration.inventory_result_callback
+                if path in {"/inventory/jobs/result", "/inventory/jobs/progress"}:
+                    callback = (
+                        integration.inventory_result_callback
+                        if path == "/inventory/jobs/result"
+                        else integration.inventory_progress_callback
+                    )
                     if callback is None:
                         self._send_json(404, {"ok": False, "error": "GLPI Inventory bridge отключён"})
                         return

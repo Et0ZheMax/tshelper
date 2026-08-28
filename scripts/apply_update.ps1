@@ -10,7 +10,7 @@
 
 $ErrorActionPreference = "Stop"
 $managedPaths = @(
-    "src", "apps", "assets", "config", "scripts",
+    "src", "apps", "assets", "config", "scripts", "extensions",
     "README.md", "CHANGELOG.md", "SECURITY.md", "requirements.txt",
     "pyproject.toml", "run_tshelper.bat"
 )

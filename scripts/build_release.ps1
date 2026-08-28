@@ -18,7 +18,10 @@ if (-not $outputRoot.StartsWith($expectedRoot, [System.StringComparison]::Ordina
 $packageName = "TSHelper-v$version"
 $stage = Join-Path $outputRoot $packageName
 $archive = Join-Path $outputRoot "$packageName-portable.zip"
-$extensionArchive = Join-Path $outputRoot "TSHelper-GLPI-Inventory-Bridge-v0.1.0.zip"
+$extensionManifestPath = Join-Path $repositoryRoot "extensions\tshelper-glpi-inventory-bridge\manifest.json"
+$extensionVersion = (Get-Content -Raw -LiteralPath $extensionManifestPath | ConvertFrom-Json).version
+if (-not $extensionVersion) { throw "Не удалось определить версию GLPI Inventory Bridge" }
+$extensionArchive = Join-Path $outputRoot "TSHelper-GLPI-Inventory-Bridge-v$extensionVersion.zip"
 
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }

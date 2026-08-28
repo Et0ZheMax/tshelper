@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const PARSER_VERSION = '0.1.0';
+  const PARSER_VERSION = '0.1.1';
   const POLL_MS = 3000;
   const IDLE_POLL_MS = 5000;
   if (window.__TSHELPER_GLPI_INVENTORY_BRIDGE__) return;
@@ -62,12 +62,21 @@
       computers: []
     };
     try {
+      await reportProgress(job, 'Поиск пользователя', `Ищу точный login ${base.login}`);
       const user = await resolveExactUser(job);
-      if (!user) return { ...base, status: 'not_found', resolution: 'exact-login' };
-      if (user.ambiguous) return { ...base, status: 'ambiguous', resolution: 'exact-login' };
+      if (!user) {
+        await reportProgress(job, 'Пользователь не найден', `Точный login ${base.login} не подтверждён`);
+        return { ...base, status: 'not_found', resolution: 'exact-login' };
+      }
+      if (user.ambiguous) {
+        await reportProgress(job, 'Неоднозначный результат', 'Найдено несколько User с одинаковым login');
+        return { ...base, status: 'ambiguous', resolution: 'exact-login' };
+      }
 
+      await reportProgress(job, 'Чтение оборудования', `User #${user.id}: ${user.name || user.login}`);
       const rows = await loadUsedComputers(user.id);
       if (!rows.length) {
+        await reportProgress(job, 'Оборудование не найдено', `User #${user.id}: нет прямых Computer`);
         return {
           ...base,
           status: 'no_computers',
@@ -76,7 +85,9 @@
           glpi_name: user.name || ''
         };
       }
+      await reportProgress(job, 'Чтение карточек Computer', `Найдено компьютеров: ${rows.length}`);
       const computers = await mapWithConcurrency(rows, 3, enrichComputer);
+      await reportProgress(job, 'Готово', computers.map((item) => item.hostname).filter(Boolean).join(', '));
       return {
         ...base,
         status: 'ok',
@@ -87,6 +98,7 @@
       };
     } catch (error) {
       const sessionRequired = error instanceof SessionRequiredError;
+      await reportProgress(job, sessionRequired ? 'Требуется вход в GLPI' : 'Ошибка', String(error?.message || error));
       return {
         ...base,
         status: sessionRequired ? 'session_required' : 'error',
@@ -99,14 +111,26 @@
     const wanted = normalizeLogin(job.login);
     const knownId = Number(job.glpi_user_id) || 0;
     if (knownId) {
+      await reportProgress(job, 'Проверка сохранённого User ID', `User #${knownId}`);
       const known = await fetchUserIdentity(knownId);
       if (normalizeLogin(known.login) === wanted) return known;
     }
 
-    const descriptor = await loadUserSearchDescriptor();
-    const candidates = await searchUsers(wanted, descriptor);
+    let candidates = [];
+    try {
+      const descriptor = await loadUserSearchDescriptor();
+      candidates = await searchUsers(wanted, descriptor);
+    } catch (error) {
+      if (error instanceof SessionRequiredError) throw error;
+      console.debug('[TSHelper Inventory] AJAX-поиск User недоступен, использую HTML fallback:', error);
+      await reportProgress(job, 'HTML fallback поиска', String(error?.message || error));
+    }
+    if (!candidates.length) {
+      candidates = await searchUsersViaHtml(wanted);
+    }
+    await reportProgress(job, 'Проверка login кандидатов', `Кандидатов User: ${candidates.length}`);
     const verified = [];
-    for (const candidate of candidates.slice(0, 10)) {
+    for (const candidate of candidates.slice(0, 25)) {
       try {
         const identity = await fetchUserIdentity(candidate.id);
         if (normalizeLogin(identity.login) === wanted) verified.push(identity);
@@ -118,6 +142,55 @@
     if (verified.length === 1) return verified[0];
     if (verified.length > 1) return { ambiguous: true };
     return null;
+  }
+
+  async function searchUsersViaHtml(query) {
+    const urls = [
+      `/front/user.php?is_deleted=0&as_map=0&browse=0&criteria[0][link]=AND&criteria[0][field]=1&criteria[0][searchtype]=contains&criteria[0][value]=${encodeURIComponent(query)}&search=Search`,
+      `/front/search.php?globalsearch=${encodeURIComponent(query)}`
+    ];
+    const candidates = [];
+    const seen = new Set();
+    for (const url of urls) {
+      const response = await fetch(url, {
+        credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
+      });
+      const html = await response.text();
+      ensureSession(response, html);
+      if (!response.ok) continue;
+      const doc = parseHtml(html);
+      for (const anchor of doc.querySelectorAll('a[href*="user.form.php"][href*="id="]')) {
+        let id = 0;
+        try { id = Number(new URL(anchor.href, location.origin).searchParams.get('id')) || 0; } catch (_) {}
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        candidates.push({
+          id,
+          name: String(anchor.textContent || '').replace(/\s+/g, ' ').trim(),
+          source: 'html-search'
+        });
+      }
+      if (candidates.length) break;
+    }
+    return candidates;
+  }
+
+  async function reportProgress(job, stage, message = '') {
+    try {
+      return await chrome.runtime.sendMessage({
+        type: 'TSH_INVENTORY_REPORT_PROGRESS',
+        payload: {
+          job_id: job.id,
+          login: normalizeLogin(job.login),
+          stage: String(stage || 'Обработка'),
+          message: String(message || ''),
+          parser_version: PARSER_VERSION,
+          updated_at: new Date().toISOString()
+        }
+      });
+    } catch (_) {
+      return null;
+    }
   }
 
   async function fetchUserIdentity(userId) {

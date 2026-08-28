@@ -29,6 +29,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
+  if (message?.type === 'TSH_INVENTORY_REPORT_PROGRESS') {
+    respondAsync(sendResponse, async () => {
+      const config = await chrome.storage.local.get(DEFAULTS);
+      if (!config.enabled || !config.token) return { ok: false, error: 'Расширение или токен TSHelper отключены' };
+      return bridgeRequest(config, '/inventory/jobs/progress', {
+        method: 'POST', body: JSON.stringify(message.payload || {})
+      });
+    });
+    return true;
+  }
 });
 
 function respondAsync(sendResponse, operation) {

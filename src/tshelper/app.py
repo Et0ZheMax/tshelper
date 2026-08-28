@@ -1713,6 +1713,7 @@ class MainWindow:
         self.users = UserManager(USERS_FILE)
         self.glpi_inventory = InventoryBridgeState(GLPI_INVENTORY_STATE_FILE)
         self._glpi_inventory_auto_backup_created = False
+        self._glpi_inventory_monitor_window = None
         self._glpi_ping_pending = {}
         self._glpi_ping_flush_job = None
         self.ping_max_workers = max(2, min(32, int(self.settings.get_setting("ping_max_workers", 8) or 8)))
@@ -3000,7 +3001,7 @@ $items = foreach ($u in $users) {{
         toolsm.add_separator()
         toolsm.add_command(label="GLPI Inventory: сверить всех (dry-run)", command=self.enqueue_full_glpi_inventory_scan)
         toolsm.add_command(label="GLPI Inventory: результаты сверки", command=self.show_glpi_inventory_report)
-        toolsm.add_command(label="GLPI Inventory: статус очереди", command=self.show_glpi_inventory_status)
+        toolsm.add_command(label="GLPI Inventory: живой монитор", command=self.show_glpi_inventory_status)
         menubar.add_cascade(label="Инструменты", menu=toolsm)
         self.master.config(menu=menubar)
 
@@ -4634,12 +4635,11 @@ $items = foreach ($u in $users) {{
         users = [dict(user) for user in self.users.get_users()]
         added = self.glpi_inventory.enqueue_many(users, "full_sync", priority=10, force=True)
         status = self.glpi_inventory.status()
-        messagebox.showinfo(
+        self.show_toast(
             "GLPI Inventory",
-            f"Поставлено в очередь: {added}.\nВсего ожидает: {status['pending'] + status['running']}.\n\n"
-            "Откройте GLPI в браузере, войдите в систему и оставьте вкладку открытой. "
-            "Это dry-run: карточки автоматически не меняются.",
+            f"Поставлено в очередь: {added}; всего ожидает: {status['pending'] + status['running']}",
         )
+        self.show_glpi_inventory_monitor()
 
     def _handle_glpi_inventory_completed(self, job: dict, record: dict):
         login = login_from_user({"ad_login": record.get("login", "")})
@@ -4690,16 +4690,180 @@ $items = foreach ($u in $users) {{
         return {"ok": True}
 
     def show_glpi_inventory_status(self):
-        status = self.glpi_inventory.status()
-        messagebox.showinfo(
-            "GLPI Inventory",
-            f"Ожидает: {status['pending']}\n"
-            f"Обрабатывается: {status['running']}\n"
-            f"Результатов в кэше: {status['records']}\n"
-            f"Пауза из-за сессии: {status.get('paused_seconds', 0)} сек.\n"
-            f"Завершено: {status['stats'].get('completed', 0)}\n"
-            f"Ошибок/нет сессии: {status['stats'].get('failed', 0)}",
-        )
+        self.show_glpi_inventory_monitor()
+
+    def retry_glpi_inventory_errors(self, *, parent=None):
+        records = self.glpi_inventory.records()
+        error_logins = {
+            login
+            for login, record in records.items()
+            if record.get("status") in {"error", "session_required"}
+        }
+        users = [user for user in self.users.get_users() if login_from_user(user) in error_logins]
+        if not users:
+            return messagebox.showinfo("GLPI Inventory", "Ошибок для повторной проверки нет.", parent=parent)
+        added = self.glpi_inventory.enqueue_many(users, "retry_error", priority=900, force=True)
+        self.show_toast("GLPI Inventory", f"Повторно поставлено в очередь: {added}")
+
+    def show_glpi_inventory_monitor(self):
+        existing = self._glpi_inventory_monitor_window
+        if existing and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            return
+
+        win = tk.Toplevel(self.master)
+        self._glpi_inventory_monitor_window = win
+        win.title("GLPI Inventory — живой монитор")
+        win.geometry("1120x650+170+90")
+        win.minsize(900, 520)
+
+        header = ttk.Frame(win, padding=(12, 10))
+        header.pack(fill="x")
+        summary_var = tk.StringVar(value="Загрузка состояния…")
+        connection_var = tk.StringVar(value="Расширение: ожидание первого запроса")
+        ttk.Label(header, textvariable=summary_var, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(header, textvariable=connection_var).pack(anchor="w", pady=(3, 0))
+        progress = ttk.Progressbar(header, mode="determinate", maximum=1)
+        progress.pack(fill="x", pady=(8, 0))
+
+        current_frame = ttk.LabelFrame(win, text="Сейчас проверяется", padding=10)
+        current_frame.pack(fill="x", padx=12, pady=(0, 8))
+        current_user_var = tk.StringVar(value="Очередь ожидает расширение")
+        current_stage_var = tk.StringVar(value="")
+        ttk.Label(current_frame, textvariable=current_user_var, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(current_frame, textvariable=current_stage_var, wraplength=1050).pack(anchor="w", pady=(3, 0))
+
+        table_frame = ttk.Frame(win, padding=(12, 0))
+        table_frame.pack(fill="both", expand=True)
+        columns = ("time", "login", "name", "status", "computers", "details")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings")
+        headings = {
+            "time": "Время", "login": "Login", "name": "Пользователь",
+            "status": "Результат", "computers": "Компьютеры", "details": "Подробности",
+        }
+        widths = {"time": 75, "login": 125, "name": 220, "status": 150, "computers": 190, "details": 320}
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], anchor="w")
+        tree.tag_configure("ok", foreground="#15803d")
+        tree.tag_configure("error", foreground="#b91c1c")
+        tree.tag_configure("warning", foreground="#a16207")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        footer = ttk.Frame(win, padding=12)
+        footer.pack(fill="x")
+        ttk.Button(footer, text="Сверить всех заново", command=self.enqueue_full_glpi_inventory_scan).pack(side="left")
+        ttk.Button(
+            footer,
+            text="Повторить ошибки",
+            command=lambda: self.retry_glpi_inventory_errors(parent=win),
+        ).pack(side="left", padx=6)
+        ttk.Button(footer, text="Открыть полный отчёт", command=self.show_glpi_inventory_report).pack(side="left")
+        close_button = ttk.Button(footer, text="Закрыть", command=win.destroy)
+        close_button.pack(side="right")
+
+        refresh_job = {"id": None}
+        last_signature = {"value": None}
+        status_labels = {
+            "ok": "Найден",
+            "not_found": "User не найден",
+            "ambiguous": "Неоднозначно",
+            "no_computers": "Нет Computer",
+            "session_required": "Нужен вход GLPI",
+            "error": "Ошибка",
+        }
+
+        def refresh_monitor():
+            if not win.winfo_exists():
+                return
+            status = self.glpi_inventory.status()
+            total = max(1, int(status.get("total") or 0))
+            processed = int(status.get("processed") or 0)
+            counts = status.get("status_counts") or {}
+            progress.configure(maximum=total, value=min(total, processed))
+            summary_var.set(
+                f"Обработано: {processed}/{int(status.get('total') or 0)}   "
+                f"Ожидает: {status['pending']}   Успешно: {counts.get('ok', 0)}   "
+                f"Без ПК: {counts.get('no_computers', 0)}   Не найдено: {counts.get('not_found', 0)}   "
+                f"Ошибки: {counts.get('error', 0)}"
+            )
+            poll_age = status.get("last_poll_age_sec")
+            paused = int(status.get("paused_seconds") or 0)
+            if poll_age is None:
+                connection_text = "Расширение: ещё не обращалось к TSHelper"
+            elif poll_age <= 12:
+                connection_text = f"Расширение на связи · последний запрос {poll_age:g} сек. назад"
+            else:
+                connection_text = f"Расширение не отвечает · последний запрос {poll_age:g} сек. назад"
+            if paused:
+                connection_text += f" · пауза после потери сессии: {paused} сек."
+            parser_version = ""
+            current = status.get("current_job") or {}
+            if current:
+                parser_version = str(current.get("parser_version") or "")
+            if not parser_version and status.get("recent_results"):
+                parser_version = str(status["recent_results"][0].get("parser_version") or "")
+            if parser_version:
+                connection_text += f" · parser {parser_version}"
+            connection_var.set(connection_text)
+
+            if current:
+                current_user_var.set(
+                    f"{current.get('name') or 'Без имени'} · {current.get('login') or '?'} · "
+                    f"попытка {current.get('attempts') or 1}"
+                )
+                stage = current.get("progress_stage") or "Обработка"
+                message = current.get("progress_message") or ""
+                current_stage_var.set(f"{stage}{': ' + message if message else ''}")
+            else:
+                current_user_var.set("Сейчас активного задания нет")
+                current_stage_var.set("Откройте авторизованную вкладку GLPI и оставьте её открытой.")
+
+            recent = status.get("recent_results") or []
+            signature = tuple(
+                (item.get("login"), item.get("checked_at"), item.get("status"), item.get("error"))
+                for item in recent
+            )
+            if signature != last_signature["value"]:
+                last_signature["value"] = signature
+                existing_rows = tree.get_children()
+                if existing_rows:
+                    tree.delete(*existing_rows)
+                for item in recent:
+                    result_status = str(item.get("status") or "unknown")
+                    computers = ", ".join(
+                        computer.get("hostname", "") for computer in item.get("computers", []) if computer.get("hostname")
+                    ) or "—"
+                    detail = item.get("error") or item.get("glpi_name") or ""
+                    checked_at = str(item.get("checked_at") or "")
+                    display_time = checked_at[11:19] if len(checked_at) >= 19 else checked_at
+                    tag = "ok" if result_status == "ok" else "error" if result_status == "error" else "warning"
+                    tree.insert("", "end", values=(
+                        display_time,
+                        item.get("login", ""),
+                        item.get("name", ""),
+                        status_labels.get(result_status, result_status),
+                        computers,
+                        detail,
+                    ), tags=(tag,))
+            refresh_job["id"] = win.after(700, refresh_monitor)
+
+        def close_monitor():
+            if refresh_job["id"]:
+                try:
+                    win.after_cancel(refresh_job["id"])
+                except Exception:
+                    pass
+            self._glpi_inventory_monitor_window = None
+            win.destroy()
+
+        close_button.configure(command=close_monitor)
+        win.protocol("WM_DELETE_WINDOW", close_monitor)
+        refresh_monitor()
 
     def show_glpi_inventory_report(self):
         rows = []
@@ -4707,6 +4871,18 @@ $items = foreach ($u in $users) {{
             login = login_from_user(user)
             record = self.glpi_inventory.record_for_login(login)
             recommendation = recommend_inventory_update(user, record)
+            queued = self.glpi_inventory.queue_info_for_login(login)
+            if queued:
+                if queued.get("status") == "running":
+                    stage = queued.get("progress_stage") or "обработка"
+                    recommendation["reason"] = f"Сейчас проверяется: {stage}"
+                else:
+                    position = int(queued.get("position") or 0)
+                    recommendation["reason"] = (
+                        f"Ожидает проверки, позиция в очереди: {position}"
+                        if position
+                        else "Ожидает проверки"
+                    )
             rows.append((user, recommendation))
 
         win = tk.Toplevel(self.master)
@@ -4731,22 +4907,37 @@ $items = foreach ($u in $users) {{
         scrollbar.pack(side="left", fill="y", pady=10)
 
         safe_changes = []
+        users_by_row = {}
         for user, recommendation in rows:
             record = recommendation.get("record") or {}
             hosts = ", ".join(item.get("hostname", "") for item in record.get("computers", [])) or "—"
-            tree.insert("", "end", values=(
+            row_id = tree.insert("", "end", values=(
                 user.get("name", ""),
                 recommendation.get("login", ""),
                 user.get("pc_name", ""),
                 hosts,
                 recommendation.get("reason", ""),
             ))
+            users_by_row[row_id] = user
             if recommendation.get("safe") and recommendation.get("changed"):
                 safe_changes.append((user, recommendation))
 
         controls = ttk.Frame(win, padding=(8, 10))
         controls.pack(side="right", fill="y")
         ttk.Label(controls, text=f"Безопасных изменений: {len(safe_changes)}", wraplength=220).pack(anchor="w", pady=(0, 10))
+
+        def retry_selected_user():
+            selected = tree.selection()
+            if not selected:
+                return messagebox.showinfo("GLPI Inventory", "Сначала выберите пользователя в таблице.", parent=win)
+            user = users_by_row.get(selected[0])
+            if not user:
+                return
+            job_id = self.glpi_inventory.enqueue(user, "manual_priority", priority=1000, force=True)
+            if not job_id:
+                return messagebox.showerror("GLPI Inventory", "Не удалось определить login пользователя.", parent=win)
+            self.show_toast("GLPI Inventory", f"{user.get('name', '')}: приоритетная проверка поставлена в очередь")
+            self.show_glpi_inventory_monitor()
 
         def apply_safe_changes():
             if not safe_changes:
@@ -4775,6 +4966,7 @@ $items = foreach ($u in $users) {{
             win.destroy()
             messagebox.showinfo("GLPI Inventory", f"Применено: {changed}.\nРезервная копия: {backup}")
 
+        ttk.Button(controls, text="Проверить выбранного сейчас", command=retry_selected_user).pack(fill="x", pady=(0, 8))
         ttk.Button(controls, text="Применить безопасные", command=apply_safe_changes).pack(fill="x")
         ttk.Button(controls, text="Закрыть", command=win.destroy).pack(fill="x", pady=(8, 0))
 
@@ -5609,6 +5801,7 @@ $items = foreach ($u in $users) {{
                 open_user_callback=self._handle_browser_open_user_request,
                 inventory_next_callback=self.glpi_inventory.next_job,
                 inventory_result_callback=self._handle_glpi_inventory_result,
+                inventory_progress_callback=self.glpi_inventory.progress,
                 inventory_status_callback=self.glpi_inventory.status,
                 log_callback=log_message,
             )
