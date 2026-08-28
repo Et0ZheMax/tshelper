@@ -1776,6 +1776,8 @@ class MainWindow:
         self.buttons = {}
         self.user_widgets = {}
         self._search_cache = {}
+        self._search_entries = []
+        self._users_by_pc_cache = {}
         self._grid_positions = {}
         self.orphan_widgets = []
         self.empty_state_label = None
@@ -2519,6 +2521,8 @@ class MainWindow:
         pcs = user_pc_names(user)
         if len(pcs) <= 1:
             return self.get_display_pc_name(pcs[0]) if pcs else ""
+        if len(pcs) > 2:
+            return f"{pcs[0]} · ещё {len(pcs) - 1} ПК"
         return " · ".join(pcs)
 
     def get_display_pc_name(self, pc_name: str) -> str:
@@ -3721,7 +3725,7 @@ $items = foreach ($u in $users) {{
         cols = self._compute_cols()
         if cols != self._last_cols:
             self._last_cols = cols
-            self.refresh_current_view()  # перестраиваем сетку только при реальном изменении числа колонок
+            self.refresh_current_view(sync_users=False)  # данные карточек уже синхронизированы
 
 
 
@@ -3934,25 +3938,24 @@ $items = foreach ($u in $users) {{
     def _get_filtered_users(self, text=None):
         if text is None:
             text = self.search_entry.get().casefold().strip() if getattr(self, "search_entry", None) else ""
-        all_users = self.users.get_users()
+        entries = self._search_entries
+        if not entries:
+            users = sorted(self.users.get_users(), key=lambda user: locale.strxfrm(user["name"]))
+            entries = [
+                (
+                    user,
+                    "\n".join([
+                        str(user.get("name", "")),
+                        *user_pc_names(user),
+                        str(user.get("ext", "")),
+                        str(user.get("location", "")),
+                    ]).casefold(),
+                )
+                for user in users
+            ]
         if not text:
-            return all_users
-        result = []
-        for user in all_users:
-            pc_key = self.canonical_pc_key(user.get("pc_name", ""))
-            cached = self._search_cache.get(pc_key)
-            if cached:
-                blob = cached[1]
-            else:
-                blob = "\n".join([
-                    str(user.get("name", "")),
-                    *user_pc_names(user),
-                    str(user.get("ext", "")),
-                    str(user.get("location", "")),
-                ]).casefold()
-            if text in blob:
-                result.append(user)
-        return result
+            return [user for user, _blob in entries]
+        return [user for user, blob in entries if text in blob]
 
     def _sync_user_widgets(self):
         users = self.users.get_users()
@@ -3961,6 +3964,7 @@ $items = foreach ($u in $users) {{
             for u in users
             if self.canonical_pc_key(u.get("pc_name", ""))
         }
+        self._users_by_pc_cache = users_by_pc
 
         # миграция старых/сырых ключей к canonical виду
         migrated = {}
@@ -3997,7 +4001,14 @@ $items = foreach ($u in $users) {{
         for pc_key, user in users_by_pc.items():
             widget = self.user_widgets.get(pc_key)
             if widget is None:
-                widget = UserButton(self.inner, user, app=self, style_name="User.TButton", caller=None, show_status=False)
+                widget = UserButton(
+                    self.inner,
+                    user,
+                    app=self,
+                    style_name="User.TButton",
+                    caller=None,
+                    show_status=bool(getattr(self, "_cw_render_state", {}).get("show_status")),
+                )
                 self.user_widgets[pc_key] = widget
             else:
                 widget.sync_user(user)
@@ -4013,15 +4024,22 @@ $items = foreach ($u in $users) {{
                 ]).casefold()
                 self._search_cache[pc_key] = (search_signature, search_blob)
 
+        self._search_entries = []
+        for user in sorted(users_by_pc.values(), key=lambda item: locale.strxfrm(item["name"])):
+            pc_key = self.canonical_pc_key(user.get("pc_name", ""))
+            cached = self._search_cache.get(pc_key)
+            if cached:
+                self._search_entries.append((user, cached[1]))
+
     def get_visible_users(self, search_text: str):
-        all_users = self.users.get_users()
-        users_by_pc = {
-            self.canonical_pc_key(u.get("pc_name", "")): u
-            for u in all_users
-            if self.canonical_pc_key(u.get("pc_name", ""))
-        }
-        filtered_users = self._get_filtered_users(search_text)
-        filtered_sorted = sorted(filtered_users, key=lambda u: locale.strxfrm(u["name"]))
+        users_by_pc = self._users_by_pc_cache
+        if not users_by_pc:
+            users_by_pc = {
+                self.canonical_pc_key(u.get("pc_name", "")): u
+                for u in self.users.get_users()
+                if self.canonical_pc_key(u.get("pc_name", ""))
+            }
+        filtered_sorted = self._get_filtered_users(search_text)
 
         with self.calls_lock:
             now = time.time()
@@ -4316,11 +4334,11 @@ $items = foreach ($u in $users) {{
         }
         return view_state["filtered_sorted"]
 
-    def refresh_current_view(self):
+    def refresh_current_view(self, sync_users=True):
         if not getattr(self, "search_entry", None):
             self.populate_buttons()
             return
-        self._do_search()
+        self._do_search(sync_users=sync_users)
 
     def _schedule_call_ui_refresh(self, reason=""):
         self._cw_ui_refresh_pending = True
@@ -4365,13 +4383,20 @@ $items = foreach ($u in $users) {{
     # --------- Поиск ----------
     def update_search(self, _=None):
         if self.search_job: self.master.after_cancel(self.search_job)
-        self.search_job = self.master.after(250, self._do_search)
+        self.search_job = self.master.after(120, self._do_search)
 
-    def _do_search(self):
+    def _do_search(self, sync_users=False):
         text = self.search_entry.get().casefold().strip()
         show_status = len(text) >= 3
         self._cw_last_signature = None
-        filtered = self.populate_buttons(show_status=show_status, search_text=text)
+        if sync_users:
+            self._sync_user_widgets()
+        prev_state = self._cw_render_state or {}
+        next_state = self._compute_view_state(text, show_status=show_status)
+        if prev_state.get("show_status") != show_status:
+            self._apply_status_visibility(show_status)
+        self._apply_call_state_delta(prev_state, next_state)
+        filtered = next_state["filtered_sorted"]
         if show_status:
             self.ping_generation += 1
             gen = self.ping_generation
@@ -7098,7 +7123,7 @@ class UserButton(ttk.Frame):
                 switch_menu.add_cascade(label=f"{os_label} · {pc}", menu=host_menu)
             m.add_separator()
             m.add_cascade(
-                label="⇄  ВЫБРАТЬ ДРУГОЙ ПК — ТОЛЬКО НА ЭТО ДЕЙСТВИЕ",
+                label="⇄  ДЕЙСТВИЯ С ДРУГИМ ПК",
                 menu=switch_menu,
             )
             try:
