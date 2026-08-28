@@ -18,7 +18,9 @@ from tshelper import app as mod  # noqa: E402
 from tshelper.glpi_inventory import (  # noqa: E402
     InventoryBridgeState,
     JOB_LEASE_SECONDS,
+    apply_inventory_computers,
     apply_recommendation,
+    choose_primary_computer,
     is_remote_access_hostname,
     login_from_hostname,
     recommend_inventory_update,
@@ -381,6 +383,10 @@ def test_multi_pc_os_cache_and_merge():
         assert_eq(app.build_host_candidates({'pc_name': 'w-test', '_strict_host': True}), ['w-test'], 'actions use exact selected host')
         assert_eq(mod.user_pc_names({'pc_name': 'wr-test', 'pc_options': ['lr-test', 'w-test']}), ['w-test'], 'remote PCs are hidden')
         assert_eq(app.build_host_candidates({'pc_name': 'wr-test', 'pc_options': ['lr-test']}), [], 'remote PCs have no actions')
+        assert mod.needs_primary_pc_confirmation({'pc_name': 'w-test', 'pc_options': ['l-test']})
+        assert not mod.needs_primary_pc_confirmation({
+            'pc_name': 'w-test', 'pc_options': ['l-test'], 'pc_primary_confirmed': True
+        })
 
         existing = {'name': 'Тест', 'pc_name': 'l-test', 'pc_options': [], 'ext': '4443', 'location': 'Щ5-104'}
         incoming = {
@@ -447,6 +453,26 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         'asset_id': 102, 'hostname': 'w-test2', 'os_family': 'windows', 'is_active': True
     }]
     assert not recommend_inventory_update(user, ambiguous)['safe']
+
+    multi_user = dict(user, pc_name='l-test', pc_options=['w-old-guess'])
+    imported = apply_inventory_computers(multi_user, ambiguous)
+    assert_eq(imported['pc_name'], 'l-test', 'existing GLPI host is retained as provisional primary')
+    assert_eq(imported['pc_options'], ['w-test2'], 'all active GLPI computers replace old guesses')
+    assert not imported['pc_primary_confirmed'], 'multiple computers require first-use confirmation'
+    selected = choose_primary_computer(imported, 'W-TEST2')
+    assert_eq(selected['pc_name'], 'w-test2', 'manual primary selection is case-insensitive')
+    assert_eq(selected['pc_options'], ['l-test'], 'temporary alternatives remain in the card')
+    assert selected['pc_primary_confirmed'], 'manual primary selection is persisted'
+    try:
+        choose_primary_computer(imported, 'w-missing')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('unknown primary computer must be rejected')
+
+    app_source = open(os.path.join(ROOT, 'src', 'tshelper', 'app.py'), encoding='utf-8').read()
+    assert 'Внести все ПК в карточки' in app_source, 'multiple-PC report action missing'
+    assert 'ТОЛЬКО НА ЭТО ДЕЙСТВИЕ' in app_source, 'temporary computer switch is not highlighted'
 
     with tempfile.TemporaryDirectory() as td:
         state_path = os.path.join(td, 'inventory.json')

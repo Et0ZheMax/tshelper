@@ -264,6 +264,81 @@ def apply_recommendation(user: dict, recommendation: dict) -> dict:
     return updated
 
 
+def apply_inventory_computers(user: dict, record: dict | None) -> dict:
+    """Сохранить в карточке все активные ПК из точного результата GLPI.
+
+    Для нескольких ПК выбранный ранее основной сохраняется, если он всё ещё
+    присутствует в GLPI. До первого явного выбора карточка помечается как
+    требующая подтверждения основного компьютера.
+    """
+    updated = dict(user)
+    login = login_from_user(user)
+    if (
+        not record
+        or normalize_login(record.get("login", "")) != login
+        or record.get("status") != "ok"
+        or record.get("resolution") != "exact-login"
+    ):
+        return updated
+
+    computers = active_computers(record)
+    hosts = []
+    hosts_by_key = {}
+    for item in computers:
+        hostname = str(item.get("hostname") or "").strip()
+        key = host_identity(hostname)
+        if not key or key in hosts_by_key:
+            continue
+        hosts_by_key[key] = hostname
+        hosts.append(hostname)
+    if not hosts:
+        return updated
+
+    current_main = str(user.get("pc_name") or "").strip()
+    current_key = host_identity(current_main)
+    primary = hosts_by_key.get(current_key, hosts[0])
+    updated["ad_login"] = login
+    updated["pc_name"] = primary
+    updated["pc_options"] = [host for host in hosts if host_identity(host) != host_identity(primary)]
+    updated["pc_primary_confirmed"] = (
+        True
+        if len(hosts) == 1
+        else bool(user.get("pc_primary_confirmed")) and current_key in hosts_by_key
+    )
+    updated["pc_source"] = "glpi_html"
+    updated["glpi_user_id"] = int(record.get("glpi_user_id") or 0)
+    updated["glpi_checked_at"] = record.get("checked_at", "")
+    updated["glpi_computers"] = deepcopy([
+        item
+        for item in record.get("computers", [])
+        if not is_remote_access_hostname(item.get("hostname", ""))
+    ])
+    return updated
+
+
+def choose_primary_computer(user: dict, primary_hostname: str) -> dict:
+    """Закрепить один из сохранённых ПК как основной, не теряя остальные."""
+    requested_key = host_identity(primary_hostname)
+    hosts = []
+    hosts_by_key = {}
+    for value in [user.get("pc_name", ""), *(user.get("pc_options") or [])]:
+        hostname = str(value or "").strip()
+        key = host_identity(hostname)
+        if not key or key in hosts_by_key or is_remote_access_hostname(hostname):
+            continue
+        hosts_by_key[key] = hostname
+        hosts.append(hostname)
+    if requested_key not in hosts_by_key:
+        raise ValueError("Выбранный компьютер отсутствует в карточке пользователя")
+
+    primary = hosts_by_key[requested_key]
+    updated = dict(user)
+    updated["pc_name"] = primary
+    updated["pc_options"] = [host for host in hosts if host_identity(host) != requested_key]
+    updated["pc_primary_confirmed"] = True
+    return updated
+
+
 class InventoryBridgeState:
     """Потокобезопасная персистентная очередь заданий для WebExtension."""
 

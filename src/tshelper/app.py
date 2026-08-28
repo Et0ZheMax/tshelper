@@ -11,7 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 from .browser_integration import BrowserIntegrationServer
 from .glpi_inventory import (
     InventoryBridgeState,
+    active_computers,
+    apply_inventory_computers,
     apply_recommendation,
+    choose_primary_computer,
     is_remote_access_hostname,
     login_from_hostname,
     login_from_user,
@@ -435,6 +438,11 @@ def user_pc_names(user: dict) -> list[str]:
         seen.add(key)
         result.append(name)
     return result
+
+
+def needs_primary_pc_confirmation(user: dict) -> bool:
+    """Нужно ли один раз спросить основной ПК перед показом действий."""
+    return len(user_pc_names(user)) > 1 and not bool(user.get("pc_primary_confirmed"))
 
 
 CONTEXT_COMMON_HOST_ACTIONS = ("rdp", "get_ip")
@@ -5006,6 +5014,20 @@ $items = foreach ($u in $users) {{
                 rows.append((user, recommendation))
             return rows
 
+        def collect_multiple_pc_rows():
+            rows = []
+            for user in self.users.get_users():
+                login = login_from_user(user)
+                record = self.glpi_inventory.record_for_login(login)
+                if (
+                    record
+                    and record.get("status") == "ok"
+                    and record.get("resolution") == "exact-login"
+                    and len(active_computers(record)) > 1
+                ):
+                    rows.append((user, record))
+            return rows
+
         win = tk.Toplevel(self.master)
         win.title("GLPI Inventory — результаты сверки")
         win.geometry("1100x620+180+100")
@@ -5033,6 +5055,8 @@ $items = foreach ($u in $users) {{
         controls.pack(side="right", fill="y")
         safe_count_var = tk.StringVar(value="Однозначных замен: 0")
         ttk.Label(controls, textvariable=safe_count_var, wraplength=220).pack(anchor="w", pady=(0, 4))
+        multiple_count_var = tk.StringVar(value="Карточек с несколькими ПК: 0")
+        ttk.Label(controls, textvariable=multiple_count_var, wraplength=220).pack(anchor="w", pady=(0, 4))
         ttk.Label(
             controls,
             text="Отчёт обновляется автоматически. Несколько активных ПК требуют ручного выбора.",
@@ -5092,6 +5116,52 @@ $items = foreach ($u in $users) {{
                 parent=win,
             )
 
+        def apply_multiple_pc_cards():
+            multiple_rows = collect_multiple_pc_rows()
+            if not multiple_rows:
+                return messagebox.showinfo(
+                    "GLPI Inventory",
+                    "Нет пользователей с несколькими активными ПК.",
+                    parent=win,
+                )
+            if not messagebox.askyesno(
+                "GLPI Inventory",
+                f"Внести все найденные ПК в {len(multiple_rows)} карточек?\n\n"
+                "При первом открытии такой карточки TSHelper попросит выбрать основной ПК. "
+                "Перед изменением будет создана резервная копия users.json.",
+                parent=win,
+            ):
+                return
+
+            backup = DATA_DIR / f"users_before_glpi_multiple_{datetime.datetime.now():%Y%m%d_%H%M%S}.json"
+            if os.path.exists(USERS_FILE):
+                shutil.copy2(USERS_FILE, backup)
+            records_by_login = {
+                login_from_user(user): record
+                for user, record in multiple_rows
+            }
+            changed = 0
+            updated_users = []
+            for current in self.users.get_users():
+                record = records_by_login.get(login_from_user(current))
+                if record:
+                    updated = apply_inventory_computers(current, record)
+                    if updated != current:
+                        changed += 1
+                    current = updated
+                updated_users.append(self.users._normalize_user(current))
+            self.users.users = updated_users
+            self.users.save()
+            self.populate_buttons()
+            refresh_report(force=True)
+            messagebox.showinfo(
+                "GLPI Inventory",
+                f"Карточек обновлено: {changed}.\n"
+                "Все активные ПК сохранены; основной будет запрошен при первом открытии карточки.\n"
+                f"Резервная копия: {backup}",
+                parent=win,
+            )
+
         ttk.Button(controls, text="Проверить выбранного сейчас", command=retry_selected_user).pack(fill="x", pady=(0, 8))
         apply_button = ttk.Button(
             controls,
@@ -5100,6 +5170,13 @@ $items = foreach ($u in $users) {{
             state="disabled",
         )
         apply_button.pack(fill="x")
+        multiple_button = ttk.Button(
+            controls,
+            text="Внести все ПК в карточки",
+            command=apply_multiple_pc_cards,
+            state="disabled",
+        )
+        multiple_button.pack(fill="x", pady=(8, 0))
         close_button = ttk.Button(controls, text="Закрыть")
         close_button.pack(fill="x", pady=(8, 0))
 
@@ -5147,7 +5224,7 @@ $items = foreach ($u in $users) {{
                     row_id = tree.insert("", "end", values=(
                         user.get("name", ""),
                         recommendation.get("login", ""),
-                        user.get("pc_name", ""),
+                        ", ".join(user_pc_names(user)) or "—",
                         hosts,
                         recommendation.get("reason", ""),
                     ))
@@ -5157,6 +5234,9 @@ $items = foreach ($u in $users) {{
                         safe_changes.append((user, recommendation))
                 safe_count_var.set(f"Однозначных замен: {len(safe_changes)}")
                 apply_button.configure(state="normal" if safe_changes else "disabled")
+                multiple_count = len(collect_multiple_pc_rows())
+                multiple_count_var.set(f"Карточек с несколькими ПК: {multiple_count}")
+                multiple_button.configure(state="normal" if multiple_count else "disabled")
                 if selected_login in row_for_login:
                     selected_row = row_for_login[selected_login]
                     tree.selection_set(selected_row)
@@ -6980,25 +7060,25 @@ class UserButton(ttk.Frame):
             self._update_os_badge(self.app.user_bg, self.app.user_fg)
 
     def _show_menu(self):
-        m = tk.Menu(self, tearoff=0)
+        self._action_pc_name = ""
         contexts = self.app.resolve_os_contexts_for_user(self.user)
         combine = bool(self.app.settings.get_setting("combine_context_functionality", False))
 
-        if len(contexts) > 1:
-            for pc, os_type in contexts:
-                host_menu = tk.Menu(m, tearoff=0)
-                self._add_host_actions(host_menu, pc, os_type, combine)
-                os_label = {"windows": "Windows", "linux": "Linux"}.get(os_type, "ОС не определена")
-                current = " · основной" if pc.casefold() == str(self.user.get("pc_name", "")).casefold() else ""
-                m.add_cascade(label=f"{os_label} · {pc}{current}", menu=host_menu)
+        if len(contexts) > 1 and needs_primary_pc_confirmation(self.user):
+            self._ask_primary_pc(contexts)
+            return
 
-            primary_menu = tk.Menu(m, tearoff=0)
-            for pc, _os_type in contexts:
-                label = pc
-                if pc.casefold() == str(self.user.get("pc_name", "")).casefold():
-                    label += " (текущий)"
-                primary_menu.add_command(label=label, command=lambda p=pc: self._switch_pc(p))
-            m.add_cascade(label="Сделать основным ПК", menu=primary_menu)
+        m = tk.Menu(self, tearoff=0)
+        if len(contexts) > 1:
+            main_name = str(self.user.get("pc_name", "") or "").casefold()
+            primary_pc, primary_os = next(
+                ((pc, os_type) for pc, os_type in contexts if pc.casefold() == main_name),
+                contexts[0],
+            )
+            os_label = {"windows": "Windows", "linux": "Linux"}.get(primary_os, "ОС не определена")
+            m.add_command(label=f"● {os_label} · {primary_pc} · ОСНОВНОЙ", state="disabled")
+            m.add_separator()
+            self._add_host_actions(m, primary_pc, primary_os, combine)
             m.add_separator()
         elif contexts:
             pc, os_type = contexts[0]
@@ -7006,8 +7086,95 @@ class UserButton(ttk.Frame):
             m.add_separator()
 
         self._add_identity_actions(m)
+        if len(contexts) > 1:
+            switch_menu = tk.Menu(m, tearoff=0)
+            main_name = str(self.user.get("pc_name", "") or "").casefold()
+            for pc, os_type in contexts:
+                if pc.casefold() == main_name:
+                    continue
+                host_menu = tk.Menu(switch_menu, tearoff=0)
+                self._add_host_actions(host_menu, pc, os_type, combine)
+                os_label = {"windows": "Windows", "linux": "Linux"}.get(os_type, "ОС не определена")
+                switch_menu.add_cascade(label=f"{os_label} · {pc}", menu=host_menu)
+            m.add_separator()
+            m.add_cascade(
+                label="⇄  ВЫБРАТЬ ДРУГОЙ ПК — ТОЛЬКО НА ЭТО ДЕЙСТВИЕ",
+                menu=switch_menu,
+            )
+            try:
+                switch_index = m.index("end")
+                m.entryconfigure(
+                    switch_index,
+                    background="#fff3bf",
+                    foreground="#8a4b08",
+                    activebackground="#ffd43b",
+                    activeforeground="#3d2600",
+                    font=("Segoe UI", 9, "bold"),
+                )
+            except tk.TclError:
+                pass
         x = self.winfo_rootx(); y = self.winfo_rooty()+self.winfo_height()
         m.post(x,y)
+
+    def _ask_primary_pc(self, contexts):
+        existing = getattr(self, "_primary_pc_dialog", None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        dialog = tk.Toplevel(self)
+        self._primary_pc_dialog = dialog
+        dialog.title("Выбор основного компьютера")
+        dialog.transient(self.app.master)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=f"{self.user.get('name', '')}\n\nКакой компьютер считать основным?",
+            font=("Segoe UI", 10, "bold"),
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+        ttk.Label(
+            body,
+            text="Этот выбор сохранится. Другой ПК всегда можно выбрать разово внизу меню карточки.",
+            wraplength=430,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        current = str(self.user.get("pc_name", "") or "")
+        selected_pc = tk.StringVar(value=current or contexts[0][0])
+        for pc, os_type in contexts:
+            os_label = {"windows": "Windows", "linux": "Linux"}.get(os_type, "ОС не определена")
+            ttk.Radiobutton(
+                body,
+                text=f"{pc}  —  {os_label}",
+                value=pc,
+                variable=selected_pc,
+            ).pack(anchor="w", pady=3)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(14, 0))
+
+        def close_dialog():
+            self._primary_pc_dialog = None
+            dialog.destroy()
+
+        def confirm():
+            choice = selected_pc.get().strip()
+            close_dialog()
+            self._switch_pc(choice, show_menu_after=True)
+
+        ttk.Button(buttons, text="Выбрать и открыть действия", command=confirm).pack(side="left")
+        ttk.Button(buttons, text="Отмена", command=close_dialog).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + self.winfo_height() + 6
+        dialog.geometry(f"+{x}+{y}")
 
     def _add_host_actions(self, menu, pc: str, os_type: str, combine: bool):
         allowed = set(context_action_ids(os_type, combine))
@@ -7066,21 +7233,24 @@ class UserButton(ttk.Frame):
     # … дальше методы действий без изменений (rdp_connect, remote_assistance, open_explorer, get_ip, reset_password_ps, open_ssh_connection)
 
 
-    def _switch_pc(self, pc):
-        if not pc or pc.lower() == self.user.get("pc_name", "").lower():
+    def _switch_pc(self, pc, show_menu_after=False):
+        if not pc:
             return
         old_pc = self.user.get("pc_name", "")
-        new_user = dict(self.user)
-        new_user["pc_name"] = pc
-        new_user["pc_options"] = self.app._merge_pc_options(pc, self.user.get("pc_options", []), [old_pc])
+        try:
+            new_user = choose_primary_computer(self.user, pc)
+        except ValueError as exc:
+            return messagebox.showerror("Выбор компьютера", str(exc), parent=self.app.master)
 
         self.app.users.update_user(old_pc, new_user)
         self.user.update(new_user)
-        self._action_pc_name = pc
+        self._action_pc_name = ""
         self._update_os_visual_by_type(self.app.resolve_os_type_for_host(pc))
         self.app.rebind_user_widget_key(old_pc, pc, self)
         self.app.refresh_current_view()
         log_action(f"Выбран основной ПК {self.user.get('name','?')}: {old_pc} -> {pc}")
+        if show_menu_after:
+            self.app.master.after(120, lambda: self._show_menu() if self.winfo_exists() else None)
 
 
     # --- Actions ---
