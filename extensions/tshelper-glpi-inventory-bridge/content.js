@@ -1,10 +1,12 @@
 'use strict';
 
 (() => {
-  const PARSER_VERSION = '0.1.2';
+  const PARSER_VERSION = '0.1.3';
   const POLL_MS = 3000;
   const IDLE_POLL_MS = 5000;
   const REQUEST_TIMEOUT_MS = 7000;
+  const MESSAGE_TIMEOUT_MS = 8000;
+  const JOB_TIMEOUT_MS = 35000;
   const RENDERED_EMPTY_READY_MS = 4000;
   const USER_VERIFY_CONCURRENCY = 5;
   if (window.__TSHELPER_GLPI_INVENTORY_BRIDGE__) return;
@@ -40,12 +42,30 @@
   async function pollLoop() {
     let delay = IDLE_POLL_MS;
     try {
-      const next = await chrome.runtime.sendMessage({ type: 'TSH_INVENTORY_NEXT_JOB' });
+      const next = await sendRuntimeMessageWithTimeout({ type: 'TSH_INVENTORY_NEXT_JOB' });
       if (!next?.ok) throw new Error(next?.error || 'Service worker не получил задание');
       if (next.job) {
         delay = POLL_MS;
-        const result = await processJob(next.job);
-        const submitted = await chrome.runtime.sendMessage({
+        let result;
+        try {
+          result = await withTimeout(
+            processJob(next.job),
+            JOB_TIMEOUT_MS,
+            `Проверка ${normalizeLogin(next.job.login)} превысила ${JOB_TIMEOUT_MS / 1000} сек.`
+          );
+        } catch (error) {
+          const errorMessage = String(error?.message || error);
+          await reportProgress(next.job, 'Таймаут карточки', errorMessage);
+          result = {
+            login: normalizeLogin(next.job.login),
+            checked_at: new Date().toISOString(),
+            parser_version: PARSER_VERSION,
+            computers: [],
+            status: 'error',
+            error: errorMessage.slice(0, 500)
+          };
+        }
+        const submitted = await sendRuntimeMessageWithTimeout({
           type: 'TSH_INVENTORY_SUBMIT_RESULT',
           payload: { job_id: next.job.id, ...result }
         });
@@ -179,10 +199,9 @@
     const candidates = [];
     const seen = new Set();
     for (const url of urls) {
-      const response = await fetchWithTimeout(url, {
+      const { response, text: html } = await fetchTextWithTimeout(url, {
         credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
       });
-      const html = await response.text();
       ensureSession(response, html);
       if (!response.ok) continue;
       const doc = parseHtml(html);
@@ -204,7 +223,7 @@
 
   async function reportProgress(job, stage, message = '') {
     try {
-      return await chrome.runtime.sendMessage({
+      return await sendRuntimeMessageWithTimeout({
         type: 'TSH_INVENTORY_REPORT_PROGRESS',
         payload: {
           job_id: job.id,
@@ -231,10 +250,9 @@
   }
 
   async function loadUserSearchDescriptor() {
-    const response = await fetchWithTimeout('/front/ticket.form.php', {
+    const { response, text: html } = await fetchTextWithTimeout('/front/ticket.form.php', {
       credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
     });
-    const html = await response.text();
     ensureSession(response, html);
     const doc = parseHtml(html);
     const requester = doc.querySelector('select[data-actor-type="requester"]');
@@ -266,7 +284,7 @@
       item: descriptor.item, returned_itemtypes: ['User'], page: 1
     };
     Object.entries(payload).forEach(([key, value]) => appendFormValue(body, key, value));
-    const response = await fetchWithTimeout('/ajax/actors.php', {
+    const { response, text } = await fetchTextWithTimeout('/ajax/actors.php', {
       method: 'POST', credentials: 'same-origin', cache: 'no-store',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -275,7 +293,6 @@
       },
       body: body.toString()
     });
-    const text = await response.text();
     ensureSession(response, text);
     if (!response.ok) throw new Error(`Поиск пользователя GLPI: HTTP ${response.status}`);
     let data;
@@ -306,10 +323,9 @@
 
   async function loadUsedComputers(userId) {
     const userPageUrl = `/front/user.form.php?id=${encodeURIComponent(userId)}&forcetab=${encodeURIComponent('User$1')}`;
-    const response = await fetchWithTimeout(userPageUrl, {
+    const { response, text: html } = await fetchTextWithTimeout(userPageUrl, {
       credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
     });
-    const html = await response.text();
     ensureSession(response, html);
     if (!response.ok) throw new Error(`User #${userId}: HTTP ${response.status}`);
     const doc = parseHtml(html);
@@ -326,11 +342,10 @@
       tabUrl = `/ajax/common.tabs.php?${params}`;
     }
     try {
-      const tabResponse = await fetchWithTimeout(new URL(tabUrl, location.origin), {
+      const { response: tabResponse, text: tabHtml } = await fetchTextWithTimeout(new URL(tabUrl, location.origin), {
         credentials: 'same-origin', cache: 'no-store', redirect: 'follow',
         headers: { 'X-Requested-With': 'XMLHttpRequest' }
       });
-      const tabHtml = await tabResponse.text();
       ensureSession(tabResponse, tabHtml);
       const parsed = parseComputerRows(parseHtml(tabHtml));
       if (parsed.length) return parsed;
@@ -376,17 +391,17 @@
     return result;
   }
 
-  function collectViaRenderedTab(userPageUrl, userId) {
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage({
+  async function collectViaRenderedTab(userPageUrl, userId) {
+    try {
+      const response = await sendRuntimeMessageWithTimeout({
         type: 'TSH_INVENTORY_COLLECT_RENDERED_TAB',
         userPageUrl: new URL(userPageUrl, location.origin).href,
         userId: Number(userId)
-      }, (response) => {
-        if (chrome.runtime.lastError || !response?.ok) return resolve([]);
-        resolve(Array.isArray(response.computers) ? response.computers : []);
       });
-    });
+      return response?.ok && Array.isArray(response.computers) ? response.computers : [];
+    } catch (_) {
+      return [];
+    }
   }
 
   async function enrichComputer(row) {
@@ -411,10 +426,9 @@
 
   async function fetchFormDocument(itemtype, id) {
     const path = itemtype === 'User' ? '/front/user.form.php' : '/front/computer.form.php';
-    const response = await fetchWithTimeout(`${path}?id=${encodeURIComponent(id)}&forcetab=${encodeURIComponent(`${itemtype}$main`)}`, {
+    const { response, text: html } = await fetchTextWithTimeout(`${path}?id=${encodeURIComponent(id)}&forcetab=${encodeURIComponent(`${itemtype}$main`)}`, {
       credentials: 'same-origin', cache: 'no-store', redirect: 'follow'
     });
-    const html = await response.text();
     ensureSession(response, html);
     if (!response.ok) throw new Error(`${itemtype} #${id}: HTTP ${response.status}`);
     const shellDoc = parseHtml(html);
@@ -426,11 +440,10 @@
       }) || shellDoc.querySelector('a[data-glpi-ajax-content]');
       const ajaxUrl = mainTab?.getAttribute('data-glpi-ajax-content');
       if (ajaxUrl) {
-        const tabResponse = await fetchWithTimeout(new URL(ajaxUrl, location.origin), {
+        const { response: tabResponse, text: tabHtml } = await fetchTextWithTimeout(new URL(ajaxUrl, location.origin), {
           credentials: 'same-origin', cache: 'no-store', redirect: 'follow',
           headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
-        const tabHtml = await tabResponse.text();
         ensureSession(tabResponse, tabHtml);
         if (tabResponse.ok) doc = parseHtml(tabHtml);
       }
@@ -463,11 +476,10 @@
       const url = link.getAttribute('data-glpi-ajax-content') || link.getAttribute('href');
       if (!url) continue;
       try {
-        const response = await fetchWithTimeout(new URL(url, location.origin), {
+        const { response, text: html } = await fetchTextWithTimeout(new URL(url, location.origin), {
           credentials: 'same-origin', cache: 'no-store',
           headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
-        const html = await response.text();
         ensureSession(response, html);
         const found = readOsFromDocument(parseHtml(html));
         if (found) return found;
@@ -503,11 +515,13 @@
     return shortName.startsWith('lr-') || shortName.startsWith('wr-');
   }
 
-  async function fetchWithTimeout(resource, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  async function fetchTextWithTimeout(resource, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(resource, { ...options, signal: controller.signal });
+      const response = await fetch(resource, { ...options, signal: controller.signal });
+      const text = await response.text();
+      return { response, text };
     } catch (error) {
       if (error?.name === 'AbortError') {
         throw new Error(`GLPI не ответил за ${Math.round(timeoutMs / 1000)} сек.`);
@@ -516,6 +530,30 @@
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  function withTimeout(operation, timeoutMs, message) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => reject(new Error(message || `Таймаут ${timeoutMs} мс.`)), timeoutMs);
+      Promise.resolve(operation).then(
+        (value) => {
+          clearTimeout(timeoutId);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timeoutId);
+          reject(error);
+        }
+      );
+    });
+  }
+
+  function sendRuntimeMessageWithTimeout(message, timeoutMs = MESSAGE_TIMEOUT_MS) {
+    return withTimeout(
+      chrome.runtime.sendMessage(message),
+      timeoutMs,
+      `Расширение не ответило на ${message?.type || 'сообщение'} за ${timeoutMs / 1000} сек.`
+    );
   }
 
   function normalizeLogin(value) {

@@ -4857,9 +4857,9 @@ $items = foreach ($u in $users) {{
             if poll_age is None:
                 connection_text = "Расширение: ещё не обращалось к TSHelper"
             elif poll_age <= 12:
-                connection_text = f"Расширение на связи · последний запрос {poll_age:g} сек. назад"
+                connection_text = f"Расширение на связи · heartbeat {poll_age:g} сек. назад"
             else:
-                connection_text = f"Расширение не отвечает · последний запрос {poll_age:g} сек. назад"
+                connection_text = f"Расширение не отвечает · heartbeat был {poll_age:g} сек. назад"
             if manually_paused:
                 connection_text += " · очередь приостановлена вручную"
             if paused:
@@ -4875,9 +4875,10 @@ $items = foreach ($u in $users) {{
             connection_var.set(connection_text)
 
             if current:
+                elapsed_seconds = max(0, round(time.time() - float(current.get("claimed_at") or time.time())))
                 current_user_var.set(
                     f"{current.get('name') or 'Без имени'} · {current.get('login') or '?'} · "
-                    f"попытка {current.get('attempts') or 1}"
+                    f"попытка {current.get('attempts') or 1} · карточка {elapsed_seconds} сек."
                 )
                 stage = current.get("progress_stage") or "Обработка"
                 message = current.get("progress_message") or ""

@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(ROOT, 'src'))
 from tshelper import app as mod  # noqa: E402
 from tshelper.glpi_inventory import (  # noqa: E402
     InventoryBridgeState,
+    JOB_LEASE_SECONDS,
     apply_recommendation,
     is_remote_access_hostname,
     login_from_hostname,
@@ -381,6 +382,7 @@ def test_multi_pc_os_cache_and_merge():
 
 
 def test_glpi_inventory_queue_and_safe_reconciliation():
+    assert_eq(JOB_LEASE_SECONDS, 90, 'lost inventory job recovery timeout')
     assert is_remote_access_hostname('LR-test.example.local')
     assert is_remote_access_hostname('wr-test')
     assert not is_remote_access_hostname('w-test')
@@ -534,14 +536,18 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     assert '/front/user.php?is_deleted=0' in content, 'HTML User search fallback missing'
     assert '/front/search.php?globalsearch=' in content, 'global HTML search fallback missing'
     assert 'mapWithConcurrency(candidates.slice(0, 25), USER_VERIFY_CONCURRENCY' in content, 'parallel exact login verification missing'
-    assert 'fetchWithTimeout' in content, 'GLPI request timeout missing'
+    assert 'fetchTextWithTimeout' in content, 'full GLPI response timeout missing'
+    assert 'const JOB_TIMEOUT_MS = 35000' in content, 'whole inventory job timeout missing'
+    assert 'sendRuntimeMessageWithTimeout' in content, 'extension message timeout missing'
     assert 'isRemoteAccessHostname' in content, 'remote PC filtering missing'
     assert content.index('searchUsersViaHtml(wanted)') < content.index('loadUserSearchDescriptor()'), 'HTML search must run before AJAX fallback'
     assert 'TSH_INVENTORY_REPORT_PROGRESS' in content, 'content progress reporting missing'
     assert '/inventory/jobs/progress' in background, 'background progress bridge missing'
     assert 'text="Пауза", command=self.pause_glpi_inventory' in app_source, 'live monitor pause button missing'
     assert 'text="Продолжить", command=self.resume_glpi_inventory' in app_source, 'live monitor resume button missing'
-    assert_eq(manifest['version'], '0.1.2', 'inventory extension patch version')
+    assert 'heartbeat {poll_age:g} сек. назад' in app_source, 'monitor heartbeat label missing'
+    assert 'карточка {elapsed_seconds} сек.' in app_source, 'current card timer missing'
+    assert_eq(manifest['version'], '0.1.3', 'inventory extension patch version')
 
 
 def test_card_contact_line_with_location():

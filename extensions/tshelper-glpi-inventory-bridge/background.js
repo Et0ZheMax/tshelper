@@ -1,6 +1,8 @@
 'use strict';
 
 const COLLECT_TIMEOUT_MS = 8000;
+const BRIDGE_TIMEOUT_MS = 8000;
+const TAB_MESSAGE_TIMEOUT_MS = 1500;
 const DEFAULTS = { enabled: true, bridgeUrl: 'http://127.0.0.1:8766', token: '' };
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -48,19 +50,29 @@ function respondAsync(sendResponse, operation) {
 }
 
 async function bridgeRequest(config, path, options = {}) {
-  const response = await fetch(`${String(config.bridgeUrl).replace(/\/$/, '')}${path}`, {
-    ...options,
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-TSHelper-Token': config.token,
-      ...(options.headers || {})
-    }
-  });
-  let payload = {};
-  try { payload = await response.json(); } catch (_) {}
-  if (!response.ok || !payload.ok) throw new Error(payload.error || `TSHelper HTTP ${response.status}`);
-  return payload;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BRIDGE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${String(config.bridgeUrl).replace(/\/$/, '')}${path}`, {
+      ...options,
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-TSHelper-Token': config.token,
+        ...(options.headers || {})
+      }
+    });
+    let payload = {};
+    try { payload = await response.json(); } catch (_) {}
+    if (!response.ok || !payload.ok) throw new Error(payload.error || `TSHelper HTTP ${response.status}`);
+    return payload;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`TSHelper bridge не ответил за ${BRIDGE_TIMEOUT_MS / 1000} сек.`);
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function collectRenderedUserTab(userPageUrl, userId) {
@@ -74,10 +86,13 @@ async function collectRenderedUserTab(userPageUrl, userId) {
     while (Date.now() - startedAt < COLLECT_TIMEOUT_MS) {
       await delay(350);
       try {
-        const result = await chrome.tabs.sendMessage(tabId, {
-          type: 'TSH_INVENTORY_READ_RENDERED_USER_TAB',
-          userId: Number(userId)
-        });
+        const result = await withTimeout(
+          chrome.tabs.sendMessage(tabId, {
+            type: 'TSH_INVENTORY_READ_RENDERED_USER_TAB',
+            userId: Number(userId)
+          }),
+          TAB_MESSAGE_TIMEOUT_MS
+        );
         if (result?.ready && Array.isArray(result.computers)) return result.computers;
       } catch (_) {
         // Content script появится после загрузки страницы.
@@ -91,4 +106,20 @@ async function collectRenderedUserTab(userPageUrl, userId) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(operation, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => reject(new Error(`Таймаут ${timeoutMs} мс.`)), timeoutMs);
+    Promise.resolve(operation).then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
 }
