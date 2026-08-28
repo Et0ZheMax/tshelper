@@ -252,10 +252,16 @@ def test_noisy_powershell_json_and_paged_ad_search():
 
     class FakePagedSearch:
         def __init__(self):
-            self.kwargs = None
+            self.requests = []
 
         def paged_search(self, **kwargs):
-            self.kwargs = kwargs
+            self.requests.append(kwargs)
+            if kwargs['search_base'].startswith('OU=Уволенные'):
+                return iter([
+                    {'type': 'searchResEntry', 'attributes': {
+                        'cn': 'Уволенный Пользователь', 'sAMAccountName': 'fired.user',
+                    }},
+                ])
             return iter([
                 {'type': 'searchResEntry', 'attributes': {
                     'cn': 'Старый Пользователь', 'sAMAccountName': 'old.user',
@@ -284,7 +290,10 @@ def test_noisy_powershell_json_and_paged_ad_search():
     previous_ldap3 = sys.modules.get('ldap3')
     sys.modules['ldap3'] = fake_ldap3
     try:
-        users = mod.get_ad_users('dc.test', 'operator', 'secret', 'DC=test', 'test', raise_errors=True)
+        users, dismissed = mod.get_ad_users(
+            'dc.test', 'operator', 'secret', 'DC=test', 'test',
+            dismissed_base_dn='OU=Уволенные,DC=test', raise_errors=True,
+        )
     finally:
         if previous_ldap3 is None:
             sys.modules.pop('ldap3', None)
@@ -292,10 +301,24 @@ def test_noisy_powershell_json_and_paged_ad_search():
             sys.modules['ldap3'] = previous_ldap3
 
     assert_eq([user['pc_name'] for user in users], ['w-old.user', 'w-new.user'], 'all AD pages')
+    assert_eq([user['pc_name'] for user in dismissed], ['w-fired.user'], 'dismissed AD users')
     assert_eq(users[1]['location'], 'Щ5-104', 'paged AD location')
-    assert_eq(created_connections[0].standard.kwargs['paged_size'], 500, 'AD page size')
-    assert created_connections[0].standard.kwargs['generator'], 'paged search generator'
+    requests = created_connections[0].standard.requests
+    assert_eq([item['search_base'] for item in requests], ['DC=test', 'OU=Уволенные,DC=test'], 'AD search bases')
+    assert all(item['paged_size'] == 500 for item in requests), 'AD page size'
+    assert all(item['generator'] for item in requests), 'paged search generator'
     assert created_connections[0].unbound, 'LDAP connection should be closed'
+
+    active_cards, dismissed_cards = mod.partition_dismissed_ad_users(
+        [
+            {'name': 'Старый Пользователь', 'pc_name': 'l-old.user', 'ad_login': 'old.user'},
+            {'name': 'Уволенный Пользователь', 'pc_name': 'l-fired.user'},
+            {'name': 'Уволенный Пользователь', 'pc_name': 'l-other', 'ad_login': 'other.user'},
+        ],
+        dismissed,
+    )
+    assert_eq([user['pc_name'] for user in dismissed_cards], ['l-fired.user'], 'dismissed cards')
+    assert_eq([user['pc_name'] for user in active_cards], ['l-old.user', 'l-other'], 'active cards')
 
 
 def test_os_specific_context_actions():

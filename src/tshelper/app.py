@@ -330,6 +330,7 @@ PBX_DUMP_DIR = str(PBX_DUMP_DIR)
 # AD defaults
 AD_SERVER   = "DC02.pak-cspmz.ru"
 AD_BASE_DN  = "OU=csp,OU=Users,OU=csp,DC=pak-cspmz,DC=ru"
+AD_DISMISSED_BASE_DN = "OU=Уволенные,OU=Users,OU=csp,DC=pak-cspmz,DC=ru"
 AD_DOMAIN   = "pak-cspmz.ru"
 
 # --- Утилиты JSON ---
@@ -384,6 +385,37 @@ def canonical_pc_key(pc_name: str) -> str:
             break
         key = next_key
     return key
+
+
+def _ad_person_name_key(value: str) -> str:
+    """Полное нормализованное ФИО для резервного сопоставления карточки с AD."""
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def partition_dismissed_ad_users(users: list[dict], dismissed_ad_users: list[dict]):
+    """Разделить карточки на актуальные и относящиеся к OU «Уволенные»."""
+    dismissed_logins = {
+        login_from_user(user) for user in dismissed_ad_users if login_from_user(user)
+    }
+    dismissed_names = {
+        _ad_person_name_key(user.get("name", ""))
+        for user in dismissed_ad_users
+        if _ad_person_name_key(user.get("name", ""))
+    }
+    active_cards = []
+    dismissed_cards = []
+    for user in users:
+        explicit_login = str(user.get("ad_login", "") or "").strip()
+        card_login = login_from_user(user)
+        login_matches = bool(card_login and card_login in dismissed_logins)
+        # Если карточка уже связана с AD явно, несовпадающий login важнее ФИО.
+        name_matches = (
+            not explicit_login
+            and _ad_person_name_key(user.get("name", "")) in dismissed_names
+        )
+        target = dismissed_cards if login_matches or name_matches else active_cards
+        target.append(user)
+    return active_cards, dismissed_cards
 
 
 def host_identity_key(pc_name: str) -> str:
@@ -585,7 +617,16 @@ def is_newer_release(latest: str, current: str = VERSION) -> bool:
 
 
 # --- AD: получить пользователей через ldap3 ---
-def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: bool = False):
+def get_ad_users(
+    server,
+    username,
+    password,
+    base_dn,
+    domain,
+    *,
+    dismissed_base_dn: str = "",
+    raise_errors: bool = False,
+):
     conn = None
     try:
         import ldap3
@@ -594,51 +635,56 @@ def get_ad_users(server, username, password, base_dn, domain, *, raise_errors: b
         conn = ldap3.Connection(ldap_server, user=f"{username}@{domain}", password=password, auto_bind=True)
         search_filter = "(&(objectCategory=person)(objectClass=user))"
         attrs = ["cn", "sAMAccountName", "ipPhone", "telephoneNumber", "physicalDeliveryOfficeName", "l"]
-        users = []
-
-        # AD обычно ограничивает один LDAP-ответ 1000 объектами. Без paged search
-        # пользователи за первой страницей терялись, и синхронизация считала, что
-        # новых записей нет.
-        entries = conn.extend.standard.paged_search(
-            search_base=base_dn,
-            search_filter=search_filter,
-            search_scope=ldap3.SUBTREE,
-            attributes=attrs,
-            paged_size=500,
-            generator=True,
-        )
-        for entry in entries:
-            if entry.get("type") != "searchResEntry":
-                continue
-            attributes = entry.get("attributes") or {}
-
-            def first_value(name):
-                value = attributes.get(name, "")
-                if isinstance(value, (list, tuple)):
-                    return value[0] if value else ""
-                return value or ""
-
-            cn = str(first_value("cn")).strip()
-            sam = str(first_value("sAMAccountName")).strip()
-            ext = clean_internal_number(
-                first_value("ipPhone") or first_value("telephoneNumber")
+        def read_users(search_base):
+            users = []
+            # AD обычно ограничивает один LDAP-ответ 1000 объектами. Без paged search
+            # пользователи за первой страницей терялись, и синхронизация считала, что
+            # новых записей нет.
+            entries = conn.extend.standard.paged_search(
+                search_base=search_base,
+                search_filter=search_filter,
+                search_scope=ldap3.SUBTREE,
+                attributes=attrs,
+                paged_size=500,
+                generator=True,
             )
-            location = str(
-                first_value("physicalDeliveryOfficeName")
-                or first_value("l")
-                or ""
-            ).strip()
-            if cn and sam:
-                users.append({
-                    "name": cn,
-                    "pc_name": f"w-{sam}",
-                    "pc_options": [],
-                    "ad_login": sam,
-                    "pc_source": "ad_guess",
-                    "ext": ext,
-                    "location": location,
-                })
-        return users
+            for entry in entries:
+                if entry.get("type") != "searchResEntry":
+                    continue
+                attributes = entry.get("attributes") or {}
+
+                def first_value(name):
+                    value = attributes.get(name, "")
+                    if isinstance(value, (list, tuple)):
+                        return value[0] if value else ""
+                    return value or ""
+
+                cn = str(first_value("cn")).strip()
+                sam = str(first_value("sAMAccountName")).strip()
+                ext = clean_internal_number(
+                    first_value("ipPhone") or first_value("telephoneNumber")
+                )
+                location = str(
+                    first_value("physicalDeliveryOfficeName")
+                    or first_value("l")
+                    or ""
+                ).strip()
+                if cn and sam:
+                    users.append({
+                        "name": cn,
+                        "pc_name": f"w-{sam}",
+                        "pc_options": [],
+                        "ad_login": sam,
+                        "pc_source": "ad_guess",
+                        "ext": ext,
+                        "location": location,
+                    })
+            return users
+
+        active_users = read_users(base_dn)
+        if dismissed_base_dn:
+            return active_users, read_users(dismissed_base_dn)
+        return active_users
     except Exception as e:
         log_message(f"AD error: {e}")
         if raise_errors:
@@ -5155,8 +5201,14 @@ $items = foreach ($u in $users) {{
 
         def work(report):
             report("Получение пользователей из Active Directory…")
-            ad_list = get_ad_users(
-                AD_SERVER, ad_user, ad_pass, AD_BASE_DN, AD_DOMAIN, raise_errors=True
+            ad_list, dismissed_ad_users = get_ad_users(
+                AD_SERVER,
+                ad_user,
+                ad_pass,
+                AD_BASE_DN,
+                AD_DOMAIN,
+                dismissed_base_dn=AD_DISMISSED_BASE_DN,
+                raise_errors=True,
             )
             if glpi_client and ad_list:
                 ad_list, _ = self._apply_glpi_prefixes(
@@ -5166,10 +5218,29 @@ $items = foreach ($u in $users) {{
                     log_message(f"AD Sync: GLPI недоступен, продолжаем только с AD: {glpi_client.last_error}")
             elif not glpi_enabled:
                 log_message("AD Sync: проверка с GLPI отключена в настройках")
-            return ad_list
+            return ad_list, dismissed_ad_users
 
-        def apply_result(ad_list):
+        def apply_result(sync_result):
+            ad_list, dismissed_ad_users = sync_result
+            active_cards, dismissed_cards = partition_dismissed_ad_users(
+                self.users.get_users(), dismissed_ad_users
+            )
+            if dismissed_cards:
+                self.users.users = [self.users._normalize_user(user) for user in active_cards]
+                self.users.save()
+                self.populate_buttons()
+                removed_names = ", ".join(user.get("name", "") for user in dismissed_cards)
+                log_message(
+                    f"AD Sync: удалено карточек из OU «Уволенные»: "
+                    f"{len(dismissed_cards)} ({removed_names})"
+                )
             if not ad_list:
+                if dismissed_cards:
+                    return messagebox.showinfo(
+                        "AD Sync",
+                        f"Актуальные пользователи не найдены. "
+                        f"Удалено карточек уволенных: {len(dismissed_cards)}.",
+                    )
                 return messagebox.showinfo("AD Sync", "Active Directory не вернул пользователей.")
             by_norm = {norm_name(u["name"]): self.users._normalize_user(u) for u in self.users.get_users()}
             new_candidates = []
@@ -5186,13 +5257,15 @@ $items = foreach ($u in $users) {{
                 queued = self._enqueue_glpi_inventory_users(self.users.get_users(), "ad_sync", priority=50)
                 return messagebox.showinfo(
                     "AD Sync",
-                    f"Новых пользователей нет. Обновления применены.\nНа HTML-сверку GLPI поставлено: {queued}.",
+                    f"Новых пользователей нет. Обновления применены.\n"
+                    f"Удалено карточек уволенных: {len(dismissed_cards)}.\n"
+                    f"На HTML-сверку GLPI поставлено: {queued}.",
                 )
-            self.show_ad_sync_selection(new_candidates, by_norm)
+            self.show_ad_sync_selection(new_candidates, by_norm, len(dismissed_cards))
 
         self._run_sync_background("AD Sync", "Подключение к Active Directory…", work, apply_result)
 
-    def show_ad_sync_selection(self, new_users, merged_map):
+    def show_ad_sync_selection(self, new_users, merged_map, dismissed_count=0):
         win = tk.Toplevel(self.master); win.title("Новые пользователи AD")
         apply_persisted_geometry(
             win,
@@ -5205,6 +5278,11 @@ $items = foreach ($u in $users) {{
         _save_ad_sync_geo = bind_geometry_persistence(win, self.settings, "ad_sync_select_geometry")
         win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "ad_sync_select_geometry", saver=_save_ad_sync_geo))
         vars = {}
+        if dismissed_count:
+            ttk.Label(
+                win,
+                text=f"Удалено карточек пользователей из OU «Уволенные»: {dismissed_count}",
+            ).pack(fill="x", padx=8, pady=(8, 2))
         frm = ttk.Frame(win); frm.pack(fill="both", expand=True)
         canvas = tk.Canvas(frm, highlightthickness=0)
         vs = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
