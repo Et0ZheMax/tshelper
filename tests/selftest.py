@@ -430,6 +430,9 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
     updated = apply_recommendation(user, recommendation)
     assert_eq(updated['pc_source'], 'glpi_html', 'reconciled source is stored')
     assert_eq(updated['glpi_user_id'], 42, 'GLPI identity is stored')
+    already_matching = recommend_inventory_update(updated, record)
+    assert already_matching['safe'] and not already_matching['changed']
+    assert_eq(already_matching['reason'], 'Уже совпадает с GLPI', 'matching inventory report reason')
 
     remote_record = dict(record)
     remote_record['computers'] = record['computers'] + [{
@@ -570,6 +573,8 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     assert 'text="Продолжить", command=self.resume_glpi_inventory' in app_source, 'live monitor resume button missing'
     assert 'heartbeat {poll_age:g} сек. назад' in app_source, 'monitor heartbeat label missing'
     assert 'карточка {elapsed_seconds} сек.' in app_source, 'current card timer missing'
+    assert 'text="Применить однозначные"' in app_source, 'unambiguous apply button missing'
+    assert 'win.after(1500, refresh_report)' in app_source, 'live inventory report refresh missing'
     assert_eq(manifest['version'], '0.1.3', 'inventory extension patch version')
 
 

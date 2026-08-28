@@ -4985,24 +4985,26 @@ $items = foreach ($u in $users) {{
         refresh_monitor()
 
     def show_glpi_inventory_report(self):
-        rows = []
-        for user in self.users.get_users():
-            login = login_from_user(user)
-            record = self.glpi_inventory.record_for_login(login)
-            recommendation = recommend_inventory_update(user, record)
-            queued = self.glpi_inventory.queue_info_for_login(login)
-            if queued:
-                if queued.get("status") == "running":
-                    stage = queued.get("progress_stage") or "обработка"
-                    recommendation["reason"] = f"Сейчас проверяется: {stage}"
-                else:
-                    position = int(queued.get("position") or 0)
-                    recommendation["reason"] = (
-                        f"Ожидает проверки, позиция в очереди: {position}"
-                        if position
-                        else "Ожидает проверки"
-                    )
-            rows.append((user, recommendation))
+        def collect_report_rows():
+            rows = []
+            for user in self.users.get_users():
+                login = login_from_user(user)
+                record = self.glpi_inventory.record_for_login(login)
+                recommendation = recommend_inventory_update(user, record)
+                queued = self.glpi_inventory.queue_info_for_login(login)
+                if queued:
+                    if queued.get("status") == "running":
+                        stage = queued.get("progress_stage") or "обработка"
+                        recommendation["reason"] = f"Сейчас проверяется: {stage}"
+                    else:
+                        position = int(queued.get("position") or 0)
+                        recommendation["reason"] = (
+                            f"Ожидает проверки, позиция в очереди: {position}"
+                            if position
+                            else "Ожидает проверки"
+                        )
+                rows.append((user, recommendation))
+            return rows
 
         win = tk.Toplevel(self.master)
         win.title("GLPI Inventory — результаты сверки")
@@ -5027,27 +5029,15 @@ $items = foreach ($u in $users) {{
 
         safe_changes = []
         users_by_row = {}
-        for user, recommendation in rows:
-            record = recommendation.get("record") or {}
-            hosts = ", ".join(
-                item.get("hostname", "")
-                for item in record.get("computers", [])
-                if item.get("hostname") and not is_remote_access_hostname(item.get("hostname"))
-            ) or "—"
-            row_id = tree.insert("", "end", values=(
-                user.get("name", ""),
-                recommendation.get("login", ""),
-                user.get("pc_name", ""),
-                hosts,
-                recommendation.get("reason", ""),
-            ))
-            users_by_row[row_id] = user
-            if recommendation.get("safe") and recommendation.get("changed"):
-                safe_changes.append((user, recommendation))
-
         controls = ttk.Frame(win, padding=(8, 10))
         controls.pack(side="right", fill="y")
-        ttk.Label(controls, text=f"Безопасных изменений: {len(safe_changes)}", wraplength=220).pack(anchor="w", pady=(0, 10))
+        safe_count_var = tk.StringVar(value="Однозначных замен: 0")
+        ttk.Label(controls, textvariable=safe_count_var, wraplength=220).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            controls,
+            text="Отчёт обновляется автоматически. Несколько активных ПК требуют ручного выбора.",
+            wraplength=220,
+        ).pack(anchor="w", pady=(0, 10))
 
         def retry_selected_user():
             selected = tree.selection()
@@ -5063,18 +5053,27 @@ $items = foreach ($u in $users) {{
             self.show_glpi_inventory_monitor()
 
         def apply_safe_changes():
-            if not safe_changes:
+            current_safe_changes = [
+                (user, recommendation)
+                for user, recommendation in collect_report_rows()
+                if recommendation.get("safe") and recommendation.get("changed")
+            ]
+            if not current_safe_changes:
                 return messagebox.showinfo("GLPI Inventory", "Безопасных изменений нет.", parent=win)
             if not messagebox.askyesno(
                 "GLPI Inventory",
-                f"Применить {len(safe_changes)} изменений? Перед этим будет создана резервная копия users.json.",
+                f"Применить {len(current_safe_changes)} однозначных замен? "
+                "Перед этим будет создана резервная копия users.json.",
                 parent=win,
             ):
                 return
             backup = DATA_DIR / f"users_before_glpi_inventory_{datetime.datetime.now():%Y%m%d_%H%M%S}.json"
             if os.path.exists(USERS_FILE):
                 shutil.copy2(USERS_FILE, backup)
-            by_login = {recommendation["login"]: recommendation for _user, recommendation in safe_changes}
+            by_login = {
+                recommendation["login"]: recommendation
+                for _user, recommendation in current_safe_changes
+            }
             changed = 0
             updated_users = []
             for current in self.users.get_users():
@@ -5086,12 +5085,95 @@ $items = foreach ($u in $users) {{
             self.users.users = updated_users
             self.users.save()
             self.populate_buttons()
-            win.destroy()
-            messagebox.showinfo("GLPI Inventory", f"Применено: {changed}.\nРезервная копия: {backup}")
+            refresh_report(force=True)
+            messagebox.showinfo(
+                "GLPI Inventory",
+                f"Применено: {changed}.\nРезервная копия: {backup}",
+                parent=win,
+            )
 
         ttk.Button(controls, text="Проверить выбранного сейчас", command=retry_selected_user).pack(fill="x", pady=(0, 8))
-        ttk.Button(controls, text="Применить безопасные", command=apply_safe_changes).pack(fill="x")
-        ttk.Button(controls, text="Закрыть", command=win.destroy).pack(fill="x", pady=(8, 0))
+        apply_button = ttk.Button(
+            controls,
+            text="Применить однозначные",
+            command=apply_safe_changes,
+            state="disabled",
+        )
+        apply_button.pack(fill="x")
+        close_button = ttk.Button(controls, text="Закрыть")
+        close_button.pack(fill="x", pady=(8, 0))
+
+        refresh_job = {"id": None}
+        last_signature = {"value": None}
+
+        def refresh_report(force=False):
+            if not win.winfo_exists():
+                return
+            if force and refresh_job["id"]:
+                try:
+                    win.after_cancel(refresh_job["id"])
+                except Exception:
+                    pass
+                refresh_job["id"] = None
+            rows = collect_report_rows()
+            signature = tuple(
+                (
+                    recommendation.get("login", ""),
+                    user.get("name", ""),
+                    user.get("pc_name", ""),
+                    tuple(user.get("pc_options") or []),
+                    recommendation.get("reason", ""),
+                    str((recommendation.get("record") or {}).get("checked_at") or ""),
+                )
+                for user, recommendation in rows
+            )
+            if force or signature != last_signature["value"]:
+                selected = tree.selection()
+                selected_login = tree.set(selected[0], "login") if selected else ""
+                last_signature["value"] = signature
+                existing_rows = tree.get_children()
+                if existing_rows:
+                    tree.delete(*existing_rows)
+                users_by_row.clear()
+                safe_changes.clear()
+                row_for_login = {}
+                for user, recommendation in rows:
+                    record = recommendation.get("record") or {}
+                    hosts = ", ".join(
+                        item.get("hostname", "")
+                        for item in record.get("computers", [])
+                        if item.get("hostname") and not is_remote_access_hostname(item.get("hostname"))
+                    ) or "—"
+                    row_id = tree.insert("", "end", values=(
+                        user.get("name", ""),
+                        recommendation.get("login", ""),
+                        user.get("pc_name", ""),
+                        hosts,
+                        recommendation.get("reason", ""),
+                    ))
+                    users_by_row[row_id] = user
+                    row_for_login[recommendation.get("login", "")] = row_id
+                    if recommendation.get("safe") and recommendation.get("changed"):
+                        safe_changes.append((user, recommendation))
+                safe_count_var.set(f"Однозначных замен: {len(safe_changes)}")
+                apply_button.configure(state="normal" if safe_changes else "disabled")
+                if selected_login in row_for_login:
+                    selected_row = row_for_login[selected_login]
+                    tree.selection_set(selected_row)
+                    tree.see(selected_row)
+            refresh_job["id"] = win.after(1500, refresh_report)
+
+        def close_report():
+            if refresh_job["id"]:
+                try:
+                    win.after_cancel(refresh_job["id"])
+                except Exception:
+                    pass
+            win.destroy()
+
+        close_button.configure(command=close_report)
+        win.protocol("WM_DELETE_WINDOW", close_report)
+        refresh_report(force=True)
 
     def _make_glpi_client(self, silent: bool = False, notify_errors: bool = True):
         url = self.settings.get_setting("glpi_api_url", "").strip()

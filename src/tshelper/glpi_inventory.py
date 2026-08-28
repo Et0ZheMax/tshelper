@@ -230,10 +230,15 @@ def recommend_inventory_update(user: dict, record: dict | None) -> dict:
         seen.add(old_key)
         preserved.append(old_host)
 
+    changed = target_key != host_identity(current_main) or preserved != current_options
     base.update({
         "safe": True,
-        "changed": target_key != host_identity(current_main) or preserved != current_options,
-        "reason": "GLPI подтвердил один активный Computer по точному login",
+        "changed": changed,
+        "reason": (
+            "GLPI подтвердил один активный Computer по точному login"
+            if changed
+            else "Уже совпадает с GLPI"
+        ),
         "new_main": target,
         "new_options": preserved,
     })
