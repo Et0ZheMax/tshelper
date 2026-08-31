@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import sys
+import time
 import types
 import zipfile
 from urllib import request
@@ -30,6 +31,7 @@ from tshelper.printer_monitor_launcher import (  # noqa: E402
     PrinterMonitorLauncher,
     build_printer_monitor_command,
 )
+from tshelper.ping_worker import PingProcessClient, ping_candidates  # noqa: E402
 from tshelper.updater import (  # noqa: E402
     MANAGED_DIRECTORIES,
     ReleaseInfo,
@@ -669,16 +671,38 @@ def test_batched_settings_and_glpi_timeout():
 
 def test_incremental_card_sync_and_deferred_ad_lookup():
     class FakeApp:
+        status_icons = {}
+
         @staticmethod
         def resolve_os_types_for_user(_user):
             return ['windows']
+
+        @staticmethod
+        def get_user_pc_display(user):
+            return user.get('pc_name', '')
 
     button = mod.UserButton.__new__(mod.UserButton)
     button.app = FakeApp()
     button.user = {'name': 'Тест', 'pc_name': 'w-test', 'pc_options': [], 'ext': '1', 'location': ''}
     button._user_render_signature = button._data_signature(button.user)
     button._os_badge_signature = ('windows',)
-    button.btn = type('FakeButton', (), {'cget': lambda self, key: '#fff' if key == 'bg' else '#000'})()
+    button.show_status = False
+    button.status_key = 'offline'
+    class FakeButton:
+        def __init__(self):
+            self.config_calls = []
+            self.image = None
+
+        @staticmethod
+        def cget(key):
+            return '#fff' if key == 'bg' else '#000'
+
+        def config(self, **kwargs):
+            self.config_calls.append(kwargs)
+
+    button.btn = FakeButton()
+    button.caller_info = None
+    button.status_image = None
     refreshes = []
     badges = []
     button.refresh_text = lambda: refreshes.append(True)
@@ -686,6 +710,12 @@ def test_incremental_card_sync_and_deferred_ad_lookup():
     button.sync_user(dict(button.user))
     assert_eq(refreshes, [], 'unchanged card is not redrawn')
     assert_eq(badges, [], 'unchanged OS badge is not rebuilt')
+    button.set_status('checking')
+    assert_eq(refreshes, [], 'hidden status does not redraw card text')
+    button.set_show_status(True)
+    button.set_status('online')
+    assert_eq(refreshes, [], 'status switch does not run full card redraw')
+    assert_eq(len(button.btn.config_calls), 2, 'status switch uses lightweight button update')
     changed_user = dict(button.user, location='Щ5-104')
     button.sync_user(changed_user)
     assert_eq(len(refreshes), 1, 'changed card is redrawn once')
@@ -698,18 +728,175 @@ def test_incremental_card_sync_and_deferred_ad_lookup():
     assert app.ad_lookup_by_mobile('+7 999 000-11-22', allow_network=False) is None
 
 
-def test_ping_dispatch_is_bounded():
-    class FakeFuture:
-        def add_done_callback(self, callback):
-            self.callback = callback
+def test_grid_render_is_batched_and_cancelable():
+    class FakeMaster:
+        def __init__(self):
+            self.jobs = {}
+            self.next_id = 0
 
-    class FakeExecutor:
+        def after(self, _delay, callback):
+            self.next_id += 1
+            self.jobs[self.next_id] = callback
+            return self.next_id
+
+        def after_cancel(self, job_id):
+            self.jobs.pop(job_id, None)
+
+        def run_next(self):
+            job_id = min(self.jobs)
+            callback = self.jobs.pop(job_id)
+            callback()
+
+    class FakeInner:
+        @staticmethod
+        def grid_columnconfigure(_column, weight):
+            assert_eq(weight, 1, 'grid column weight')
+
+    class FakeWidget:
+        def __init__(self):
+            self.show_status = False
+            self.grid_calls = []
+            self.remove_calls = 0
+            self.refresh_calls = 0
+
+        def grid(self, **kwargs):
+            self.grid_calls.append(kwargs)
+
+        def grid_remove(self):
+            self.remove_calls += 1
+
+        def refresh_text(self):
+            self.refresh_calls += 1
+
+        def set_show_status(self, show_status):
+            self.show_status = bool(show_status)
+            self.refresh_calls += 1
+
+    app = mod.MainWindow.__new__(mod.MainWindow)
+    app.master = FakeMaster()
+    app.inner = FakeInner()
+    app.user_widgets = {f'pc-{index}': FakeWidget() for index in range(60)}
+    app.buttons = {}
+    app._grid_positions = {}
+    app._rendered_keys = set()
+    app._grid_render_job = None
+    app._grid_render_generation = 0
+    app._grid_render_needs_sync = False
+    app._grid_render_batch_size = 24
+    app.orphan_widgets = []
+    app.empty_state_label = None
+    app._cw_render_state = {'ordered_keys': []}
+    app._compute_cols = lambda: 4
+    app._update_scrollregion = lambda: None
+
+    keys = list(app.user_widgets)
+    app.render_grid(keys, [], show_status=True)
+    assert_eq(len(app._rendered_keys), 24, 'first UI pass is bounded')
+    assert app.master.jobs, 'remaining cards are deferred to the event loop'
+    assert_eq(
+        sum(widget.refresh_calls for widget in app.user_widgets.values()),
+        24,
+        'status text is also updated in batches',
+    )
+
+    app.render_grid(keys[:1], [], show_status=False)
+    while app.master.jobs:
+        app.master.run_next()
+    assert_eq(app._rendered_keys, {'pc-0'}, 'stale render is cancelled after query change')
+    assert_eq(set(app.buttons), {'pc-0'}, 'button lookup follows latest query immediately')
+
+    app.render_grid(keys, [], show_status=False)
+    assert len(app._rendered_keys) <= app._grid_render_batch_size
+    while app.master.jobs:
+        before = len(app._rendered_keys)
+        app.master.run_next()
+        assert len(app._rendered_keys) - before <= app._grid_render_batch_size
+    assert_eq(app._rendered_keys, set(keys), 'cleared search restores every card progressively')
+
+
+def test_search_status_and_ping_are_deferred():
+    class FakeMaster:
+        def __init__(self):
+            self.jobs = {}
+            self.delays = {}
+            self.next_id = 0
+
+        def after(self, delay, callback):
+            self.next_id += 1
+            self.jobs[self.next_id] = callback
+            self.delays[self.next_id] = delay
+            return self.next_id
+
+        def after_cancel(self, job_id):
+            self.jobs.pop(job_id, None)
+            self.delays.pop(job_id, None)
+
+        def run_next(self):
+            job_id = min(self.jobs)
+            callback = self.jobs.pop(job_id)
+            self.delays.pop(job_id, None)
+            callback()
+
+    class FakeEntry:
+        value = 'abc'
+
+        def get(self):
+            return self.value
+
+    app = mod.MainWindow.__new__(mod.MainWindow)
+    app.master = FakeMaster()
+    app.search_entry = FakeEntry()
+    app.search_job = None
+    app._search_enrichment_job = None
+    app._search_enrichment_delay_ms = 40
+    app._ping_queue_job = None
+    app._pending_ping_users = []
+    app.ping_generation = 0
+    app._grid_render_batch_size = 24
+    app._cw_render_state = {'show_status': False}
+    app._cw_last_signature = None
+    view_requests = []
+    applied_states = []
+    ping_batches = []
+    users = [{'pc_name': 'w-test'}]
+
+    def compute_view_state(query, show_status):
+        view_requests.append((query, show_status))
+        return {'filtered_sorted': users, 'show_status': show_status}
+
+    app._compute_view_state = compute_view_state
+    app._apply_call_state_delta = lambda _previous, state: applied_states.append(state)
+    app._schedule_ping_batch = lambda queued, generation: ping_batches.append((queued, generation))
+    app.buttons = {}
+    app.ping_cache = {}
+    app.ping_cache_ttl_ok = 25
+    app.ping_cache_ttl_fail = 7
+
+    app._do_search()
+    assert_eq(view_requests, [('abc', False)], 'typing renders search without status work')
+    assert_eq(list(app.master.delays.values()), [40], 'status enrichment yields to search rendering')
+    assert_eq(ping_batches, [], 'ping is not prepared in the input callback')
+
+    app._cancel_search_enrichment()
+    assert_eq(app.master.jobs, {}, 'new input cancels deferred enrichment')
+
+    app._do_search()
+    app.master.run_next()
+    assert_eq(view_requests[-1], ('abc', True), 'status appears only after quiet period')
+    assert_eq(ping_batches, [], 'ping scan yields back to UI before starting')
+    app.master.run_next()
+    assert_eq(len(ping_batches), 1, 'ping starts after deferred cache scan')
+
+
+def test_ping_dispatch_is_bounded():
+    class FakePingProcess:
         def __init__(self):
             self.submitted = []
 
-        def submit(self, callback, user):
-            self.submitted.append((callback, user))
-            return FakeFuture()
+        def submit(self, candidates, callback):
+            task_id = f'task-{len(self.submitted)}'
+            self.submitted.append((candidates, callback, task_id))
+            return task_id
 
     class FakeMaster:
         def __init__(self):
@@ -730,14 +917,47 @@ def test_ping_dispatch_is_bounded():
     app._ping_queue_job = None
     app._ping_inflight = {}
     app._ping_inflight_lock = __import__('threading').Lock()
-    app.executor = FakeExecutor()
+    app.ping_process = FakePingProcess()
     app.master = FakeMaster()
-    app._ping_task = lambda _user: None
+    app.build_host_candidates = lambda user: [user['pc_name']]
     app._dispatch_ping_batch(1)
-    assert_eq(len(app.executor.submitted), 2, 'ping submissions are bounded by worker count')
+    assert_eq(len(app.ping_process.submitted), 2, 'ping submissions are bounded by worker count')
     assert_eq(len(app._ping_inflight), 2, 'ping inflight accounting')
     assert_eq(len(app._pending_ping_users), 1, 'remaining ping stays in app queue')
     assert app._ping_queue_job is not None
+    assert_eq(
+        ping_candidates([]),
+        {'completed': True, 'ok': False, 'host': '', 'ip': ''},
+        'empty helper request result',
+    )
+
+
+def test_ping_process_smoke():
+    class FakeMaster:
+        def __init__(self):
+            self.next_id = 0
+
+        def after(self, _delay, _callback):
+            self.next_id += 1
+            return self.next_id
+
+        @staticmethod
+        def after_cancel(_job_id):
+            return None
+
+    results = []
+    client = PingProcessClient(FakeMaster(), max_workers=2, poll_ms=10)
+    try:
+        task_id = client.submit([], results.append)
+        assert task_id, 'ping helper accepts request'
+        deadline = time.monotonic() + 5
+        while not results and time.monotonic() < deadline:
+            client._poll_results()
+            time.sleep(0.02)
+        assert results, 'ping helper returns result from child process'
+        assert results[0].get('completed'), 'ping helper completed request'
+    finally:
+        client.shutdown()
 
 
 def test_broken_json_and_safe_save():
@@ -837,7 +1057,10 @@ if __name__ == '__main__':
         test_card_contact_line_with_location,
         test_batched_settings_and_glpi_timeout,
         test_incremental_card_sync_and_deferred_ad_lookup,
+        test_grid_render_is_batched_and_cancelable,
+        test_search_status_and_ping_are_deferred,
         test_ping_dispatch_is_bounded,
+        test_ping_process_smoke,
         test_broken_json_and_safe_save,
         test_safe_save_json_cleans_temp_on_error,
         test_callwatcher_parse_helpers,

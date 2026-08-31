@@ -34,6 +34,7 @@ from .paths import (
     ensure_user_catalog,
     migrate_legacy_user_data,
 )
+from .ping_worker import PingProcessClient
 from .printer_monitor_launcher import PrinterMonitorLauncher, PrinterMonitorUnavailable
 from .ui_geometry import apply_persisted_geometry, bind_geometry_persistence
 from .ui_operation_status import OperationStatusStrip
@@ -1772,16 +1773,24 @@ class MainWindow:
         self._glpi_ping_pending = {}
         self._glpi_ping_flush_job = None
         self.ping_max_workers = max(2, min(32, int(self.settings.get_setting("ping_max_workers", 8) or 8)))
-        self.executor = ThreadPoolExecutor(max_workers=self.ping_max_workers)
+        self.ping_process = PingProcessClient(self.master, max_workers=self.ping_max_workers)
         self.buttons = {}
         self.user_widgets = {}
         self._search_cache = {}
         self._search_entries = []
         self._users_by_pc_cache = {}
         self._grid_positions = {}
+        self._rendered_keys = set()
+        self._grid_render_job = None
+        self._grid_render_generation = 0
+        self._grid_render_needs_sync = False
+        self._grid_render_batch_size = 24
         self.orphan_widgets = []
         self.empty_state_label = None
         self.search_job = None
+        self._search_debounce_ms = 70
+        self._search_enrichment_job = None
+        self._search_enrichment_delay_ms = 40
         self.ping_generation = 0
         self.ping_cache = {}
         self.ping_cache_ttl_ok = 25
@@ -3994,6 +4003,7 @@ $items = foreach ($u in $users) {{
             if pc_name not in users_by_pc:
                 widget = self.user_widgets.pop(pc_name)
                 widget.destroy()
+                self._rendered_keys.discard(pc_name)
                 self._search_cache.pop(pc_name, None)
                 self._grid_positions.pop(pc_name, None)
 
@@ -4179,13 +4189,15 @@ $items = foreach ($u in $users) {{
                 widget.show_status = show_status
                 widget.refresh_text()
 
-    def _refresh_orphan_widgets(self, orphan_calls):
+    def _refresh_orphan_widgets(self, orphan_calls, ordered_count=None, cols=None):
         for widget in self.orphan_widgets:
             widget.destroy()
         self.orphan_widgets = []
 
-        cols = self._compute_cols()
-        start_row = max(0, (len(self._cw_render_state.get("ordered_keys") or []) + cols - 1) // cols)
+        cols = cols or self._compute_cols()
+        if ordered_count is None:
+            ordered_count = len(self._cw_render_state.get("ordered_keys") or [])
+        start_row = max(0, (ordered_count + cols - 1) // cols)
         row, col = start_row, 0
         for call in orphan_calls:
             btn = tk.Button(
@@ -4220,8 +4232,14 @@ $items = foreach ($u in $users) {{
         order_changed = (prev_state.get("ordered_keys") if prev_state else []) != next_state.get("ordered_keys")
         empty_state_changed = (prev_state.get("show_empty") if prev_state else False) != next_state.get("show_empty")
         orphan_changed = (prev_state.get("orphan_signature") if prev_state else ()) != next_state.get("orphan_signature")
-        if order_changed or empty_state_changed:
-            self.render_grid(next_state["ordered_keys"], next_state["orphan_calls"], show_empty_state=next_state["show_empty"])
+        status_changed = (prev_state.get("show_status") if prev_state else False) != next_state.get("show_status")
+        if order_changed or empty_state_changed or status_changed or self._grid_render_needs_sync:
+            self.render_grid(
+                next_state["ordered_keys"],
+                next_state["orphan_calls"],
+                show_empty_state=next_state["show_empty"],
+                show_status=next_state["show_status"],
+            )
         elif orphan_changed:
             self._refresh_orphan_widgets(next_state["orphan_calls"])
             self._update_scrollregion()
@@ -4240,28 +4258,54 @@ $items = foreach ($u in $users) {{
             "show_status": next_state["show_status"],
         }
 
-    def render_grid(self, ordered_keys, orphan_calls, show_empty_state=False):
-        current_buttons = {
-            key: widget
-            for key, widget in self.buttons.items()
-            if self.user_widgets.get(key) is widget
-        }
-        next_keys = {key for key in ordered_keys if key in self.user_widgets}
-        for pc_key, widget in current_buttons.items():
-            if pc_key not in next_keys:
+    def _cancel_grid_render(self):
+        self._grid_render_generation += 1
+        job = self._grid_render_job
+        self._grid_render_job = None
+        if job:
+            try:
+                self.master.after_cancel(job)
+            except Exception:
+                pass
+
+    def _run_grid_render_batch(self, generation, plan):
+        if generation != self._grid_render_generation:
+            return
+        self._grid_render_job = None
+        budget = self._grid_render_batch_size
+
+        while budget and plan["hide_index"] < len(plan["hide_keys"]):
+            pc_key = plan["hide_keys"][plan["hide_index"]]
+            plan["hide_index"] += 1
+            widget = self.user_widgets.get(pc_key)
+            if widget:
                 widget.grid_remove()
-        for widget in self.orphan_widgets:
-            widget.destroy()
-        self.orphan_widgets = []
-        if self.empty_state_label:
-            self.empty_state_label.destroy()
-            self.empty_state_label = None
+            self._rendered_keys.discard(pc_key)
+            self._grid_positions.pop(pc_key, None)
+            budget -= 1
 
-        cols = self._compute_cols()
-        row = col = 0
-        self.buttons = {}
+        while budget and plan["layout_index"] < len(plan["layout"]):
+            pc_key, row, col = plan["layout"][plan["layout_index"]]
+            plan["layout_index"] += 1
+            widget = self.user_widgets.get(pc_key)
+            if widget:
+                if widget.show_status != plan["show_status"]:
+                    widget.set_show_status(plan["show_status"])
+                position = (row, col)
+                if pc_key not in self._rendered_keys or self._grid_positions.get(pc_key) != position:
+                    widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+                    self._grid_positions[pc_key] = position
+                self._rendered_keys.add(pc_key)
+            budget -= 1
 
-        if show_empty_state and not ordered_keys:
+        if plan["hide_index"] < len(plan["hide_keys"]) or plan["layout_index"] < len(plan["layout"]):
+            self._grid_render_job = self.master.after(
+                1,
+                lambda g=generation, p=plan: self._run_grid_render_batch(g, p),
+            )
+            return
+
+        if plan["show_empty_state"] and not plan["ordered_keys"]:
             self.empty_state_label = ttk.Label(
                 self.inner,
                 text="Ничего не найдено. Попробуйте изменить запрос.",
@@ -4270,57 +4314,70 @@ $items = foreach ($u in $users) {{
             self.empty_state_label.grid(row=0, column=0, padx=16, pady=16, sticky="n")
             self.inner.grid_columnconfigure(0, weight=1)
 
-        for pc_key in ordered_keys:
-            widget = self.user_widgets.get(pc_key)
-            if not widget:
-                sample_keys = list(self.user_widgets.keys())[:20] if self._cw_debug_enabled() else []
-                self._cw_debug_log(
-                    f"render_grid: отсутствует widget для pc_key={pc_key}, available_keys_sample={sample_keys}"
-                )
-                continue
-            position = (row, col)
-            if pc_key not in current_buttons or self._grid_positions.get(pc_key) != position:
-                widget.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-                self._grid_positions[pc_key] = position
-            self.buttons[pc_key] = widget
-            col += 1
-            if col >= cols:
-                col = 0
-                row += 1
+        self._refresh_orphan_widgets(
+            plan["orphan_calls"],
+            ordered_count=len(plan["ordered_keys"]),
+            cols=plan["cols"],
+        )
+        self._grid_render_needs_sync = False
+        self._update_scrollregion()
 
-        # если звонок не удалось сопоставить с пользователем — показываем отдельной карточкой
-        for call in orphan_calls:
-            btn = tk.Button(
-                self.inner,
-                text=self._format_orphan_call_text(call),
-                bg=self.caller_bg,
-                fg=self.caller_fg,
-                activebackground=self.caller_bg,
-                activeforeground=self.caller_fg,
-                relief="ridge",
-                bd=2,
-                justify="center",
-                wraplength=180,
-            )
-            btn.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-            self.orphan_widgets.append(btn)
-            col += 1
-            if col >= cols:
-                col = 0
-                row += 1
+    def render_grid(self, ordered_keys, orphan_calls, show_empty_state=False, show_status=None):
+        self._cancel_grid_render()
+        generation = self._grid_render_generation
+        self._grid_render_needs_sync = True
+
+        ordered_keys = [key for key in ordered_keys if key in self.user_widgets]
+        next_keys = set(ordered_keys)
+        rendered_keys = set(getattr(self, "_rendered_keys", set()))
+        hide_keys = [key for key in rendered_keys if key not in next_keys]
+
+        for widget in self.orphan_widgets:
+            widget.destroy()
+        self.orphan_widgets = []
+        if self.empty_state_label:
+            self.empty_state_label.destroy()
+            self.empty_state_label = None
+
+        cols = self._compute_cols()
+        self.buttons = {key: self.user_widgets[key] for key in ordered_keys}
+        layout = [
+            (pc_key, index // cols, index % cols)
+            for index, pc_key in enumerate(ordered_keys)
+        ]
 
         for i in range(cols):
             self.inner.grid_columnconfigure(i, weight=1)
-        self._update_scrollregion()
+
+        plan = {
+            "hide_keys": hide_keys,
+            "hide_index": 0,
+            "layout": layout,
+            "layout_index": 0,
+            "ordered_keys": ordered_keys,
+            "orphan_calls": list(orphan_calls),
+            "show_empty_state": bool(show_empty_state),
+            "show_status": (
+                bool(show_status)
+                if show_status is not None
+                else bool(len(self.search_entry.get().strip()) >= 3)
+            ),
+            "cols": cols,
+        }
+        self._run_grid_render_batch(generation, plan)
 
     def populate_buttons(self, items=None, show_empty_state=False, show_status=False, search_text=None):
         if search_text is None:
             search_text = self.search_entry.get().casefold().strip() if getattr(self, "search_entry", None) else ""
         self._sync_user_widgets()
         view_state = self._compute_view_state(search_text, show_status=show_status)
-        self._apply_status_visibility(bool(show_status))
         self.apply_call_state(view_state["caller_by_pc"])
-        self.render_grid(view_state["ordered_keys"], view_state["orphan_calls"], show_empty_state=view_state["show_empty"])
+        self.render_grid(
+            view_state["ordered_keys"],
+            view_state["orphan_calls"],
+            show_empty_state=view_state["show_empty"],
+            show_status=view_state["show_status"],
+        )
         self.count_lbl.config(text=f"Найдено аккаунтов: {view_state['count']}")
         self._cw_render_state = {
             "ordered_keys": list(view_state["ordered_keys"]),
@@ -4356,8 +4413,8 @@ $items = foreach ($u in $users) {{
         self._cw_ui_refresh_pending = False
 
         search_text = self.search_entry.get().casefold().strip() if getattr(self, "search_entry", None) else ""
-        show_status = len(search_text) >= 3
         prev_state = self._cw_render_state or {}
+        show_status = bool(prev_state.get("show_status")) and len(search_text) >= 3
         next_state = self._compute_view_state(search_text, show_status=show_status)
         signature = (
             tuple(next_state["ordered_keys"]),
@@ -4371,9 +4428,6 @@ $items = foreach ($u in $users) {{
             return
         self._cw_last_signature = signature
 
-        if prev_state.get("show_status") != next_state["show_status"]:
-            self._apply_status_visibility(next_state["show_status"])
-
         self._apply_call_state_delta(prev_state, next_state)
 
     def _refresh_current_view_from_call_watcher(self):
@@ -4381,59 +4435,93 @@ $items = foreach ($u in $users) {{
 
 
     # --------- Поиск ----------
+    def _cancel_search_enrichment(self):
+        self.ping_generation += 1
+        self._pending_ping_users = []
+        for attr_name in ("_search_enrichment_job", "_ping_queue_job"):
+            job = getattr(self, attr_name, None)
+            if job:
+                try:
+                    self.master.after_cancel(job)
+                except Exception:
+                    pass
+            setattr(self, attr_name, None)
+
     def update_search(self, _=None):
+        self._cancel_search_enrichment()
+        self._cancel_grid_render()
+        self._grid_render_needs_sync = True
         if self.search_job: self.master.after_cancel(self.search_job)
-        self.search_job = self.master.after(120, self._do_search)
+        self.search_job = self.master.after(self._search_debounce_ms, self._do_search)
 
     def _do_search(self, sync_users=False):
+        self.search_job = None
+        self._cancel_search_enrichment()
         text = self.search_entry.get().casefold().strip()
-        show_status = len(text) >= 3
         self._cw_last_signature = None
         if sync_users:
             self._sync_user_widgets()
         prev_state = self._cw_render_state or {}
-        next_state = self._compute_view_state(text, show_status=show_status)
-        if prev_state.get("show_status") != show_status:
-            self._apply_status_visibility(show_status)
+        next_state = self._compute_view_state(text, show_status=False)
         self._apply_call_state_delta(prev_state, next_state)
-        filtered = next_state["filtered_sorted"]
-        if show_status:
-            self.ping_generation += 1
-            gen = self.ping_generation
-            queue = []
-            queued_keys = set()
-            for u in filtered:
-                pc_name = u.get("pc_name")
-                pc_key = self.canonical_pc_key(pc_name)
-                if not pc_name:
-                    continue
-                cache_key = self._ping_cache_key(pc_name)
-                cached = self.ping_cache.get(cache_key)
-                now = time.time()
-                ttl = self.ping_cache_ttl_ok if cached and cached.get("ok") else self.ping_cache_ttl_fail
-                if cached and (now - cached["ts"] <= ttl):
-                    btn = self.buttons.get(pc_key)
-                    if btn:
-                        btn.set_availability(cached["ok"], os_type=cached.get("os_type", "unknown"))
-                    continue
+        if len(text) >= 3:
+            generation = self.ping_generation
+            self._search_enrichment_job = self.master.after(
+                self._search_enrichment_delay_ms,
+                lambda query=text, gen=generation: self._activate_search_enrichment(query, gen),
+            )
 
-                btn = self.buttons.get(pc_key)
-                if btn:
-                    btn.set_status("checking")
-                task_key = self._ping_cache_key(pc_name)
-                if task_key and task_key not in queued_keys:
-                    queued_keys.add(task_key)
-                    queue.append(dict(u))
-            self._schedule_ping_batch(queue, gen)
-        else:
-            self.ping_generation += 1
-            self._pending_ping_users = []
-            if self._ping_queue_job:
-                try:
-                    self.master.after_cancel(self._ping_queue_job)
-                except Exception:
-                    pass
-                self._ping_queue_job = None
+    def _activate_search_enrichment(self, query, generation):
+        self._search_enrichment_job = None
+        current_query = self.search_entry.get().casefold().strip()
+        if generation != self.ping_generation or current_query != query or len(query) < 3:
+            return
+
+        prev_state = self._cw_render_state or {}
+        next_state = self._compute_view_state(query, show_status=True)
+        self._apply_call_state_delta(prev_state, next_state)
+        users = list(next_state["filtered_sorted"])
+        self._search_enrichment_job = self.master.after(
+            1,
+            lambda: self._scan_search_enrichment_batch(generation, users, 0, [], set()),
+        )
+
+    def _scan_search_enrichment_batch(self, generation, users, start_index, queue, queued_keys):
+        self._search_enrichment_job = None
+        if generation != self.ping_generation:
+            return
+
+        end_index = min(len(users), start_index + self._grid_render_batch_size)
+        now = time.time()
+        for user in users[start_index:end_index]:
+            pc_name = user.get("pc_name")
+            if not pc_name:
+                continue
+            pc_key = self.canonical_pc_key(pc_name)
+            cache_key = self._ping_cache_key(pc_name)
+            cached = self.ping_cache.get(cache_key)
+            ttl = self.ping_cache_ttl_ok if cached and cached.get("ok") else self.ping_cache_ttl_fail
+            button = self.buttons.get(pc_key)
+            if cached and now - cached["ts"] <= ttl:
+                if button:
+                    button.set_availability(cached["ok"], os_type=cached.get("os_type", "unknown"))
+                continue
+
+            if button:
+                button.set_status("checking")
+            if cache_key and cache_key not in queued_keys:
+                queued_keys.add(cache_key)
+                queue.append(dict(user))
+
+        if end_index < len(users):
+            self._search_enrichment_job = self.master.after(
+                1,
+                lambda: self._scan_search_enrichment_batch(
+                    generation, users, end_index, queue, queued_keys
+                ),
+            )
+            return
+        self._schedule_ping_batch(queue, generation)
 
     def _schedule_ping_batch(self, users, gen):
         self._pending_ping_users = list(users)
@@ -4461,17 +4549,29 @@ $items = foreach ($u in $users) {{
             with self._ping_inflight_lock:
                 if task_key in self._ping_inflight:
                     continue
-                future = self.executor.submit(self._ping_task, user)
-                self._ping_inflight[task_key] = future
-            future.add_done_callback(lambda completed, key=task_key: self._ping_future_done(key, completed))
+                candidates = self.build_host_candidates(user)
+                task_id = self.ping_process.submit(
+                    candidates,
+                    lambda result, key=task_key, current_user=dict(user), generation=gen: (
+                        self._ping_process_done(key, current_user, generation, result)
+                    ),
+                )
+                if not task_id:
+                    continue
+                self._ping_inflight[task_key] = task_id
             submitted += 1
         if self._pending_ping_users:
             self._ping_queue_job = self.master.after(120, lambda g=gen: self._dispatch_ping_batch(g))
 
-    def _ping_future_done(self, task_key: str, future):
+    def _ping_process_done(self, task_key: str, user: dict, generation: int, result: dict):
         with self._ping_inflight_lock:
-            if self._ping_inflight.get(task_key) is future:
-                self._ping_inflight.pop(task_key, None)
+            self._ping_inflight.pop(task_key, None)
+        if not result.get("completed"):
+            log_message(f"Ping helper: {result.get('error') or 'неизвестная ошибка'}")
+        else:
+            self._apply_ping_result(user, result)
+        if generation == self.ping_generation and self._pending_ping_users and not self._ping_queue_job:
+            self._ping_queue_job = self.master.after(0, lambda g=generation: self._dispatch_ping_batch(g))
 
     def clear_search(self, _=None):
         self.search_entry.delete(0, "end")
@@ -4479,9 +4579,12 @@ $items = foreach ($u in $users) {{
         self._do_search()
         return "break"
 
-    def _ping_task(self, user):
+    def _apply_ping_result(self, user, result):
         pc = user.get("pc_name", "")
-        ok, host, ip, os_type = self.check_availability(user)
+        ok = bool(result.get("ok"))
+        host = str(result.get("host") or "")
+        ip = str(result.get("ip") or "")
+        os_type = self.detect_os_type_from_host(host)
         cache_key = self._ping_cache_key(pc)
         cached = self.ping_cache.get(cache_key, {}) if cache_key else {}
         resolved_os = (os_type or "unknown").lower()
@@ -4506,8 +4609,8 @@ $items = foreach ($u in $users) {{
             }
         self.remember_os_type(host or pc, resolved_os)
         if not ok:
-            self.master.after(0, self._queue_glpi_inventory_from_failed_ping, dict(user))
-        self.master.after(0, self._update_btn_style, pc, ok, resolved_os)
+            self._queue_glpi_inventory_from_failed_ping(dict(user))
+        self._update_btn_style(pc, ok, resolved_os)
 
     def check_availability(self, user):
         candidates = self.build_host_candidates(user)
@@ -6237,8 +6340,8 @@ $items = foreach ($u in $users) {{
                 pass
             self._glpi_ping_flush_job = None
         self._glpi_ping_pending.clear()
-        try: self.executor.shutdown(wait=False)
-        except: pass
+        try: self.ping_process.shutdown()
+        except Exception: pass
         try: self._ad_lookup_executor.shutdown(wait=False, cancel_futures=True)
         except Exception: pass
         try:
@@ -6878,11 +6981,33 @@ class UserButton(ttk.Frame):
         self._update_os_badge(self.app.user_bg, self.app.user_fg)
 
     def set_status(self, status_key: str):
-        """Запоминаем статус и перерисовываем только при изменении."""
+        """Запоминаем статус, а скрытую подпись обновляем только перед показом."""
         if self.status_key == status_key:
             return
         self.status_key = status_key
-        self.refresh_text()
+        if self.show_status:
+            self._refresh_status_display()
+
+    def set_show_status(self, show_status: bool):
+        show_status = bool(show_status)
+        if self.show_status == show_status:
+            return
+        self.show_status = show_status
+        self._refresh_status_display()
+
+    def _refresh_status_display(self):
+        """Меняет только текст и статусную иконку, не пересоздавая стили и OS-бейджи."""
+        pc_label = self.app.get_user_pc_display(self.user)
+        if self.caller_info:
+            self.btn.config(text=self._compose_text(pc_label))
+            return
+        status_image = self._status_image_for_key()
+        self.btn.config(
+            text=self._compose_text(pc_label),
+            image=status_image or "",
+        )
+        self.btn.image = status_image
+        self.status_image = status_image
 
     def refresh_text(self):
         pc_label = self.app.get_user_pc_display(self.user)
@@ -6945,9 +7070,7 @@ class UserButton(ttk.Frame):
 
         if status_changed:
             self.set_status(new_status)
-        elif os_changed:
-            self.refresh_text()
-        else:
+        if os_changed or visual_changed:
             self._update_os_badge(self.btn.cget("bg"), self.btn.cget("fg"))
 
     def _update_os_visual_by_type(self, os_type: str):
@@ -8185,4 +8308,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
