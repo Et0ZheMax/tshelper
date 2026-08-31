@@ -162,6 +162,42 @@ function Assert-ChildPath {
     return $normalizedCandidate
 }
 
+function Get-FileSha256 {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($hash) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Preserve-AdHelperEnvironment {
+    param([string]$EnvironmentPath, [string]$PreservedPath)
+    if (Test-Path -LiteralPath $PreservedPath) { return }
+    if (-not (Test-Path -LiteralPath $EnvironmentPath -PathType Container)) { return }
+    $preservedParent = Split-Path -Parent $PreservedPath
+    if ($preservedParent) { New-Item -ItemType Directory -Path $preservedParent -Force | Out-Null }
+    Move-Item -LiteralPath $EnvironmentPath -Destination $PreservedPath -Force
+    Write-UpdateLog "Окружение ADHelper сохранено без переустановки"
+}
+
+function Restore-AdHelperEnvironment {
+    param([string]$EnvironmentPath, [string]$PreservedPath)
+    if (-not (Test-Path -LiteralPath $PreservedPath -PathType Container)) { return }
+    if (Test-Path -LiteralPath $EnvironmentPath) {
+        Remove-Item -LiteralPath $EnvironmentPath -Recurse -Force
+    }
+    $environmentParent = Split-Path -Parent $EnvironmentPath
+    if ($environmentParent) { New-Item -ItemType Directory -Path $environmentParent -Force | Out-Null }
+    Move-Item -LiteralPath $PreservedPath -Destination $EnvironmentPath -Force
+    Write-UpdateLog "Окружение ADHelper восстановлено в обновлённое приложение"
+}
+
 function Test-TargetWritable {
     param([string]$Root)
     $probe = Join-Path $Root ".tshelper-update-write-$PID.tmp"
@@ -260,6 +296,17 @@ $updatesRoot = Join-Path $updatesBase "TSHelper\updates"
 $backupRoot = Join-Path $updatesRoot "backups\$ExpectedVersion-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $backupRoot = Get-NormalizedPath $backupRoot
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+$adHelperEnvironment = Assert-ChildPath $targetRoot (Join-Path $targetRoot "apps\adhelper2\.venv")
+$preservedAdHelperEnvironment = Assert-ChildPath $backupRoot (Join-Path $backupRoot "_preserved\adhelper2-venv")
+$oldAdHelperRequirements = Assert-ChildPath $targetRoot (Join-Path $targetRoot "apps\adhelper2\requirements.txt")
+$newAdHelperRequirements = Assert-ChildPath $sourceRoot (Join-Path $sourceRoot "apps\adhelper2\requirements.txt")
+$oldAdHelperRequirementsHash = Get-FileSha256 $oldAdHelperRequirements
+$newAdHelperRequirementsHash = Get-FileSha256 $newAdHelperRequirements
+$adHelperRequirementsUnchanged = (
+    $oldAdHelperRequirementsHash -and
+    $newAdHelperRequirementsHash -and
+    $oldAdHelperRequirementsHash -eq $newAdHelperRequirementsHash
+)
 Initialize-ProgressWindow
 
 try {
@@ -276,6 +323,9 @@ try {
 
     Set-UpdateProgress -Message "Создание резервной копии…" -Percent 22
     Write-UpdateLog "Создание резервной копии перед обновлением до $ExpectedVersion"
+    Preserve-AdHelperEnvironment `
+        -EnvironmentPath $adHelperEnvironment `
+        -PreservedPath $preservedAdHelperEnvironment
     foreach ($relativePath in $managedPaths) {
         $sourcePath = Assert-ChildPath $sourceRoot (Join-Path $sourceRoot $relativePath)
         if (-not (Test-Path -LiteralPath $sourcePath)) {
@@ -305,6 +355,10 @@ try {
         Update-ProgressEvents
     }
 
+    Restore-AdHelperEnvironment `
+        -EnvironmentPath $adHelperEnvironment `
+        -PreservedPath $preservedAdHelperEnvironment
+
     $venvPython = Join-Path $targetRoot ".venv\Scripts\python.exe"
     if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
         Set-UpdateProgress -Message "Обновление компонентов…" -Percent 78 -Marquee
@@ -319,6 +373,21 @@ try {
         }
     }
 
+    if (Test-Path -LiteralPath $adHelperEnvironment -PathType Container) {
+        $adHelperRequirementsMarker = Join-Path $adHelperEnvironment ".requirements.sha256"
+        if ($adHelperRequirementsUnchanged) {
+            [System.IO.File]::WriteAllText(
+                $adHelperRequirementsMarker,
+                $newAdHelperRequirementsHash,
+                [System.Text.Encoding]::ASCII
+            )
+            Write-UpdateLog "Зависимости ADHelper не изменились; повторная установка не требуется"
+        } elseif (Test-Path -LiteralPath $adHelperRequirementsMarker) {
+            Remove-Item -LiteralPath $adHelperRequirementsMarker -Force
+            Write-UpdateLog "Состав зависимостей ADHelper изменился; установка будет выполнена при запуске"
+        }
+    }
+
     Set-UpdateProgress -Message "Запуск обновлённого TSHelper…" -Percent 94
     Write-UpdateLog "Обновление до $ExpectedVersion успешно установлено"
     Set-UpdateProgress -Message "Обновление успешно установлено" -Percent 100
@@ -330,7 +399,15 @@ try {
     $message = $_.Exception.Message
     Write-UpdateLog "Ошибка обновления: $message"
     Set-UpdateProgress -Message "Восстановление предыдущей версии…" -Percent 60 -Marquee
-    try { Restore-Backup -BackupRoot $backupRoot -TargetRoot $targetRoot } catch {
+    try {
+        Preserve-AdHelperEnvironment `
+            -EnvironmentPath $adHelperEnvironment `
+            -PreservedPath $preservedAdHelperEnvironment
+        Restore-Backup -BackupRoot $backupRoot -TargetRoot $targetRoot
+        Restore-AdHelperEnvironment `
+            -EnvironmentPath $adHelperEnvironment `
+            -PreservedPath $preservedAdHelperEnvironment
+    } catch {
         Write-UpdateLog "Ошибка отката: $($_.Exception.Message)"
     }
     Close-ProgressWindow

@@ -57,6 +57,19 @@ class UsersPageSourceRegressionTests(unittest.TestCase):
         self.assertIn('Переместить в правильный OU', self.source)
         self.assertIn('{"target_ou": target_dn}', self.source)
 
+    def test_user_details_scroll_without_compressing_editors(self) -> None:
+        self.assertIn("self.details_scroll = QScrollArea()", self.source)
+        self.assertIn("self.details_scroll.setWidgetResizable(True)", self.source)
+        self.assertIn("edit.setMinimumHeight(36)", self.source)
+
+    def test_save_updates_visible_record_and_uses_status_toasts(self) -> None:
+        self.assertIn("self.records[row] = updated_user", self.source)
+        self.assertIn("self._set_table_user_row(row, updated_user)", self.source)
+        self.assertIn("self._show_selected_user(updated_user)", self.source)
+        self.assertIn("worker.signals.error.connect(self._save_error)", self.source)
+        self.assertIn("show_status_toast(", self.source)
+        self.assertNotIn('QMessageBox.information(self, "Готово"', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

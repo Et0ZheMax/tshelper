@@ -6,7 +6,7 @@ from typing import Any
 from PySide6.QtCore import QThreadPool, QTimer, Qt
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -19,7 +19,7 @@ from ...organization import (
 from ...services.ou_alignment import OUAlignment, parent_dn
 from ...services.welcome import select_welcome_domain
 from ...workers import FunctionWorker
-from ..widgets import BusyBar, PageHeader, SelectionDialog
+from ..widgets import BusyBar, PageHeader, SelectionDialog, show_status_toast
 
 
 class UsersPage(QWidget):
@@ -100,7 +100,20 @@ class UsersPage(QWidget):
 
         right = QFrame()
         right.setObjectName("Card")
-        right_layout = QVBoxLayout(right)
+        right.setMinimumWidth(430)
+        right_shell = QVBoxLayout(right)
+        right_shell.setContentsMargins(0, 0, 0, 0)
+        self.details_scroll = QScrollArea()
+        self.details_scroll.setObjectName("UserDetailsScroll")
+        self.details_scroll.setWidgetResizable(True)
+        self.details_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.details_scroll.viewport().setAutoFillBackground(False)
+        right_content = QWidget()
+        right_content.setObjectName("UserDetailsContent")
+        right_content.setAutoFillBackground(False)
+        right_layout = QVBoxLayout(right_content)
+        right_layout.setContentsMargins(16, 14, 16, 14)
         self.selected_label = QLabel("Пользователь не выбран")
         self.selected_label.setObjectName("CardTitle")
         right_layout.addWidget(self.selected_label)
@@ -155,6 +168,7 @@ class UsersPage(QWidget):
             else:
                 edit = QLineEdit()
                 edit.textEdited.connect(lambda _text, field=key: self._mark_field_dirty(field))
+            edit.setMinimumHeight(36)
             self.edits[key] = edit
             form.addRow(label, edit)
         self.mail_check = QCheckBox("Корпоративная почта назначена")
@@ -167,6 +181,8 @@ class UsersPage(QWidget):
         self.save_button.clicked.connect(self.save)
         right_layout.addWidget(self.save_button, 0, Qt.AlignmentFlag.AlignRight)
         right_layout.addStretch(1)
+        self.details_scroll.setWidget(right_content)
+        right_shell.addWidget(self.details_scroll)
 
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -196,22 +212,27 @@ class UsersPage(QWidget):
         for row, user in enumerate(self.records):
             if not isinstance(user, UserRecord):
                 continue
-            ou = parent_dn(user.dn) or user.dn
-            values = [
-                user.display_name,
-                user.sam,
-                user.domain,
-                user.department,
-                "Активен" if user.enabled else "Отключён",
-                ou,
-                "—",
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(row, column, item)
+            self._set_table_user_row(row, user)
         if not self.records:
             QMessageBox.information(self, "Поиск", "Пользователи не найдены")
+
+    def _set_table_user_row(self, row: int, user: UserRecord) -> None:
+        values = [
+            user.display_name,
+            user.sam,
+            user.domain,
+            user.department,
+            "Активен" if user.enabled else "Отключён",
+            parent_dn(user.dn) or user.dn,
+        ]
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, column, item)
+        if self.table.item(row, 6) is None:
+            item = QTableWidgetItem("—")
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 6, item)
 
     def _select_record(self) -> None:
         rows = self.table.selectionModel().selectedRows()
@@ -222,7 +243,9 @@ class UsersPage(QWidget):
         if index >= len(self.records):
             self._clear_selected_user()
             return
-        user = self.records[index]
+        self._show_selected_user(self.records[index])
+
+    def _show_selected_user(self, user: UserRecord) -> None:
         self.selected = user
         self.selected_label.setText(f"{user.display_name} · {user.domain}")
         self.identity_label.setText(f"{user.sam} · {user.upn}\n{user.dn}")
@@ -633,7 +656,7 @@ class UsersPage(QWidget):
         worker = FunctionWorker(self._resolve_and_update, user, dict(changes))
         self._active_worker = worker
         worker.signals.result.connect(self._save_ready)
-        worker.signals.error.connect(self._error)
+        worker.signals.error.connect(self._save_error)
         worker.signals.finished.connect(self._worker_finished)
         self.pool.start(worker)
 
@@ -653,15 +676,36 @@ class UsersPage(QWidget):
         self.context.events.operations_changed.emit()
         data = getattr(result, "data", {})
         updated = data.get("updated_user") if isinstance(data, dict) else None
-        if isinstance(updated, dict):
-            self.selected = UserRecord.from_mapping(updated)
+        previous = self.selected
+        if isinstance(updated, dict) and previous is not None:
+            updated_user = UserRecord.from_mapping(updated)
+            previous_key = self._ou_cache_key(previous)
+            updated_key = self._ou_cache_key(updated_user)
+            for row, record in enumerate(self.records):
+                same_domain = record.domain.casefold() == previous.domain.casefold()
+                same_identity = (record.guid or record.sam).casefold() == (previous.guid or previous.sam).casefold()
+                if same_domain and same_identity:
+                    self.records[row] = updated_user
+                    self._set_table_user_row(row, updated_user)
+                    break
+            if previous_key != updated_key:
+                self._ou_cache.pop(previous_key, None)
+                self._ou_cache.pop(updated_key, None)
+            self._show_selected_user(updated_user)
         self._dirty_fields.clear()
         self._mail_dirty = False
-        QMessageBox.information(self, "Готово", "Изменены только выбранные поля. Операция записана в аудит.")
-        if self._active_worker is None:
-            QTimer.singleShot(0, self.search)
-        else:
+        self._update_save_button()
+        show_status_toast(
+            self,
+            "Изменения сохранены. Карточка пользователя обновлена, операция записана в аудит.",
+            success=True,
+        )
+        if not isinstance(updated, dict):
             self._refresh_after_finish = True
+
+    def _save_error(self, message: str, trace: str) -> None:
+        self.context.events.log_message.emit(trace)
+        show_status_toast(self, f"Не удалось сохранить изменения: {message}", success=False, duration_ms=6500)
 
     def _show_context_menu(self, position) -> None:
         index = self.table.indexAt(position)

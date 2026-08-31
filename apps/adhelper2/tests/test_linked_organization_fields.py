@@ -73,6 +73,52 @@ class LinkedOrganizationFieldsTests(unittest.TestCase):
         self.assertTrue(page.edits["section"].isEnabled())
         page.close()
 
+    def test_details_panel_scrolls_instead_of_compressing_editors(self) -> None:
+        page = self.make_page()
+        page.resize(900, 500)
+        page.show()
+        self.app.processEvents()
+
+        self.assertGreater(page.details_scroll.verticalScrollBar().maximum(), 0)
+        self.assertTrue(all(editor.height() >= 36 for editor in page.edits.values()))
+        page.close()
+
+    def test_successful_save_refreshes_selected_card_and_table_immediately(self) -> None:
+        events = SimpleNamespace(operations_changed=SimpleNamespace(emit=lambda: None))
+        domain = SimpleNamespace(profile="standard")
+        context = SimpleNamespace(ad=SimpleNamespace(domain_by_name={"test": domain}), events=events)
+        page = UsersPage(context)
+        page._start_ou_analysis = lambda _user: None
+        original = UserRecord(
+            domain="test",
+            display_name="Иванов Иван",
+            sam="iivanov",
+            guid="guid-1",
+            department="Старое управление",
+        )
+        page.records = [original]
+        page.table.setRowCount(1)
+        page._set_table_user_row(0, original)
+        page.table.selectRow(0)
+        page._show_selected_user(original)
+
+        result = SimpleNamespace(data={"updated_user": {
+            "domain": "test",
+            "displayName": "Иванов Иван",
+            "sam": "iivanov",
+            "guid": "guid-1",
+            "department": "Новое управление",
+            "enabled": True,
+        }})
+        page._save_ready(result)
+        self.app.processEvents()
+
+        self.assertEqual(page.selected.department, "Новое управление")
+        self.assertEqual(page._field_text("department"), "Новое управление")
+        self.assertEqual(page.table.item(0, 3).text(), "Новое управление")
+        self.assertEqual(page.window()._status_toast.objectName(), "StatusToastSuccess")
+        page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

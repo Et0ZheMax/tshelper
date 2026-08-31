@@ -1,7 +1,53 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
+
+
+class StatusToast(QFrame):
+    def __init__(self, parent: QWidget, message: str, success: bool, duration_ms: int = 4200) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusToastSuccess" if success else "StatusToastError")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        width = max(280, min(440, parent.width() - 48))
+        self.setFixedWidth(width)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 14, 18, 14)
+        layout.setSpacing(12)
+        icon = QLabel("✓" if success else "!")
+        icon.setObjectName("StatusToastIcon")
+        icon.setFixedWidth(24)
+        icon.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(icon)
+        text = QLabel(message)
+        text.setObjectName("StatusToastText")
+        text.setWordWrap(True)
+        text.setFixedWidth(max(200, width - 74))
+        layout.addWidget(text, 1)
+        self.adjustSize()
+        self.move(max(16, parent.width() - self.width() - 24), 24)
+        self.show()
+        self.raise_()
+        QTimer.singleShot(duration_ms, self._expire)
+
+    def _expire(self) -> None:
+        self.close()
+        self.deleteLater()
+
+
+def show_status_toast(parent: QWidget, message: str, *, success: bool, duration_ms: int = 4200) -> StatusToast:
+    host = parent.window()
+    previous = getattr(host, "_status_toast", None)
+    if previous is not None:
+        try:
+            previous.close()
+            previous.deleteLater()
+        except RuntimeError:
+            pass
+    toast = StatusToast(host, message, success, duration_ms)
+    host._status_toast = toast
+    return toast
 
 
 class PageHeader(QWidget):

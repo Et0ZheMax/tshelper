@@ -241,6 +241,9 @@ def test_secure_portable_update_contract():
     updater_source = Path(updater_script).read_text(encoding='utf-8-sig')
     assert 'Initialize-ProgressWindow' in updater_source, 'installer progress window is missing'
     assert 'scripts\\run_tshelper.bat' in updater_source, 'source launcher is not supported'
+    assert 'Preserve-AdHelperEnvironment' in updater_source, 'ADHelper environment preservation is missing'
+    assert 'Restore-AdHelperEnvironment' in updater_source, 'ADHelper environment restoration is missing'
+    assert '.requirements.sha256' in updater_source, 'ADHelper requirements marker is missing'
 
 
 def test_noisy_powershell_json_and_paged_ad_search():
@@ -1066,11 +1069,13 @@ def test_embedded_adhelper2_command():
     assert '.adhelper-ready' in batch_source, 'ADHelper2 bootstrap ready marker missing'
     assert 'pythonw.exe' in batch_source, 'ADHelper2 GUI launcher missing'
     assert 'pip install -r requirements.txt' in batch_source, 'ADHelper2 dependency installation missing'
+    assert '.requirements.sha256' in batch_source, 'ADHelper2 requirements fingerprint missing'
+    assert 'NEEDS_INSTALL' in batch_source, 'ADHelper2 conditional dependency installation missing'
 
     constants_source = open(os.path.join(working_directory, 'adhelper', 'constants.py'), encoding='utf-8').read()
     package_source = open(os.path.join(working_directory, 'adhelper', '__init__.py'), encoding='utf-8').read()
-    assert 'APP_VERSION = "2.1.0"' in constants_source, 'embedded ADHelper2 application version'
-    assert '__version__ = "2.1.0"' in package_source, 'embedded ADHelper2 package version'
+    assert 'APP_VERSION = "2.1.1"' in constants_source, 'embedded ADHelper2 application version'
+    assert '__version__ = "2.1.1"' in package_source, 'embedded ADHelper2 package version'
 
 
 if __name__ == '__main__':

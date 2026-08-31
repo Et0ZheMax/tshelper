@@ -34,6 +34,8 @@ class ThemeColors:
     danger: str
     danger_hover: str
     danger_pressed: str
+    success: str
+    success_border: str
     scrollbar: str
     scrollbar_hover: str
     link: str
@@ -70,6 +72,8 @@ THEMES: dict[str, ThemeColors] = {
         danger="#B4232F",
         danger_hover="#CA2D3B",
         danger_pressed="#951D28",
+        success="#166534",
+        success_border="#22C55E",
         scrollbar="#3B4658",
         scrollbar_hover="#526177",
         link="#7DB0FF",
@@ -104,6 +108,8 @@ THEMES: dict[str, ThemeColors] = {
         danger="#C62835",
         danger_hover="#B4232F",
         danger_pressed="#92202A",
+        success="#15803D",
+        success_border="#16A34A",
         scrollbar="#C3CDD9",
         scrollbar_hover="#98A6B8",
         link="#1D4ED8",
@@ -180,6 +186,10 @@ QFrame#Sidebar {{ background-color: {c.sidebar}; border-right: 1px solid {c.bord
 QFrame#Topbar {{ background-color: {c.window_alt}; border-bottom: 1px solid {c.border}; }}
 QFrame#Card {{ background-color: {c.card}; border: 1px solid {c.border}; border-radius: 12px; }}
 QFrame#InsetCard {{ background-color: {c.inset}; border: 1px solid {c.border_strong}; border-radius: 10px; }}
+QFrame#StatusToastSuccess {{ background-color: {c.success}; border: 1px solid {c.success_border}; border-radius: 10px; }}
+QFrame#StatusToastError {{ background-color: {c.danger}; border: 1px solid {c.danger_hover}; border-radius: 10px; }}
+QLabel#StatusToastIcon {{ color: #FFFFFF; font-size: 16pt; font-weight: 700; }}
+QLabel#StatusToastText {{ color: #FFFFFF; font-size: 10pt; font-weight: 600; }}
 QLabel#LogoTitle {{ font-size: 14pt; font-weight: 700; color: {c.title}; padding: 0 6px; }}
 QLabel#LogoVersion {{ color: {c.muted}; padding: 0 6px; }}
 QLabel#PageTitle {{ font-size: 22pt; font-weight: 700; color: {c.title}; }}
@@ -298,6 +308,7 @@ QScrollBar::handle:vertical {{ background-color: {c.scrollbar}; border-radius: 5
 QScrollBar::handle:vertical:hover {{ background-color: {c.scrollbar_hover}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+QScrollArea#UserDetailsScroll, QWidget#UserDetailsContent {{ background: transparent; border: none; }}
 QScrollBar:horizontal {{ background: transparent; height: 12px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background-color: {c.scrollbar}; border-radius: 5px; min-width: 24px; }}
 QScrollBar::handle:horizontal:hover {{ background-color: {c.scrollbar_hover}; }}
