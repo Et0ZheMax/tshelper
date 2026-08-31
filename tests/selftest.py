@@ -752,6 +752,30 @@ def test_grid_render_is_batched_and_cancelable():
         def grid_columnconfigure(_column, weight):
             assert_eq(weight, 1, 'grid column weight')
 
+    class FakeCanvas:
+        def __init__(self):
+            self.window_states = []
+
+        def itemconfigure(self, item, **kwargs):
+            if item == 'window' and 'state' in kwargs:
+                self.window_states.append(kwargs['state'])
+
+        @staticmethod
+        def create_text(*_args, **_kwargs):
+            return 'overlay'
+
+        @staticmethod
+        def tag_raise(_item):
+            return None
+
+        @staticmethod
+        def winfo_width():
+            return 800
+
+        @staticmethod
+        def winfo_height():
+            return 600
+
     class FakeWidget:
         def __init__(self):
             self.show_status = False
@@ -775,6 +799,8 @@ def test_grid_render_is_batched_and_cancelable():
     app = mod.MainWindow.__new__(mod.MainWindow)
     app.master = FakeMaster()
     app.inner = FakeInner()
+    app.canvas = FakeCanvas()
+    app.canvas_window = 'window'
     app.user_widgets = {f'pc-{index}': FakeWidget() for index in range(60)}
     app.buttons = {}
     app._grid_positions = {}
@@ -783,6 +809,9 @@ def test_grid_render_is_batched_and_cancelable():
     app._grid_render_generation = 0
     app._grid_render_needs_sync = False
     app._grid_render_batch_size = 24
+    app._grid_render_active = False
+    app._grid_render_overlay = None
+    app._scroll_reset_pending = False
     app.orphan_widgets = []
     app.empty_state_label = None
     app._cw_render_state = {'ordered_keys': []}
@@ -792,6 +821,7 @@ def test_grid_render_is_batched_and_cancelable():
     keys = list(app.user_widgets)
     app.render_grid(keys, [], show_status=True)
     assert_eq(len(app._rendered_keys), 24, 'first UI pass is bounded')
+    assert_eq(app.canvas.window_states[-1], 'hidden', 'partial grid is not exposed')
     assert app.master.jobs, 'remaining cards are deferred to the event loop'
     assert_eq(
         sum(widget.refresh_calls for widget in app.user_widgets.values()),
@@ -803,6 +833,7 @@ def test_grid_render_is_batched_and_cancelable():
     while app.master.jobs:
         app.master.run_next()
     assert_eq(app._rendered_keys, {'pc-0'}, 'stale render is cancelled after query change')
+    assert_eq(app.canvas.window_states[-1], 'normal', 'only completed grid is revealed')
     assert_eq(set(app.buttons), {'pc-0'}, 'button lookup follows latest query immediately')
 
     app.render_grid(keys, [], show_status=False)
@@ -812,6 +843,7 @@ def test_grid_render_is_batched_and_cancelable():
         app.master.run_next()
         assert len(app._rendered_keys) - before <= app._grid_render_batch_size
     assert_eq(app._rendered_keys, set(keys), 'cleared search restores every card progressively')
+    assert_eq(app.canvas.window_states[-1], 'normal', 'restored grid is revealed atomically')
 
 
 def test_search_status_and_ping_are_deferred():

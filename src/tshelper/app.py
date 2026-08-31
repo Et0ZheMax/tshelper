@@ -1785,6 +1785,9 @@ class MainWindow:
         self._grid_render_generation = 0
         self._grid_render_needs_sync = False
         self._grid_render_batch_size = 24
+        self._grid_render_active = False
+        self._grid_render_overlay = None
+        self._scroll_reset_pending = False
         self.orphan_widgets = []
         self.empty_state_label = None
         self.search_job = None
@@ -3280,7 +3283,16 @@ $items = foreach ($u in $users) {{
     def _update_scrollregion(self, _=None):
         if getattr(self, "_sr_job", None):
             self.master.after_cancel(self._sr_job)
-        self._sr_job = self.master.after(80, lambda: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._sr_job = self.master.after(80, self._flush_scrollregion)
+
+    def _flush_scrollregion(self):
+        self._sr_job = None
+        if getattr(self, "_grid_render_active", False):
+            return
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        if self._scroll_reset_pending:
+            self._scroll_reset_pending = False
+            self.canvas.yview_moveto(0.0)
 
     # --------- Док-панель ----------
     def _normalize_dock_side(self, side: str) -> str:
@@ -3720,6 +3732,8 @@ $items = foreach ($u in $users) {{
         # растянуть внутренний фрейм по ширине канвы — зазор пропадёт
         try:
             self.canvas.itemconfig(self.canvas_window, width=evt.width)
+            if self._grid_render_overlay is not None:
+                self.canvas.coords(self._grid_render_overlay, evt.width // 2, max(36, evt.height // 2))
         except Exception:
             pass
 
@@ -4233,12 +4247,14 @@ $items = foreach ($u in $users) {{
         empty_state_changed = (prev_state.get("show_empty") if prev_state else False) != next_state.get("show_empty")
         orphan_changed = (prev_state.get("orphan_signature") if prev_state else ()) != next_state.get("orphan_signature")
         status_changed = (prev_state.get("show_status") if prev_state else False) != next_state.get("show_status")
+        search_changed = (prev_state.get("search_text") if prev_state else "") != next_state.get("search_text")
         if order_changed or empty_state_changed or status_changed or self._grid_render_needs_sync:
             self.render_grid(
                 next_state["ordered_keys"],
                 next_state["orphan_calls"],
                 show_empty_state=next_state["show_empty"],
                 show_status=next_state["show_status"],
+                reset_scroll=search_changed,
             )
         elif orphan_changed:
             self._refresh_orphan_widgets(next_state["orphan_calls"])
@@ -4267,6 +4283,44 @@ $items = foreach ($u in $users) {{
                 self.master.after_cancel(job)
             except Exception:
                 pass
+
+    def _begin_grid_render_transaction(self):
+        if getattr(self, "_grid_render_active", False):
+            return
+        self._grid_render_active = True
+        if getattr(self, "_sr_job", None):
+            try:
+                self.master.after_cancel(self._sr_job)
+            except Exception:
+                pass
+            self._sr_job = None
+        try:
+            self.canvas.itemconfigure(self.canvas_window, state="hidden")
+            if self._grid_render_overlay is None:
+                self._grid_render_overlay = self.canvas.create_text(
+                    max(1, self.canvas.winfo_width()) // 2,
+                    max(36, self.canvas.winfo_height() // 2),
+                    text="Обновление списка…",
+                    fill="#6b7280",
+                    font=("Segoe UI", 11),
+                )
+            else:
+                self.canvas.itemconfigure(self._grid_render_overlay, state="normal")
+            self.canvas.tag_raise(self._grid_render_overlay)
+        except Exception:
+            self._grid_render_active = False
+
+    def _finish_grid_render_transaction(self, reset_scroll=False):
+        if reset_scroll:
+            self._scroll_reset_pending = True
+        if not getattr(self, "_grid_render_active", False):
+            return
+        try:
+            self.canvas.itemconfigure(self.canvas_window, state="normal")
+            if self._grid_render_overlay is not None:
+                self.canvas.itemconfigure(self._grid_render_overlay, state="hidden")
+        finally:
+            self._grid_render_active = False
 
     def _run_grid_render_batch(self, generation, plan):
         if generation != self._grid_render_generation:
@@ -4320,9 +4374,17 @@ $items = foreach ($u in $users) {{
             cols=plan["cols"],
         )
         self._grid_render_needs_sync = False
+        self._finish_grid_render_transaction(reset_scroll=plan["reset_scroll"])
         self._update_scrollregion()
 
-    def render_grid(self, ordered_keys, orphan_calls, show_empty_state=False, show_status=None):
+    def render_grid(
+        self,
+        ordered_keys,
+        orphan_calls,
+        show_empty_state=False,
+        show_status=None,
+        reset_scroll=False,
+    ):
         self._cancel_grid_render()
         generation = self._grid_render_generation
         self._grid_render_needs_sync = True
@@ -4345,6 +4407,12 @@ $items = foreach ($u in $users) {{
             (pc_key, index // cols, index % cols)
             for index, pc_key in enumerate(ordered_keys)
         ]
+        layout_changed = bool(hide_keys) or any(
+            pc_key not in rendered_keys or self._grid_positions.get(pc_key) != (row, col)
+            for pc_key, row, col in layout
+        )
+        if layout_changed or getattr(self, "_grid_render_active", False):
+            self._begin_grid_render_transaction()
 
         for i in range(cols):
             self.inner.grid_columnconfigure(i, weight=1)
@@ -4363,6 +4431,7 @@ $items = foreach ($u in $users) {{
                 else bool(len(self.search_entry.get().strip()) >= 3)
             ),
             "cols": cols,
+            "reset_scroll": bool(reset_scroll),
         }
         self._run_grid_render_batch(generation, plan)
 
