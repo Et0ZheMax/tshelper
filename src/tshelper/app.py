@@ -1734,6 +1734,10 @@ class MainWindow:
     def __init__(self, master):
         self.master = master
         self.master.title(f"{APP_NAME} {VERSION}")
+        try:
+            self.master.iconbitmap(asset_path("ts-logo.ico"))
+        except Exception as exc:
+            log_message(f"Не удалось установить значок главного окна: {exc}")
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         if USE_BOOTSTRAP:
@@ -1873,6 +1877,7 @@ class MainWindow:
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.master.bind("<Unmap>", self._on_unmap)
         self.master.bind("<Map>", self._on_map)
+        self.master.after(0, self._show_tray_icon)
 
         # авто-проверка обновлений и preflight
         self._start_update_check()
@@ -4956,11 +4961,81 @@ $items = foreach ($u in $users) {{
         )
         self.show_glpi_inventory_monitor()
 
+    def enqueue_glpi_inventory_for_ip_lookup(self, user: dict) -> str:
+        """Поставить независимую приоритетную сверку GLPI после запроса IP."""
+        if not self.settings.get_setting("glpi_inventory_bridge_enabled", True):
+            return ""
+        job_id = self.glpi_inventory.enqueue(user, "ip_lookup", priority=1000, force=True)
+        if job_id:
+            log_message(
+                f"GLPI Inventory: приоритетная актуализация после запроса IP для "
+                f"{user.get('name', login_from_user(user) or '?')}"
+            )
+        return job_id
+
+    def _prompt_glpi_primary_computer(self, user: dict):
+        """Предложить основной ПК после появления нового многокомпьютерного списка."""
+        pc_names = user_pc_names(user)
+        if len(pc_names) < 2:
+            return
+
+        def show_prompt():
+            current_user = next(
+                (item for item in self.users.get_users() if login_from_user(item) == login_from_user(user)),
+                None,
+            )
+            if not current_user or len(user_pc_names(current_user)) < 2:
+                return
+            key = self.canonical_pc_key(current_user.get("pc_name", ""))
+            widget = self.user_widgets.get(key) or self.buttons.get(key)
+            if not widget or not widget.winfo_exists():
+                self.show_toast(
+                    "GLPI Inventory",
+                    f"У {current_user.get('name', '')} найдено несколько ПК. "
+                    "Основной компьютер можно выбрать при открытии карточки.",
+                )
+                return
+            contexts = [
+                (pc, self.resolve_os_type_for_host(pc))
+                for pc in user_pc_names(current_user)
+            ]
+            widget._ask_primary_pc(contexts)
+
+        # populate_buttons обновляет карточки порционно, поэтому выбор открываем после синхронизации UI.
+        self.master.after(180, show_prompt)
+
     def _handle_glpi_inventory_completed(self, job: dict, record: dict):
         login = login_from_user({"ad_login": record.get("login", "")})
         if not login:
             return
-        if job.get("reason") not in {"ad_sync", "ping_failed"}:
+        reason = job.get("reason")
+        if reason == "ip_lookup":
+            for index, user in enumerate(self.users.get_users()):
+                if login_from_user(user) != login:
+                    continue
+                old_hosts = {host_identity_key(host) for host in user_pc_names(user)}
+                updated = self.users._normalize_user(apply_inventory_computers(user, record))
+                new_hosts = {host_identity_key(host) for host in user_pc_names(updated)}
+                if updated == user:
+                    return
+                hosts_changed = old_hosts != new_hosts
+                if hosts_changed:
+                    # Новый список требует явного выбора, если GLPI вернул больше одного ПК.
+                    updated["pc_primary_confirmed"] = len(new_hosts) < 2
+                self._ensure_glpi_inventory_auto_backup()
+                self.users.users[index] = updated
+                self.users.save()
+                self.populate_buttons()
+                log_action(
+                    f"GLPI Inventory (запрос IP): {user.get('name', '?')}; "
+                    f"ПК: {', '.join(user_pc_names(user)) or 'нет'} -> "
+                    f"{', '.join(user_pc_names(updated)) or 'нет'}"
+                )
+                if hosts_changed and len(new_hosts) > 1:
+                    self._prompt_glpi_primary_computer(updated)
+                return
+            return
+        if reason not in {"ad_sync", "ping_failed"}:
             return
         if not self.settings.get_setting("glpi_inventory_auto_apply_single", True):
             return
@@ -6460,7 +6535,6 @@ $items = foreach ($u in $users) {{
     def _on_map(self, _event):
         if not self._is_minimized_custom:
             self._destroy_mini_widget()
-            self._hide_tray_icon()
         self._mark_activity()
 
     def minimize_app(self):
@@ -6494,7 +6568,6 @@ $items = foreach ($u in $users) {{
         finally:
             self.master.after(150, lambda: setattr(self, "_ignore_unmap", False))
         self._destroy_mini_widget()
-        self._hide_tray_icon()
         self._mark_activity()
 
     def _remember_mini_geometry(self):
@@ -7452,6 +7525,7 @@ class UserButton(ttk.Frame):
         menu.add_separator()
         menu.add_command(label="Сброс пароля pak", command=lambda: self.reset_password_ps("pak"))
         menu.add_command(label="Сброс пароля omg", command=lambda: self.reset_password_ps("omg"))
+        menu.add_command(label="Проверить на блокировки", command=self.check_account_lockouts)
         menu.add_separator()
         menu.add_command(label="Редактировать", command=lambda: self.app.open_edit_window(self.user))
         menu.add_command(label="Удалить", command=lambda: self.app.delete_user_from_button(self.user))
@@ -7659,6 +7733,13 @@ class UserButton(ttk.Frame):
 
     def get_ip(self):
         action_user = self._action_user(strict=False)
+        threading.Thread(
+            target=self.app.enqueue_glpi_inventory_for_ip_lookup,
+            args=(dict(action_user),),
+            daemon=True,
+            name="tshelper-glpi-ip-lookup",
+        ).start()
+
         def task():
             candidates = self.app.build_host_candidates(action_user) or [action_user.get("pc_name", "")]
             default_host = candidates[0] if candidates else action_user.get("pc_name", "")
@@ -7748,6 +7829,156 @@ Write-Output "OK"
         except Exception as e:
             log_message(f"Сброс пароля {which}: исключение {e}")
             messagebox.showerror("Сброс пароля", str(e))
+
+    def check_account_lockouts(self):
+        """Проверить блокировку учётной записи в доменах pak и omg."""
+        sam = login_from_user(self.user)
+        if not sam:
+            messagebox.showerror("Проверка блокировок", "Не удалось определить логин пользователя.")
+            return
+        sam_escaped = sam.replace("'", "''")
+        domains = (
+            ("pak", "pak-cspmz.ru"),
+            ("omg", "omg.cspfmba.ru"),
+        )
+        domain_rows = ",".join(
+            f"@{{name='{name}';server='{server}'}}" for name, server in domains
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Import-Module ActiveDirectory
+$results = foreach ($domain in @({domain_rows})) {{
+    try {{
+        $account = @(Get-ADUser -Filter "SamAccountName -eq '{sam_escaped}'" -Server $domain.server -Properties LockedOut -ErrorAction Stop)
+        if ($account.Count -eq 0) {{
+            [pscustomobject]@{{ domain=$domain.name; server=$domain.server; status='not_found'; locked=$false; error='' }}
+        }} elseif ($account.Count -gt 1) {{
+            [pscustomobject]@{{ domain=$domain.name; server=$domain.server; status='error'; locked=$false; error='Найдено несколько учётных записей' }}
+        }} else {{
+            [pscustomobject]@{{ domain=$domain.name; server=$domain.server; status='found'; locked=[bool]$account[0].LockedOut; error='' }}
+        }}
+    }} catch {{
+        [pscustomobject]@{{ domain=$domain.name; server=$domain.server; status='error'; locked=$false; error=$_.Exception.Message }}
+    }}
+}}
+Write-Output ('__TSHELPER_LOCK_STATUS__' + ($results | ConvertTo-Json -Compress))
+""".strip()
+
+        def task():
+            try:
+                result = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                output = (result.stdout or "").strip()
+                error = (result.stderr or "").strip()
+                marker = "__TSHELPER_LOCK_STATUS__"
+                payload_line = next((line for line in output.splitlines() if line.startswith(marker)), "")
+                if result.returncode != 0 or not payload_line:
+                    details = error or output or "PowerShell не вернул результат проверки"
+                    raise RuntimeError(details)
+                rows = json.loads(payload_line[len(marker):])
+                if isinstance(rows, dict):
+                    rows = [rows]
+                log_message(f"Проверка блокировок: user={sam}; results={rows}")
+                self.app.master.after(0, lambda: self._show_account_lockout_result(sam, rows))
+            except Exception as exc:
+                log_message(f"Проверка блокировок: user={sam}; исключение {exc}")
+                self.app.master.after(
+                    0,
+                    lambda message=str(exc): messagebox.showerror("Проверка блокировок", message),
+                )
+
+        threading.Thread(target=task, daemon=True, name="tshelper-ad-lockout-check").start()
+
+    def _show_account_lockout_result(self, sam, rows):
+        locked_domains = [row for row in rows if row.get("status") == "found" and row.get("locked")]
+        details = []
+        for row in rows:
+            domain = str(row.get("domain", "?")).upper()
+            status = row.get("status")
+            if status == "found":
+                details.append(f"{domain}: {'заблокирована' if row.get('locked') else 'не заблокирована'}")
+            elif status == "not_found":
+                details.append(f"{domain}: учётная запись не найдена")
+            else:
+                details.append(f"{domain}: ошибка проверки — {row.get('error') or 'неизвестная ошибка'}")
+        message = f"Учётная запись: {sam}\n\n" + "\n".join(details)
+        if not locked_domains:
+            messagebox.showinfo("Проверка блокировок", message)
+            return
+        locked_names = ", ".join(str(row["domain"]).upper() for row in locked_domains)
+        if messagebox.askyesno(
+            "Обнаружена блокировка",
+            f"{message}\n\nРазблокировать учётную запись в доменах: {locked_names}?",
+        ):
+            self._unlock_accounts(sam, locked_domains)
+
+    def _unlock_accounts(self, sam, locked_domains):
+        sam_escaped = sam.replace("'", "''")
+        domain_rows = ",".join(
+            f"@{{name='{row['domain']}';server='{row['server']}'}}" for row in locked_domains
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Import-Module ActiveDirectory
+$results = foreach ($domain in @({domain_rows})) {{
+    try {{
+        Unlock-ADAccount -Identity '{sam_escaped}' -Server $domain.server -ErrorAction Stop
+        $account = Get-ADUser -Identity '{sam_escaped}' -Server $domain.server -Properties LockedOut -ErrorAction Stop
+        if ([bool]$account.LockedOut) {{ throw 'После команды разблокировки учётная запись осталась заблокированной' }}
+        [pscustomobject]@{{ domain=$domain.name; success=$true; error='' }}
+    }} catch {{
+        [pscustomobject]@{{ domain=$domain.name; success=$false; error=$_.Exception.Message }}
+    }}
+}}
+Write-Output ('__TSHELPER_UNLOCK_STATUS__' + ($results | ConvertTo-Json -Compress))
+""".strip()
+
+        def task():
+            try:
+                result = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                output = (result.stdout or "").strip()
+                error = (result.stderr or "").strip()
+                marker = "__TSHELPER_UNLOCK_STATUS__"
+                payload_line = next((line for line in output.splitlines() if line.startswith(marker)), "")
+                if result.returncode != 0 or not payload_line:
+                    raise RuntimeError(error or output or "PowerShell не вернул результат разблокировки")
+                rows = json.loads(payload_line[len(marker):])
+                if isinstance(rows, dict):
+                    rows = [rows]
+                log_message(f"Разблокировка учётной записи: user={sam}; results={rows}")
+                self.app.master.after(0, lambda: self._show_unlock_result(sam, rows))
+            except Exception as exc:
+                log_message(f"Разблокировка учётной записи: user={sam}; исключение {exc}")
+                self.app.master.after(
+                    0,
+                    lambda message=str(exc): messagebox.showerror("Разблокировка учётной записи", message),
+                )
+
+        threading.Thread(target=task, daemon=True, name="tshelper-ad-account-unlock").start()
+
+    def _show_unlock_result(self, sam, rows):
+        lines = [
+            f"{str(row.get('domain', '?')).upper()}: "
+            f"{'разблокирована' if row.get('success') else 'ошибка — ' + str(row.get('error') or 'неизвестная ошибка')}"
+            for row in rows
+        ]
+        message = f"Учётная запись: {sam}\n\n" + "\n".join(lines)
+        if all(row.get("success") for row in rows):
+            messagebox.showinfo("Разблокировка учётной записи", message)
+            self._log_action(f"Разблокирована учётная запись ({', '.join(row['domain'] for row in rows)})")
+        else:
+            messagebox.showerror("Разблокировка учётной записи", message)
 
     def _show_action_result(self, result, title="Remote Ops"):
         if result.success:

@@ -494,8 +494,49 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
     else:
         raise AssertionError('unknown primary computer must be rejected')
 
+    with tempfile.TemporaryDirectory() as td:
+        manager = mod.UserManager(os.path.join(td, 'users.json'))
+        manager.users = [{
+            'name': 'Тест', 'ad_login': 'test', 'pc_name': 'l-test',
+            'pc_options': [], 'pc_primary_confirmed': True,
+        }]
+        manager.save()
+        app = mod.MainWindow.__new__(mod.MainWindow)
+        app.users = manager
+        app._ensure_glpi_inventory_auto_backup = lambda: None
+        app.populate_buttons = lambda: None
+        prompted = []
+        app._prompt_glpi_primary_computer = lambda updated: prompted.append(dict(updated))
+        app._handle_glpi_inventory_completed({'reason': 'ip_lookup'}, ambiguous)
+        refreshed = manager.get_users()[0]
+        assert_eq(refreshed['pc_name'], 'l-test', 'IP lookup keeps current GLPI host selected by default')
+        assert_eq(refreshed['pc_options'], ['w-test2'], 'IP lookup imports a newly found GLPI computer')
+        assert not refreshed['pc_primary_confirmed'], 'new multi-PC inventory requires explicit primary selection'
+        assert_eq(len(prompted), 1, 'new multi-PC inventory opens the primary-PC question')
+
     app_source = open(os.path.join(ROOT, 'src', 'tshelper', 'app.py'), encoding='utf-8').read()
+    get_ip_body = app_source.split('    def get_ip(', 1)[1].split('    def reset_password_ps(', 1)[0]
+    assert 'tshelper-glpi-ip-lookup' in get_ip_body, 'Get IP must launch GLPI refresh independently'
+    assert get_ip_body.index('tshelper-glpi-ip-lookup') < get_ip_body.index('def task()'), 'GLPI refresh must not delay IP task'
+
     assert 'Внести все ПК в карточки' in app_source, 'multiple-PC report action missing'
+    assert 'label="Проверить на блокировки"' in app_source, 'account lockout action missing from context menu'
+    lockout_body = app_source.split('    def check_account_lockouts(', 1)[1].split('    def _show_account_lockout_result(', 1)[0]
+    assert "-Properties LockedOut" in lockout_body, 'lockout check must request the AD LockedOut property'
+    assert 'pak-cspmz.ru' in lockout_body and 'omg.cspfmba.ru' in lockout_body, 'lockout check must cover both domains'
+    unlock_body = app_source.split('    def _unlock_accounts(', 1)[1].split('    def _show_unlock_result(', 1)[0]
+    assert 'Unlock-ADAccount' in unlock_body, 'locked account action must support unlocking'
+    assert "if ([bool]$account.LockedOut)" in unlock_body, 'unlocking must verify the resulting AD state'
+    assert 'self.master.after(0, self._show_tray_icon)' in app_source, 'tray icon must be created while the main window is open'
+    on_map_body = app_source.split('    def _on_map(', 1)[1].split('    def minimize_app(', 1)[0]
+    restore_body = app_source.split('    def restore_main_window(', 1)[1].split('    def _remember_mini_geometry(', 1)[0]
+    assert '_hide_tray_icon()' not in on_map_body, 'mapping the main window must keep the tray icon'
+    assert '_hide_tray_icon()' not in restore_body, 'restoring the main window must keep the tray icon'
+    shortcut_source = open(os.path.join(ROOT, 'scripts', 'create_tshelper_shortcut.ps1'), encoding='utf-8-sig').read()
+    assert 'TSHelper.lnk' in shortcut_source, 'Start menu shortcut is missing'
+    assert 'assets\\ts-logo.ico' in shortcut_source, 'shortcut must use the branded icon'
+    launcher_source = open(os.path.join(ROOT, 'scripts', 'run_tshelper.bat'), encoding='utf-8').read()
+    assert 'create_tshelper_shortcut.ps1' in launcher_source, 'launcher must create the pinnable shortcut'
     assert 'ДЕЙСТВИЯ С ДРУГИМ ПК' in app_source, 'temporary computer switch is not highlighted'
     assert 'ВЫБРАТЬ ДРУГОЙ ПК — ТОЛЬКО НА ЭТО ДЕЙСТВИЕ' not in app_source, 'wide menu label remains'
     search_body = app_source.split('    def _do_search(', 1)[1].split('    def _schedule_ping_batch(', 1)[0]
