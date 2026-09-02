@@ -537,6 +537,9 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
     assert 'assets\\ts-logo.ico' in shortcut_source, 'shortcut must use the branded icon'
     launcher_source = open(os.path.join(ROOT, 'scripts', 'run_tshelper.bat'), encoding='utf-8').read()
     assert 'create_tshelper_shortcut.ps1' in launcher_source, 'launcher must create the pinnable shortcut'
+    assert 'SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)' in app_source, 'running window must have the TSHelper AppUserModelID'
+    assert 'Et0ZheMax.TSHelper' in shortcut_source, 'shortcut must share the application AppUserModelID'
+    assert '9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3' in shortcut_source, 'shortcut AppUserModelID property key is missing'
     assert 'ДЕЙСТВИЯ С ДРУГИМ ПК' in app_source, 'temporary computer switch is not highlighted'
     assert 'ВЫБРАТЬ ДРУГОЙ ПК — ТОЛЬКО НА ЭТО ДЕЙСТВИЕ' not in app_source, 'wide menu label remains'
     search_body = app_source.split('    def _do_search(', 1)[1].split('    def _schedule_ping_batch(', 1)[0]

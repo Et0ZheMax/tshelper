@@ -326,6 +326,7 @@ def _pbx_dump(name: str, data):
 
 # --- Константы ---
 APP_NAME = "TS HELPER"
+WINDOWS_APP_USER_MODEL_ID = "Et0ZheMax.TSHelper"
 CONFIG_FILE = str(CONFIG_FILE)
 USERS_FILE = str(USERS_FILE)
 DOCK_ITEMS_FILE = str(DOCK_ITEMS_FILE)
@@ -8657,8 +8658,20 @@ def selftest_name_match():
     print("selftest_name_match: OK")
 
 # --- main ---
+def configure_windows_app_identity() -> None:
+    """Отделить окно TSHelper от pythonw.exe и связать его с ярлыком Windows."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)
+    except Exception as exc:
+        log_message(f"Не удалось установить идентификатор приложения Windows: {exc}")
+
+
 def main() -> None:
     """Запустить desktop-приложение."""
+    configure_windows_app_identity()
     migrate_legacy_user_data()
     ensure_user_catalog("software_catalog.json")
     ensure_user_catalog("software_catalog_windows.json")
