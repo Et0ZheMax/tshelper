@@ -448,7 +448,31 @@ def needs_primary_pc_confirmation(user: dict) -> bool:
 
 CONTEXT_COMMON_HOST_ACTIONS = ("rdp", "get_ip")
 CONTEXT_WINDOWS_ACTIONS = ("remote_assistance", "powershell", "explorer", "windows_deploy", "elma")
-CONTEXT_LINUX_ACTIONS = ("ssh", "ssh_key", "linux_install")
+CONTEXT_LINUX_ACTIONS = ("remote_linux", "ssh", "ssh_key", "linux_install")
+
+
+def build_remote_linux_rdp_config(host: str, port: int = 3390, username: str = "support") -> str:
+    """Сформировать безопасный RDP-профиль для удалённого рабочего стола Linux."""
+    normalized_host = str(host or "").strip()
+    normalized_username = str(username or "").strip()
+    if not normalized_host or "\n" in normalized_host or "\r" in normalized_host:
+        raise ValueError("Не указано корректное имя или IP-адрес Linux-компьютера")
+    if not normalized_username or "\n" in normalized_username or "\r" in normalized_username:
+        raise ValueError("Не указан корректный логин RDP")
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("Порт RDP должен быть в диапазоне от 1 до 65535")
+
+    address_host = normalized_host
+    if ":" in normalized_host and not normalized_host.startswith("["):
+        address_host = f"[{normalized_host}]"
+    lines = (
+        f"full address:s:{address_host}:{int(port)}",
+        f"username:s:{normalized_username}",
+        "prompt for credentials:i:1",
+        "authentication level:i:2",
+        "enablecredsspsupport:i:1",
+    )
+    return "\r\n".join(lines) + "\r\n"
 
 
 def context_action_ids(os_type: str, combine_functionality: bool = False) -> tuple[str, ...]:
@@ -7411,6 +7435,7 @@ class UserButton(ttk.Frame):
         linux_count = sum(action in allowed for action in CONTEXT_LINUX_ACTIONS)
         if linux_count:
             menu.add_separator()
+            add("remote_linux", "Remote Linux", self.remote_linux_connect)
             add("ssh", "Подключение по SSH", self.open_ssh_connection)
             add("ssh_key", "Пробросить SSH-ключ", self.bootstrap_ssh_key)
             add("linux_install", "Установка ПО", self.install_software_dialog)
@@ -7482,6 +7507,47 @@ class UserButton(ttk.Frame):
                 subprocess.Popen(["mstsc","/v", self._target_pc()], creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             messagebox.showerror("RDP", str(e))
+
+    def remote_linux_connect(self):
+        rdp_path = ""
+        try:
+            if not is_windows():
+                return messagebox.showerror(
+                    "Remote Linux",
+                    "Подключение Remote Linux доступно только при запуске TSHelper на Windows.",
+                )
+            target = self._target_pc()
+            rdp_config = build_remote_linux_rdp_config(target)
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-16",
+                suffix=".rdp",
+                prefix="tshelper_remote_linux_",
+                delete=False,
+            ) as rdp_file:
+                rdp_file.write(rdp_config)
+                rdp_path = rdp_file.name
+
+            self._log_action("Открыт Remote Linux (RDP, порт 3390, пользователь support)")
+            subprocess.Popen(["mstsc", rdp_path], creationflags=subprocess.CREATE_NO_WINDOW)
+
+            def remove_temporary_profile():
+                time.sleep(30)
+                try:
+                    os.remove(rdp_path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    log_message(f"Не удалось удалить временный RDP-профиль {rdp_path}: {exc}")
+
+            threading.Thread(target=remove_temporary_profile, daemon=True).start()
+        except Exception as e:
+            if rdp_path:
+                try:
+                    os.remove(rdp_path)
+                except OSError:
+                    pass
+            messagebox.showerror("Remote Linux", str(e))
 
     def remote_assistance(self):
         try:

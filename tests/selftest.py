@@ -335,7 +335,7 @@ def test_os_specific_context_actions():
 
     assert {'remote_assistance', 'powershell', 'explorer', 'windows_deploy', 'elma'} <= windows
     assert not {'ssh', 'ssh_key', 'linux_install'} & windows
-    assert {'ssh', 'ssh_key', 'linux_install'} <= linux
+    assert {'remote_linux', 'ssh', 'ssh_key', 'linux_install'} <= linux
     assert not {'remote_assistance', 'powershell', 'explorer', 'windows_deploy', 'elma'} & linux
     assert set(mod.CONTEXT_WINDOWS_ACTIONS + mod.CONTEXT_LINUX_ACTIONS) <= combined
 
@@ -357,7 +357,21 @@ def test_os_specific_context_actions():
     assert 'Подключение по SSH' not in windows_menu.labels
     assert 'Windows Deployment' not in linux_menu.labels
     assert 'Подключение по SSH' in linux_menu.labels
+    assert 'Remote Linux' not in windows_menu.labels
+    assert 'Remote Linux' in linux_menu.labels
     assert 'Windows Deployment' in windows_menu.labels
+
+    profile_by_name = mod.build_remote_linux_rdp_config('l-test')
+    assert 'full address:s:l-test:3390' in profile_by_name
+    assert 'username:s:support' in profile_by_name
+    profile_by_ip = mod.build_remote_linux_rdp_config('10.20.30.40')
+    assert 'full address:s:10.20.30.40:3390' in profile_by_ip
+    try:
+        mod.build_remote_linux_rdp_config('l-test\r\nusername:s:admin')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('RDP profile must reject line breaks in host')
 
 
 def test_multi_pc_os_cache_and_merge():
