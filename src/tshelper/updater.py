@@ -106,6 +106,23 @@ def select_release_asset(payload: dict[str, Any]) -> ReleaseInfo:
 
 
 def get_latest_release(timeout: int = 10, http_client=None) -> ReleaseInfo:
+    return _get_release(RELEASE_API_URL, timeout=timeout, http_client=http_client)
+
+
+def get_release_for_version(version: str, timeout: int = 10, http_client=None) -> ReleaseInfo:
+    """Получить эталон именно установленной версии, а не последнего релиза."""
+    version = _release_version(version)
+    release = _get_release(
+        RELEASE_API_URL.rsplit("/", 1)[0] + f"/tags/v{version}",
+        timeout=timeout,
+        http_client=http_client,
+    )
+    if release.version != version:
+        raise UpdateError("Версия эталонного релиза не совпадает с установленной")
+    return release
+
+
+def _get_release(url: str, timeout: int = 10, http_client=None) -> ReleaseInfo:
     if http_client is None:
         try:
             import requests
@@ -113,7 +130,7 @@ def get_latest_release(timeout: int = 10, http_client=None) -> ReleaseInfo:
             raise UpdateError("Для проверки обновлений не установлен requests") from exc
         http_client = requests
     response = http_client.get(
-        RELEASE_API_URL,
+        url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "TSHelper-Updater"},
         timeout=timeout,
     )

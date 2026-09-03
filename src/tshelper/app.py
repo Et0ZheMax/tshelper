@@ -1943,6 +1943,19 @@ class MainWindow:
         """Запустить ручную проверку GitHub Release с обязательным результатом для пользователя."""
         self._start_update_check(manual=True)
 
+    def check_file_integrity(self):
+        """Открыть одну фоновую проверку файлов установленной версии."""
+        if self._update_in_progress:
+            messagebox.showinfo("Проверка целостности", "Дождитесь завершения обновления TSHelper.")
+            return
+        window = getattr(self, "_integrity_window", None)
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            return
+        from .integrity_dialog import IntegrityDialog
+        self._integrity_window = IntegrityDialog(self.master, VERSION)
+
     def _start_update_check(self, manual: bool = False):
         if self._update_check_running:
             if manual:
@@ -2052,6 +2065,10 @@ class MainWindow:
         self._start_update_download(release)
 
     def _start_update_download(self, release: ReleaseInfo):
+        integrity_window = getattr(self, "_integrity_window", None)
+        if integrity_window is not None and integrity_window.running:
+            messagebox.showinfo("Обновление TSHelper", "Дождитесь завершения проверки целостности или отмените её.")
+            return
         self._update_in_progress = True
         window = tk.Toplevel(self.master)
         self._update_window = window
@@ -3185,6 +3202,7 @@ $items = foreach ($u in $users) {{
         toolsm.add_command(label="Проверка окружения", command=self.show_env_check)
         toolsm.add_command(label="Просмотр логов", command=self.open_log_viewer)
         toolsm.add_command(label="Проверить обновления", command=self.check_for_updates)
+        toolsm.add_command(label="Проверить целостность файлов", command=self.check_file_integrity)
         toolsm.add_separator()
         toolsm.add_command(label="Браузерная интеграция: статус", command=self.show_browser_integration_status)
         toolsm.add_command(label="Скопировать токен интеграции", command=self.copy_browser_integration_token)
