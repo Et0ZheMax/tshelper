@@ -350,7 +350,14 @@ try {
         if (Test-Path -LiteralPath $targetPath) {
             Remove-Item -LiteralPath $targetPath -Recurse -Force
         }
-        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Recurse -Force
+        if (Test-Path -LiteralPath $sourcePath -PathType Container) {
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+            Get-ChildItem -LiteralPath $sourcePath -Force | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $targetPath -Recurse -Force
+            }
+        } else {
+            Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
+        }
         $installedPaths.Add($relativePath)
         Update-ProgressEvents
     }

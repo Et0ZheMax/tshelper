@@ -30,7 +30,12 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 $directories = @("src", "apps", "assets", "config", "scripts", "extensions")
 foreach ($directory in $directories) {
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot $directory) -Destination $stage -Recurse
+    $sourceDirectory = Join-Path $repositoryRoot $directory
+    $targetDirectory = Join-Path $stage $directory
+    New-Item -ItemType Directory -Path $targetDirectory -Force | Out-Null
+    Get-ChildItem -LiteralPath $sourceDirectory -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $targetDirectory -Recurse -Force
+    }
 }
 
 $files = @("README.md", "CHANGELOG.md", "SECURITY.md", "requirements.txt", "pyproject.toml")

@@ -1180,6 +1180,16 @@ def test_embedded_adhelper2_command():
     assert '.requirements.sha256' in batch_source, 'ADHelper2 requirements fingerprint missing'
     assert 'NEEDS_INSTALL' in batch_source, 'ADHelper2 conditional dependency installation missing'
 
+    app_source = open(os.path.join(ROOT, 'src', 'tshelper', 'app.py'), encoding='utf-8').read()
+    assert 'def repair_embedded_adhelper2_layout()' in app_source, 'nested ADHelper recovery is missing'
+    assert 'shutil.copytree(source_path, target_path, dirs_exist_ok=True)' in app_source, 'ADHelper recovery copy is missing'
+
+    build_source = open(os.path.join(ROOT, 'scripts', 'build_release.ps1'), encoding='utf-8-sig').read()
+    assert '$targetDirectory = Join-Path $stage $directory' in build_source, 'release directory layout must be explicit'
+
+    update_source = open(os.path.join(ROOT, 'scripts', 'apply_update.ps1'), encoding='utf-8-sig').read()
+    assert 'Get-ChildItem -LiteralPath $sourcePath -Force' in update_source, 'updater directory copy must preserve layout'
+
     constants_source = open(os.path.join(working_directory, 'adhelper', 'constants.py'), encoding='utf-8').read()
     package_source = open(os.path.join(working_directory, 'adhelper', '__init__.py'), encoding='utf-8').read()
     assert 'APP_VERSION = "2.1.1"' in constants_source, 'embedded ADHelper2 application version'

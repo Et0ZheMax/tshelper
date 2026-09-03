@@ -29,6 +29,7 @@ from .paths import (
     DOCK_ITEMS_FILE,
     GLPI_INVENTORY_STATE_FILE,
     LOG_FILE,
+    INSTALL_ROOT,
     PBX_DUMP_DIR,
     USERS_FILE,
     asset_path,
@@ -597,9 +598,37 @@ def is_windows(): return platform.system().lower().startswith("win")
 ADHELPER2_DIRECTORY = "adhelper2"
 
 
+def repair_embedded_adhelper2_layout() -> str:
+    """Восстанавливает ADHelper из ошибочно вложенного каталога старого обновления."""
+    canonical_directory = os.path.abspath(os.path.join(str(INSTALL_ROOT), "apps", ADHELPER2_DIRECTORY))
+    nested_directory = os.path.abspath(
+        os.path.join(str(INSTALL_ROOT), "apps", "apps", ADHELPER2_DIRECTORY)
+    )
+    canonical_launcher = os.path.join(canonical_directory, "run_adhelper.bat")
+    nested_launcher = os.path.join(nested_directory, "run_adhelper.bat")
+    if os.path.isfile(canonical_launcher) or not os.path.isfile(nested_launcher):
+        return canonical_directory
+
+    install_root = os.path.normcase(os.path.abspath(str(INSTALL_ROOT)))
+    normalized_nested = os.path.normcase(nested_directory)
+    if os.path.commonpath((install_root, normalized_nested)) != install_root:
+        return canonical_directory
+
+    os.makedirs(canonical_directory, exist_ok=True)
+    for item_name in os.listdir(nested_directory):
+        source_path = os.path.join(nested_directory, item_name)
+        target_path = os.path.join(canonical_directory, item_name)
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source_path, target_path)
+    return canonical_directory
+
+
 def build_adhelper2_command(query: str) -> tuple[list[str], str, bool]:
     """Возвращает команду, рабочую папку и признак видимой bootstrap-консоли."""
-    base_directories = [str(ADHELPER2_DIR)]
+    repaired_directory = repair_embedded_adhelper2_layout()
+    base_directories = [str(ADHELPER2_DIR), repaired_directory]
     if getattr(sys, "frozen", False):
         base_directories.append(os.path.join(os.path.dirname(sys.executable), "apps", ADHELPER2_DIRECTORY))
     bundle_directory = getattr(sys, "_MEIPASS", "")
