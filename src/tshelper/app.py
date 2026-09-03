@@ -7994,7 +7994,9 @@ class UserButton(ttk.Frame):
 
     def reset_password_ps(self, which):
         new_pw = self.app.settings.get_setting("reset_password","12340987")
-        sam, _ = self.app.normalize_pc_name(self.user["pc_name"])
+        sam = login_from_user(self.user)
+        if not sam:
+            return messagebox.showerror("Сброс пароля", "Не удалось определить логин пользователя.")
         domain_map = {
             "pak": "pak-cspmz.ru",
             "omg": "omg.cspfmba.ru",
@@ -8007,6 +8009,8 @@ class UserButton(ttk.Frame):
         new_pw_escaped = str(new_pw).replace("'", "''")
 
         script = f"""
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
 $ErrorActionPreference = 'Stop'
 Import-Module ActiveDirectory
 $user = Get-ADUser -Filter "SamAccountName -eq '{sam_escaped}'" -Server '{target_domain}'

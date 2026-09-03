@@ -521,6 +521,10 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
     assert 'glpi_job_id = self.app.enqueue_glpi_inventory_for_ip_lookup' in get_ip_body, 'Get IP must enqueue the selected GLPI card immediately'
     assert get_ip_body.index('enqueue_glpi_inventory_for_ip_lookup') < get_ip_body.index('def task()'), 'selected GLPI card must be queued before IP lookup starts'
 
+    reset_password_body = app_source.split('    def reset_password_ps(', 1)[1].split('    def check_account_lockouts(', 1)[0]
+    assert 'sam = login_from_user(self.user)' in reset_password_body, 'password reset must use the AD login, not the computer name'
+    assert '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)' in reset_password_body, 'password reset must return readable UTF-8 PowerShell errors'
+
     assert 'Внести все ПК в карточки' in app_source, 'multiple-PC report action missing'
     assert 'label="Проверить на блокировки"' in app_source, 'account lockout action missing from context menu'
     lockout_body = app_source.split('    def check_account_lockouts(', 1)[1].split('    def _show_account_lockout_result(', 1)[0]
