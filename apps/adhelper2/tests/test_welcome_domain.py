@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from adhelper.models import DomainConfig
-from adhelper.services.welcome import select_welcome_domain
+from adhelper.services.welcome import WelcomeDocumentService, select_welcome_domain
 
 
 class WelcomeDomainTests(unittest.TestCase):
@@ -36,6 +38,42 @@ class WelcomeDomainTests(unittest.TestCase):
         omg = self._domain("omg-cspfmba", "omg", "")
         with self.assertRaisesRegex(RuntimeError, "NetBIOS"):
             select_welcome_domain([omg])
+
+    def test_contractor_response_contains_only_created_domains(self) -> None:
+        pak = self._domain("pak-cspmz", "standard", "PAK-CSPMZ")
+        omg = self._domain("omg-cspfmba", "omg", "OMG")
+        with TemporaryDirectory() as directory:
+            settings = type("Settings", (), {"generated_dir": Path(directory)})()
+            service = WelcomeDocumentService(settings)
+            path = service.generate_contractor_response(
+                login="i.ivanov",
+                password="Test-password!",
+                domains=[pak, omg],
+            )
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn("PAK-CSPMZ\\i.ivanov", content)
+        self.assertIn("OMG\\i.ivanov", content)
+        self.assertIn("mail.cspfmba.ru", content)
+        self.assertIn("Test-password!", content)
+        self.assertEqual(content.count("Добрый день!"), 1)
+
+    def test_contractor_response_hides_password_when_yopass_link_exists(self) -> None:
+        pak = self._domain("pak-cspmz", "standard", "PAK-CSPMZ")
+        with TemporaryDirectory() as directory:
+            settings = type("Settings", (), {"generated_dir": Path(directory)})()
+            path = WelcomeDocumentService(settings).generate_contractor_response(
+                login="i.ivanov",
+                password="Do-not-put-this-password-in-html!",
+                domains=[pak],
+                secret_url="https://yopass.example.test/#/secret/key",
+            )
+            content = path.read_text(encoding="utf-8")
+
+        self.assertNotIn("Do-not-put-this-password-in-html!", content)
+        self.assertNotIn("PAK-CSPMZ\\i.ivanov", content)
+        self.assertIn("https://yopass.example.test/#/secret/key", content)
+        self.assertIn("только один раз", content)
 
 
 if __name__ == "__main__":

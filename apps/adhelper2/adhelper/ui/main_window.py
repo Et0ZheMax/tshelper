@@ -12,6 +12,7 @@ from .pages.dashboard import DashboardPage
 from .pages.access import AccessPage
 from .pages.offboarding import OffboardingPage
 from .pages.onboarding import OnboardingPage
+from .pages.account_creation import AccountCreationPage
 from .pages.operations import OperationsPage
 from .pages.recovery import RecoveryPage
 from .pages.settings_page import SettingsPage
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.dashboard = DashboardPage(context)
         self.onboarding = OnboardingPage(context)
+        self.account_creation = AccountCreationPage(context)
         self.users = UsersPage(context)
         self.access = AccessPage(context)
         self.offboarding = OffboardingPage(context)
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         pages = [
             ("▦  Обзор", self.dashboard),
             ("＋  Создание", self.onboarding),
+            ("   Создать учетку", self.account_creation),
             ("⌕  Пользователи", self.users),
             ("🔐  Доступы", self.access),
             ("⇥  Увольнение", self.offboarding),
@@ -111,7 +114,7 @@ class MainWindow(QMainWindow):
 
     def open_search(self, query: str, autorun: bool = True) -> None:
         self.stack.setCurrentWidget(self.users)
-        button = self.nav_group.button(2)
+        button = self.nav_group.button(3)
         if button:
             button.setChecked(True)
         self.users.query.setText(query)

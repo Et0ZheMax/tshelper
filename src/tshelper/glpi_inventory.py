@@ -87,6 +87,15 @@ def os_family_from_text(value: str) -> str:
     return "unknown"
 
 
+def os_family_from_hostname(value: str) -> str:
+    short_name = str(value or "").strip().split(".", 1)[0].casefold()
+    if re.match(r"^(?:w|ws)-", short_name):
+        return "windows"
+    if re.match(r"^(?:l|lt)-", short_name):
+        return "linux"
+    return "unknown"
+
+
 def _valid_hostname(value: str) -> str:
     hostname = str(value or "").strip()
     if not hostname or len(hostname) > 253:
@@ -127,6 +136,9 @@ def normalize_computers(items) -> list[dict]:
         os_family = str(raw.get("os_family") or os_family_from_text(os_name)).strip().casefold()
         if os_family not in {"windows", "linux"}:
             os_family = "unknown"
+        hostname_os_family = os_family_from_hostname(hostname)
+        if hostname_os_family in {"windows", "linux"} and hostname_os_family != os_family:
+            os_family = hostname_os_family
         result.append({
             "asset_id": asset_id,
             "hostname": hostname,
@@ -367,6 +379,9 @@ class InventoryBridgeState:
             return self._empty_state()
         state = self._empty_state()
         state["records"] = payload.get("records") if isinstance(payload.get("records"), dict) else {}
+        for record in state["records"].values():
+            if isinstance(record, dict):
+                record["computers"] = normalize_computers(record.get("computers", []))
         state["jobs"] = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
         try:
             state["pause_until"] = float(payload.get("pause_until") or 0)
@@ -684,10 +699,29 @@ class InventoryBridgeState:
         wanted = host_identity(hostname)
         if not wanted:
             return "unknown"
+        canonical_wanted = login_from_hostname(hostname)
+        canonical_matches = set()
         with self._lock:
             for record in self._state["records"].values():
                 for computer in record.get("computers", []):
                     if host_identity(computer.get("hostname")) == wanted:
                         value = str(computer.get("os_family") or "unknown")
+                        hostname_value = os_family_from_hostname(computer.get("hostname"))
+                        if hostname_value in {"windows", "linux"}:
+                            return hostname_value
                         return value if value in {"windows", "linux"} else "unknown"
+                    if (
+                        canonical_wanted
+                        and login_from_hostname(computer.get("hostname")) == canonical_wanted
+                    ):
+                        value = str(computer.get("os_family") or "unknown")
+                        hostname_value = os_family_from_hostname(computer.get("hostname"))
+                        if hostname_value in {"windows", "linux"}:
+                            value = hostname_value
+                        if value in {"windows", "linux"}:
+                            canonical_matches.add(value)
+        # AD может сохранить имя без префикса, хотя GLPI хранит тот же ПК как W-<login>.
+        # Используем такое совпадение только при однозначной ОС, чтобы пары W-/L- не смешивались.
+        if len(canonical_matches) == 1:
+            return canonical_matches.pop()
         return "unknown"

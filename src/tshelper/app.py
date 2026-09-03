@@ -3,7 +3,7 @@
 # Доп. пакеты (необязательно): ttkbootstrap, requests, pypiwin32
 # pip install requests ttkbootstrap pypiwin32
 
-import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket, tempfile, secrets
+import os, sys, json, re, time, threading, queue, subprocess, platform, shutil, webbrowser, locale, datetime, base64, urllib.parse, uuid, importlib, glob, socket, tempfile, secrets, traceback
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 from concurrent.futures import ThreadPoolExecutor
@@ -15,9 +15,11 @@ from .glpi_inventory import (
     apply_inventory_computers,
     apply_recommendation,
     choose_primary_computer,
+    host_identity,
     is_remote_access_hostname,
     login_from_hostname,
     login_from_user,
+    normalize_login,
     recommend_inventory_update,
 )
 from .paths import (
@@ -379,6 +381,21 @@ def save_json(filename, data):
 def norm_name(n: str) -> str:
     p = n.strip().lower().split()
     return " ".join(p[:2]) if len(p) >= 2 else " ".join(p)
+
+
+def glpi_time_utc3(value: str) -> str:
+    """Показать ISO-время GLPI в рабочем часовом поясе UTC+3."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        moment = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        utc3 = datetime.timezone(datetime.timedelta(hours=3))
+        return moment.astimezone(utc3).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return text[11:19] if len(text) >= 19 else text
 
 def canonical_pc_key(pc_name: str) -> str:
     key = str(pc_name or "").lower()
@@ -1734,6 +1751,10 @@ class OperationLogWindow(tk.Toplevel):
 class MainWindow:
     def __init__(self, master):
         self.master = master
+        def report_tk_callback_exception(exc_type, exc_value, exc_traceback):
+            details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback)).strip()
+            log_message(f"Tk callback exception:\n{details}")
+        self.master.report_callback_exception = report_tk_callback_exception
         self.master.title(f"{APP_NAME} {VERSION}")
         try:
             self.master.iconbitmap(asset_path("ts-logo.ico"))
@@ -1801,6 +1822,7 @@ class MainWindow:
         self._glpi_inventory_monitor_window = None
         self._glpi_ping_pending = {}
         self._glpi_ping_flush_job = None
+        self._glpi_result_listeners = {}
         self.ping_max_workers = max(2, min(32, int(self.settings.get_setting("ping_max_workers", 8) or 8)))
         self.ping_process = PingProcessClient(self.master, max_workers=self.ping_max_workers)
         self.buttons = {}
@@ -5010,6 +5032,20 @@ $items = foreach ($u in $users) {{
         if not login:
             return
         reason = job.get("reason")
+        # Любая успешная сверка уже обновляет кэш ОС. Перерисовываем только
+        # затронутую карточку, даже если массовый full_sync не меняет hostname.
+        matched_user = next(
+            (user for user in self.users.get_users() if login_from_user(user) == login),
+            None,
+        )
+        if matched_user:
+            key = self.canonical_pc_key(matched_user.get("pc_name", ""))
+            widget = (
+                getattr(self, "user_widgets", {}).get(key)
+                or getattr(self, "buttons", {}).get(key)
+            )
+            if widget and widget.winfo_exists():
+                widget.sync_user(matched_user)
         if reason == "ip_lookup":
             for index, user in enumerate(self.users.get_users()):
                 if login_from_user(user) != login:
@@ -5069,13 +5105,23 @@ $items = foreach ($u in $users) {{
 
     def _handle_glpi_inventory_result(self, payload: dict) -> dict:
         completed = self.glpi_inventory.complete(payload)
-        try:
-            self.master.after(
-                0,
-                self._handle_glpi_inventory_completed,
-                completed["job"],
-                completed["record"],
+        result_login = normalize_login(completed["record"].get("login", ""))
+
+        def deliver_result():
+            self._handle_glpi_inventory_completed(completed["job"], completed["record"])
+            listeners = getattr(self, "_glpi_result_listeners", {}).pop(result_login, [])
+            log_message(
+                f"GLPI IP trace: result login={result_login or '-'} "
+                f"job={completed['job'].get('id') or '-'} listeners={len(listeners)}"
             )
+            for listener in listeners:
+                try:
+                    listener(completed["record"])
+                except Exception as exc:
+                    log_message(f"GLPI Inventory: ошибка обновления окна IP: {exc}")
+
+        try:
+            self.master.after(0, deliver_result)
         except Exception:
             pass
         return {"ok": True}
@@ -5171,13 +5217,17 @@ $items = foreach ($u in $users) {{
         resume_button = ttk.Button(footer, text="Продолжить", command=self.resume_glpi_inventory)
         resume_button.pack(side="left", padx=(6, 0))
         ttk.Button(footer, text="Открыть полный отчёт", command=self.show_glpi_inventory_report).pack(side="left")
+        ttk.Label(
+            footer,
+            text="«Найдено в GLPI» = результат сохранён; замены hostname применяются через полный отчёт.",
+        ).pack(side="left", padx=(12, 0))
         close_button = ttk.Button(footer, text="Закрыть", command=win.destroy)
         close_button.pack(side="right")
 
         refresh_job = {"id": None}
         last_signature = {"value": None}
         status_labels = {
-            "ok": "Найден",
+            "ok": "Найдено в GLPI",
             "not_found": "User не найден",
             "ambiguous": "Неоднозначно",
             "no_computers": "Нет Computer",
@@ -5264,7 +5314,7 @@ $items = foreach ($u in $users) {{
                     ) or "—"
                     detail = item.get("error") or item.get("glpi_name") or ""
                     checked_at = str(item.get("checked_at") or "")
-                    display_time = checked_at[11:19] if len(checked_at) >= 19 else checked_at
+                    display_time = glpi_time_utc3(checked_at)
                     tag = "ok" if result_status == "ok" else "error" if result_status == "error" else "warning"
                     tree.insert("", "end", values=(
                         display_time,
@@ -5311,7 +5361,7 @@ $items = foreach ($u in $users) {{
                 rows.append((user, recommendation))
             return rows
 
-        def collect_multiple_pc_rows():
+        def collect_found_pc_rows():
             rows = []
             for user in self.users.get_users():
                 login = login_from_user(user)
@@ -5320,16 +5370,25 @@ $items = foreach ($u in $users) {{
                     record
                     and record.get("status") == "ok"
                     and record.get("resolution") == "exact-login"
-                    and len(active_computers(record)) > 1
+                    and active_computers(record)
                 ):
                     rows.append((user, record))
             return rows
 
         win = tk.Toplevel(self.master)
         win.title("GLPI Inventory — результаты сверки")
-        win.geometry("1100x620+180+100")
+        win.geometry("1100x680+180+70")
+        win.minsize(900, 560)
+        controls = ttk.Frame(win, padding=(10, 4, 10, 10))
+        controls.pack(side="bottom", fill="x")
+        summary_controls = ttk.Frame(controls)
+        summary_controls.pack(fill="x", pady=(0, 6))
+        button_controls = ttk.Frame(controls)
+        button_controls.pack(fill="x")
+        table_frame = ttk.Frame(win)
+        table_frame.pack(side="top", fill="both", expand=True)
         columns = ("name", "login", "current", "glpi", "decision")
-        tree = ttk.Treeview(win, columns=columns, show="headings")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings")
         titles = {
             "name": "Пользователь",
             "login": "Login",
@@ -5341,24 +5400,21 @@ $items = foreach ($u in $users) {{
         for column in columns:
             tree.heading(column, text=titles[column])
             tree.column(column, width=widths[column], anchor="w")
-        scrollbar = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
         scrollbar.pack(side="left", fill="y", pady=10)
 
         safe_changes = []
         users_by_row = {}
-        controls = ttk.Frame(win, padding=(8, 10))
-        controls.pack(side="right", fill="y")
         safe_count_var = tk.StringVar(value="Однозначных замен: 0")
-        ttk.Label(controls, textvariable=safe_count_var, wraplength=220).pack(anchor="w", pady=(0, 4))
-        multiple_count_var = tk.StringVar(value="Карточек с несколькими ПК: 0")
-        ttk.Label(controls, textvariable=multiple_count_var, wraplength=220).pack(anchor="w", pady=(0, 4))
+        ttk.Label(summary_controls, textvariable=safe_count_var).pack(side="left")
+        found_count_var = tk.StringVar(value="Карточек с найденными ПК: 0")
+        ttk.Label(summary_controls, textvariable=found_count_var).pack(side="left", padx=(18, 0))
         ttk.Label(
-            controls,
+            summary_controls,
             text="Отчёт обновляется автоматически. Несколько активных ПК требуют ручного выбора.",
-            wraplength=220,
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(side="right")
 
         def retry_selected_user():
             selected = tree.selection()
@@ -5413,18 +5469,19 @@ $items = foreach ($u in $users) {{
                 parent=win,
             )
 
-        def apply_multiple_pc_cards():
-            multiple_rows = collect_multiple_pc_rows()
-            if not multiple_rows:
+        def apply_all_found_computers():
+            found_rows = collect_found_pc_rows()
+            if not found_rows:
                 return messagebox.showinfo(
                     "GLPI Inventory",
-                    "Нет пользователей с несколькими активными ПК.",
+                    "Нет пользователей с найденными активными ПК.",
                     parent=win,
                 )
             if not messagebox.askyesno(
                 "GLPI Inventory",
-                f"Внести все найденные ПК в {len(multiple_rows)} карточек?\n\n"
-                "При первом открытии такой карточки TSHelper попросит выбрать основной ПК. "
+                f"Внести все найденные ПК из GLPI в {len(found_rows)} карточек?\n\n"
+                "Карточки с одним ПК обновятся сразу. Если найдено несколько ПК, "
+                "TSHelper попросит выбрать основной при первом открытии карточки. "
                 "Перед изменением будет создана резервная копия users.json.",
                 parent=win,
             ):
@@ -5435,7 +5492,7 @@ $items = foreach ($u in $users) {{
                 shutil.copy2(USERS_FILE, backup)
             records_by_login = {
                 login_from_user(user): record
-                for user, record in multiple_rows
+                for user, record in found_rows
             }
             changed = 0
             updated_users = []
@@ -5459,23 +5516,23 @@ $items = foreach ($u in $users) {{
                 parent=win,
             )
 
-        ttk.Button(controls, text="Проверить выбранного сейчас", command=retry_selected_user).pack(fill="x", pady=(0, 8))
+        ttk.Button(button_controls, text="Проверить выбранного сейчас", command=retry_selected_user).pack(side="left")
         apply_button = ttk.Button(
-            controls,
+            button_controls,
             text="Применить однозначные",
             command=apply_safe_changes,
             state="disabled",
         )
-        apply_button.pack(fill="x")
+        apply_button.pack(side="left", padx=(8, 0))
         multiple_button = ttk.Button(
-            controls,
+            button_controls,
             text="Внести все ПК в карточки",
-            command=apply_multiple_pc_cards,
+            command=apply_all_found_computers,
             state="disabled",
         )
-        multiple_button.pack(fill="x", pady=(8, 0))
-        close_button = ttk.Button(controls, text="Закрыть")
-        close_button.pack(fill="x", pady=(8, 0))
+        multiple_button.pack(side="left", padx=(8, 0))
+        close_button = ttk.Button(button_controls, text="Закрыть")
+        close_button.pack(side="right")
 
         refresh_job = {"id": None}
         last_signature = {"value": None}
@@ -5531,9 +5588,9 @@ $items = foreach ($u in $users) {{
                         safe_changes.append((user, recommendation))
                 safe_count_var.set(f"Однозначных замен: {len(safe_changes)}")
                 apply_button.configure(state="normal" if safe_changes else "disabled")
-                multiple_count = len(collect_multiple_pc_rows())
-                multiple_count_var.set(f"Карточек с несколькими ПК: {multiple_count}")
-                multiple_button.configure(state="normal" if multiple_count else "disabled")
+                found_count = len(collect_found_pc_rows())
+                found_count_var.set(f"Карточек с найденными ПК: {found_count}")
+                multiple_button.configure(state="normal" if found_count else "disabled")
                 if selected_login in row_for_login:
                     selected_row = row_for_login[selected_login]
                     tree.selection_set(selected_row)
@@ -6362,20 +6419,141 @@ $items = foreach ($u in $users) {{
             messagebox.showerror("Экспорт", str(e))
 
     # --------- Вспомогательные окна ----------
-    def show_ip_window(self, ip):
+    def show_ip_window(self, ip, user: dict | None = None, glpi_job=None, baseline_checked_at: str = ""):
         win = tk.Toplevel(self.master); win.title("IP адрес")
         apply_persisted_geometry(
             win,
             self.settings,
             "ip_window_geometry",
-            "320x120+460+240",
-            min_width=300,
-            min_height=110,
+            "380x190+460+240",
+            min_width=360,
+            min_height=180,
         )
         _save_ip_geo = bind_geometry_persistence(win, self.settings, "ip_window_geometry")
-        win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_save_geo(w, "ip_window_geometry", saver=_save_ip_geo))
-        ttk.Label(win, text="IP адрес: "+ip).pack(pady=10)
-        ttk.Button(win, text="Скопировать", command=lambda:self._copy(ip)).pack(pady=6)
+        content = ttk.Frame(win, padding=12)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="IP адрес: " + ip).pack(anchor="center")
+        ttk.Button(content, text="Скопировать", command=lambda:self._copy(ip)).pack(pady=(8, 12))
+
+        progress = ttk.Progressbar(content, mode="indeterminate", length=330)
+        progress.pack(fill="x")
+        glpi_status_var = tk.StringVar(value="GLPI: запрос отправлен, ожидаю расширение…")
+        ttk.Label(content, textvariable=glpi_status_var, wraplength=345).pack(anchor="w", pady=(7, 0))
+        refresh_job = {"id": None}
+        started_at = time.time()
+        login = login_from_user(user or {})
+        old_hosts = {host_identity(item) for item in user_pc_names(user or {})}
+        last_live_status = {"value": ""}
+
+        glpi_request = glpi_job if isinstance(glpi_job, dict) else {"id": str(glpi_job or ""), "ready": True}
+        log_message(
+            f"GLPI IP trace: window login={login or '-'} job={glpi_request.get('id') or '-'} "
+            f"ready={bool(glpi_request.get('ready'))} baseline={baseline_checked_at or '-'}"
+        )
+
+        def set_live_status(text: str):
+            glpi_status_var.set(text)
+            if text != last_live_status["value"]:
+                last_live_status["value"] = text
+                log_message(f"GLPI IP trace: login={login or '-'} status={text}")
+        if login:
+            progress.start(12)
+        else:
+            progress.configure(mode="determinate", maximum=1, value=0)
+            glpi_status_var.set("GLPI: сверка отключена или login не определён")
+
+        def finish_glpi_status(text: str):
+            progress.stop()
+            progress.configure(mode="determinate", maximum=1, value=1)
+            set_live_status(text)
+
+        def render_glpi_result(record: dict):
+            status = record.get("status")
+            if status == "ok":
+                new_hosts = {
+                    host_identity(item.get("hostname"))
+                    for item in active_computers(record)
+                    if item.get("hostname")
+                }
+                added_hosts = [
+                    item.get("hostname", "") for item in active_computers(record)
+                    if host_identity(item.get("hostname")) not in old_hosts
+                ]
+                if added_hosts:
+                    finish_glpi_status(f"GLPI: найдены новые ПК: {', '.join(added_hosts)}. Карточка обновлена")
+                elif new_hosts != old_hosts:
+                    finish_glpi_status("GLPI: список ПК изменён, карточка обновлена")
+                else:
+                    finish_glpi_status("GLPI: данные актуальны, карточка обновлена")
+            elif status == "no_computers":
+                finish_glpi_status("GLPI: активные компьютеры не найдены")
+            elif status == "not_found":
+                finish_glpi_status("GLPI: пользователь не найден")
+            elif status == "ambiguous":
+                finish_glpi_status("GLPI: найдено несколько пользователей, требуется проверка")
+            else:
+                finish_glpi_status(f"GLPI: ошибка — {record.get('error') or 'не удалось получить данные'}")
+
+        def refresh_glpi_status():
+            try:
+                if not win.winfo_exists() or not login:
+                    return
+                if not glpi_request.get("ready"):
+                    set_live_status("GLPI: подготовка сверки…")
+                    refresh_job["id"] = self.master.after(200, refresh_glpi_status)
+                    return
+                glpi_job_id = str(glpi_request.get("id") or "")
+                if not glpi_job_id:
+                    finish_glpi_status("GLPI: сверка отключена или задача не создана")
+                    return
+                queued = self.glpi_inventory.queue_info_for_login(login)
+                if queued and queued.get("id") == glpi_job_id:
+                    if queued.get("status") == "pending":
+                        position = int(queued.get("position") or 0)
+                        set_live_status(f"GLPI: ожидает расширение{f', позиция {position}' if position else ''}…")
+                    else:
+                        stage = queued.get("progress_stage") or "чтение карточки"
+                        message = queued.get("progress_message") or ""
+                        set_live_status(f"GLPI: {stage}{' — ' + message if message else ''}")
+                    refresh_job["id"] = self.master.after(350, refresh_glpi_status)
+                    return
+
+                record = self.glpi_inventory.record_for_login(login)
+                if record and str(record.get("checked_at") or "") != baseline_checked_at:
+                    render_glpi_result(record)
+                    return
+
+                if time.time() - started_at >= 45:
+                    finish_glpi_status("GLPI: нет ответа от расширения")
+                    return
+                refresh_job["id"] = self.master.after(350, refresh_glpi_status)
+            except Exception as exc:
+                log_message(f"GLPI Inventory: ошибка живого статуса окна IP: {exc}")
+                finish_glpi_status(f"GLPI: ошибка отображения статуса — {exc}")
+
+        def close_ip_window():
+            listener = getattr(win, "_glpi_result_listener", None)
+            listeners = getattr(self, "_glpi_result_listeners", {}).get(login, [])
+            if listener in listeners:
+                listeners.remove(listener)
+            if refresh_job["id"]:
+                try:
+                    self.master.after_cancel(refresh_job["id"])
+                except Exception:
+                    pass
+            progress.stop()
+            self._close_save_geo(win, "ip_window_geometry", saver=_save_ip_geo)
+
+        win.protocol("WM_DELETE_WINDOW", close_ip_window)
+        if login:
+            def on_glpi_result(record):
+                if win.winfo_exists():
+                    render_glpi_result(record)
+
+            win._glpi_result_listener = on_glpi_result
+            self._glpi_result_listeners.setdefault(login, []).append(on_glpi_result)
+            log_message(f"GLPI IP trace: listener registered login={login}")
+            refresh_glpi_status()
 
     def _copy(self, txt):
         self.master.clipboard_clear(); self.master.clipboard_append(txt)
@@ -7734,12 +7912,13 @@ class UserButton(ttk.Frame):
 
     def get_ip(self):
         action_user = self._action_user(strict=False)
-        threading.Thread(
-            target=self.app.enqueue_glpi_inventory_for_ip_lookup,
-            args=(dict(action_user),),
-            daemon=True,
-            name="tshelper-glpi-ip-lookup",
-        ).start()
+        login = login_from_user(action_user)
+        previous_record = self.app.glpi_inventory.record_for_login(login) if login else None
+        baseline_checked_at = str((previous_record or {}).get("checked_at") or "")
+        # Сначала гарантированно создаём приоритетную задачу именно этой карточки.
+        # Локальная постановка занимает миллисекунды, а сам GLPI продолжает работать асинхронно.
+        glpi_job_id = self.app.enqueue_glpi_inventory_for_ip_lookup(dict(action_user))
+        log_message(f"GLPI IP trace: enqueue login={login or '-'} job={glpi_job_id or '-'}")
 
         def task():
             candidates = self.app.build_host_candidates(action_user) or [action_user.get("pc_name", "")]
@@ -7760,7 +7939,12 @@ class UserButton(ttk.Frame):
             ip_value = found_ip or "Не найден"
 
             def finalize():
-                self.app.show_ip_window(ip_value)
+                self.app.show_ip_window(
+                    ip_value,
+                    dict(action_user),
+                    glpi_job_id,
+                    baseline_checked_at,
+                )
                 source = found_host or default_host or "?"
                 self._log_action(f"Запрошен IP: {source} -> {ip_value}")
 

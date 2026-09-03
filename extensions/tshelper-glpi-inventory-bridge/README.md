@@ -1,4 +1,4 @@
-# TSHelper GLPI Inventory Bridge 0.1.3
+# TSHelper GLPI Inventory Bridge 0.1.4
 
 Отдельное read-only расширение для сверки карточек TSHelper с оборудованием GLPI 11 через текущую браузерную сессию. API-токены GLPI не нужны.
 

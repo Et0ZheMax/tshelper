@@ -1,7 +1,7 @@
 'use strict';
 
 (() => {
-  const PARSER_VERSION = '0.1.3';
+  const PARSER_VERSION = '0.1.4';
   const POLL_MS = 3000;
   const IDLE_POLL_MS = 5000;
   const REQUEST_TIMEOUT_MS = 7000;
@@ -466,7 +466,9 @@
   }
 
   async function readOperatingSystem(doc, shellDoc = doc) {
-    const direct = readOsFromDocument(doc);
+    // На основной форме Computer названия ОС могут встречаться в меню, истории и
+    // других несвязанных блоках. Здесь доверяем только настоящему полю формы.
+    const direct = readOsFromDocument(doc, false);
     if (direct) return direct;
     const links = [...shellDoc.querySelectorAll('a[data-glpi-ajax-content], a[href*="forcetab="]')].filter((anchor) => {
       const value = `${anchor.textContent || ''} ${anchor.getAttribute('href') || ''} ${anchor.getAttribute('data-glpi-ajax-content') || ''}`;
@@ -481,7 +483,8 @@
           headers: { 'X-Requested-With': 'XMLHttpRequest' }
         });
         ensureSession(response, html);
-        const found = readOsFromDocument(parseHtml(html));
+        // Свободный поиск текста безопасен только внутри целевой вкладки ОС.
+        const found = readOsFromDocument(parseHtml(html), true);
         if (found) return found;
       } catch (error) {
         if (error instanceof SessionRequiredError) throw error;
@@ -490,7 +493,7 @@
     return '';
   }
 
-  function readOsFromDocument(doc) {
+  function readOsFromDocument(doc, allowTextScan = false) {
     const field = doc.querySelector(
       'select[name*="operatingsystem" i], input[name*="operatingsystem" i], select[name*="operating_system" i], input[name*="operating_system" i]'
     );
@@ -498,6 +501,7 @@
       const selected = field.selectedOptions?.[0]?.textContent || field.value;
       if (selected && String(selected).trim() !== '-----') return String(selected).replace(/\s+/g, ' ').trim();
     }
+    if (!allowTextScan) return '';
     const text = String(doc.body?.innerText || '').replace(/\s+/g, ' ');
     const match = text.match(/\b(Windows(?: Server)?\s*[A-Za-z0-9. ()_-]{0,45}|Ubuntu\s*[A-Za-z0-9. _-]{0,30}|Debian\s*[A-Za-z0-9. _-]{0,30}|Astra Linux\s*[A-Za-z0-9. _-]{0,30}|ALT Linux\s*[A-Za-z0-9. _-]{0,30}|CentOS\s*[A-Za-z0-9. _-]{0,30})/i);
     return match?.[1]?.trim() || '';

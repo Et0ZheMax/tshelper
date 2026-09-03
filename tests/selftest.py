@@ -24,6 +24,7 @@ from tshelper.glpi_inventory import (  # noqa: E402
     choose_primary_computer,
     is_remote_access_hostname,
     login_from_hostname,
+    normalize_computers,
     recommend_inventory_update,
 )
 from tshelper.browser_integration import BrowserIntegrationServer  # noqa: E402
@@ -57,6 +58,7 @@ def test_normalize_phone():
 def test_canonical_pc_key():
     assert_eq(mod.canonical_pc_key('WS-ABC-01'), 'abc-01', 'canonical_pc_key ws')
     assert_eq(mod.canonical_pc_key('L-WS-ABC'), 'abc', 'canonical_pc_key nested')
+    assert_eq(mod.glpi_time_utc3('2026-09-03T06:58:41.000Z'), '09:58:41', 'GLPI monitor UTC+3 time')
 
 
 def test_release_version_comparison():
@@ -516,8 +518,8 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
 
     app_source = open(os.path.join(ROOT, 'src', 'tshelper', 'app.py'), encoding='utf-8').read()
     get_ip_body = app_source.split('    def get_ip(', 1)[1].split('    def reset_password_ps(', 1)[0]
-    assert 'tshelper-glpi-ip-lookup' in get_ip_body, 'Get IP must launch GLPI refresh independently'
-    assert get_ip_body.index('tshelper-glpi-ip-lookup') < get_ip_body.index('def task()'), 'GLPI refresh must not delay IP task'
+    assert 'glpi_job_id = self.app.enqueue_glpi_inventory_for_ip_lookup' in get_ip_body, 'Get IP must enqueue the selected GLPI card immediately'
+    assert get_ip_body.index('enqueue_glpi_inventory_for_ip_lookup') < get_ip_body.index('def task()'), 'selected GLPI card must be queued before IP lookup starts'
 
     assert 'Внести все ПК в карточки' in app_source, 'multiple-PC report action missing'
     assert 'label="Проверить на блокировки"' in app_source, 'account lockout action missing from context menu'
@@ -585,6 +587,7 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         assert completed['ok']
         assert_eq(state.hosts_for_login('test'), ['l-test'], 'inventory host cache')
         assert_eq(state.os_for_host('l-test'), 'linux', 'inventory OS cache')
+        assert_eq(state.os_for_host('test'), 'linux', 'inventory OS cache matches an unprefixed AD host')
         assert_eq(state.status()['processed'], 1, 'completed inventory progress count')
         state.pause()
         queued_while_paused = dict(user, ad_login='paused-test', pc_name='w-paused-test')
@@ -599,6 +602,25 @@ def test_glpi_inventory_queue_and_safe_reconciliation():
         })
         reloaded = InventoryBridgeState(state_path)
         assert_eq(reloaded.record_for_login('test')['glpi_user_id'], 42, 'inventory cache persists')
+
+        corrected = normalize_computers([{
+            'itemtype': 'Computer', 'id': 1820, 'name': 'W-ALAVROV',
+            'os': 'Ubuntu 24.04.1 LTS', 'os_family': 'linux', 'status': '-----'
+        }])
+        assert_eq(corrected[0]['os_family'], 'windows', 'explicit W- prefix overrides a conflicting parsed OS')
+
+        legacy_state_path = os.path.join(td, 'legacy_inventory.json')
+        Path(legacy_state_path).write_text(json.dumps({
+            'records': {'alavrov': {
+                'login': 'alavrov', 'status': 'ok', 'resolution': 'exact-login',
+                'computers': [{
+                    'asset_id': 1820, 'hostname': 'W-ALAVROV',
+                    'os_name': 'Ubuntu 24.04.1 LTS', 'os_family': 'linux'
+                }]
+            }}
+        }), encoding='utf-8')
+        legacy_state = InventoryBridgeState(legacy_state_path)
+        assert_eq(legacy_state.os_for_host('W-ALAVROV'), 'windows', 'legacy GLPI cache is normalized on load')
 
         session_user = dict(user, ad_login='session-test', pc_name='w-session-test')
         session_job_id = reloaded.enqueue(session_user, 'full_sync')
@@ -664,6 +686,8 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     assert 'const JOB_TIMEOUT_MS = 35000' in content, 'whole inventory job timeout missing'
     assert 'sendRuntimeMessageWithTimeout' in content, 'extension message timeout missing'
     assert 'isRemoteAccessHostname' in content, 'remote PC filtering missing'
+    assert 'readOsFromDocument(doc, false)' in content, 'main Computer form must not be scanned globally for OS names'
+    assert 'readOsFromDocument(parseHtml(html), true)' in content, 'OS tab text scan missing'
     assert content.index('searchUsersViaHtml(wanted)') < content.index('loadUserSearchDescriptor()'), 'HTML search must run before AJAX fallback'
     assert 'TSH_INVENTORY_REPORT_PROGRESS' in content, 'content progress reporting missing'
     assert '/inventory/jobs/progress' in background, 'background progress bridge missing'
@@ -673,7 +697,33 @@ def test_glpi_inventory_extension_fallback_and_progress_contract():
     assert 'карточка {elapsed_seconds} сек.' in app_source, 'current card timer missing'
     assert 'text="Применить однозначные"' in app_source, 'unambiguous apply button missing'
     assert 'win.after(1500, refresh_report)' in app_source, 'live inventory report refresh missing'
-    assert_eq(manifest['version'], '0.1.3', 'inventory extension patch version')
+    assert 'controls.pack(side="bottom", fill="x")' in app_source, 'inventory report controls must remain visible below the table'
+    assert 'button_controls.pack(fill="x")' in app_source, 'inventory report buttons need a responsive horizontal row'
+    assert 'def collect_found_pc_rows()' in app_source, 'apply-all action must collect every card with found computers'
+    assert 'and active_computers(record)' in app_source, 'apply-all action must include single-computer cards'
+    assert 'command=apply_all_found_computers' in app_source, 'apply-all button is not connected to all found computers'
+    assert 'widget.sync_user(matched_user)' in app_source, 'completed inventory result must refresh the affected OS badge'
+    assert '"ok": "Найдено в GLPI"' in app_source, 'monitor result must distinguish scanning from applying card changes'
+    assert 'GLPI: данные актуальны, карточка обновлена' in app_source, 'IP window needs a successful applied GLPI status'
+    assert 'GLPI: найдены новые ПК:' in app_source, 'IP window must report newly discovered computers'
+    assert 'queue_info_for_login(login)' in app_source, 'IP window must follow live GLPI queue progress'
+    assert '_glpi_result_listeners.setdefault(login, []).append' in app_source, 'IP window must receive GLPI completion by login'
+    assert 'self.master.after(350, refresh_glpi_status)' in app_source, 'IP status polling must use the main Tk event loop'
+    assert 'normalize_login,' in app_source.split('from .glpi_inventory import (', 1)[1].split(')', 1)[0], 'GLPI result listener login normalizer is not imported'
+    assert 'host_identity,' in app_source.split('from .glpi_inventory import (', 1)[1].split(')', 1)[0], 'IP window host normalizer is not imported'
+
+    delivered = []
+    result_probe = mod.MainWindow.__new__(mod.MainWindow)
+    result_probe.glpi_inventory = types.SimpleNamespace(complete=lambda _payload: {
+        'job': {'id': 'job-alavrov', 'reason': 'ip_lookup'},
+        'record': {'login': 'ALAVROV', 'status': 'ok'},
+    })
+    result_probe.master = types.SimpleNamespace(after=lambda _delay, callback: callback())
+    result_probe._handle_glpi_inventory_completed = lambda _job, _record: delivered.append('applied')
+    result_probe._glpi_result_listeners = {'alavrov': [lambda _record: delivered.append('window')]}
+    assert_eq(result_probe._handle_glpi_inventory_result({}), {'ok': True}, 'GLPI result handler response')
+    assert_eq(delivered, ['applied', 'window'], 'GLPI result reaches IP window after card update')
+    assert_eq(manifest['version'], '0.1.4', 'inventory extension patch version')
 
 
 def test_card_contact_line_with_location():

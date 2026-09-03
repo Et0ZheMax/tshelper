@@ -89,6 +89,11 @@ class SettingsPage(QWidget):
         self.theme.currentIndexChanged.connect(self._theme_changed)
         form.addRow("Тема", self.theme)
 
+        self.yopass_url = QLineEdit(str(context.settings.get("yopass_url", "https://yopass.pak-cspmz.ru")))
+        self.yopass_url.setPlaceholderText("https://yopass.example.ru")
+        self.yopass_url.editingFinished.connect(self._yopass_url_changed)
+        form.addRow("Адрес YoPass", self.yopass_url)
+
         paths = QLabel(
             f"Конфигурация: {context.settings.path}\n"
             f"Аудит: {context.settings.audit_dir}\n"
@@ -148,6 +153,15 @@ class SettingsPage(QWidget):
             # Комбобокс заполняется только сохранёнными значениями. Эта ветка
             # защищает от краткого промежуточного сигнала при его обновлении.
             return
+
+    def _yopass_url_changed(self) -> None:
+        value = self.yopass_url.text().strip().rstrip("/")
+        if not value.startswith("https://"):
+            QMessageBox.warning(self, "YoPass", "Адрес YoPass должен начинаться с https://")
+            self.yopass_url.setText(str(self.context.settings.get("yopass_url", "https://yopass.pak-cspmz.ru")))
+            return
+        self.context.settings.set("yopass_url", value)
+        self.context.yopass.base_url = value
 
     def _build_addresses_card(self) -> QFrame:
         card = QFrame()

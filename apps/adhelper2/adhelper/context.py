@@ -14,6 +14,7 @@ from .services.onboarding import OnboardingService
 from .services.ou_resolver import OUResolver
 from .services.powershell import PowerShellClient
 from .services.welcome import WelcomeDocumentService
+from .services.yopass import YopassClient
 from .services.user_management import UserManagementService
 from .settings import SettingsStore
 
@@ -40,7 +41,10 @@ class AppContext:
         self.audit = AuditRepository(self.settings)
         self.ou_resolver = OUResolver(self.ps, self.settings)
         self.welcome = WelcomeDocumentService(self.settings)
-        self.onboarding = OnboardingService(self.ad, self.ou_resolver, self.audit, self.welcome, logger=log)
+        self.yopass = YopassClient(str(self.settings.get("yopass_url", "https://yopass.pak-cspmz.ru")))
+        self.onboarding = OnboardingService(
+            self.ad, self.ou_resolver, self.audit, self.welcome, yopass=self.yopass, logger=log
+        )
         self.offboarding = OffboardingService(self.ad, self.audit, logger=log)
         self.recovery = RecoveryService(self.ad, self.audit, logger=log)
         self.user_management = UserManagementService(self.ad, self.audit, logger=log)

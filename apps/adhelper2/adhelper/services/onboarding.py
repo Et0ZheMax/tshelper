@@ -11,6 +11,7 @@ from .ad_service import ADService
 from .audit import AuditRepository
 from .ou_resolver import OUResolver
 from .welcome import WelcomeDocumentService, select_welcome_domain
+from .yopass import YopassClient
 
 
 @dataclass(slots=True)
@@ -38,6 +39,7 @@ class OnboardingPlan:
     duplicate_users: list[dict[str, Any]] = field(default_factory=list)
     create_welcome: bool = True
     print_welcome: bool = False
+    welcome_kind: str = "standard"
 
 
 class OnboardingService:
@@ -47,12 +49,14 @@ class OnboardingService:
         ou_resolver: OUResolver,
         audit: AuditRepository,
         welcome: WelcomeDocumentService,
+        yopass: YopassClient | None = None,
         logger: Callable[[str], None] | None = None,
     ) -> None:
         self.ad = ad
         self.ou_resolver = ou_resolver
         self.audit = audit
         self.welcome = welcome
+        self.yopass = yopass
         self.logger = logger or (lambda _message: None)
 
     def build_plan(
@@ -172,16 +176,51 @@ class OnboardingService:
                 step.start()
                 progress("welcome", "Создание приветственного документа")
                 try:
-                    print_domain = select_welcome_domain(item.domain for item in plan.domains)
-                    email = plan.sam + print_domain.email_suffix if plan.request.need_mail else ""
-                    path = self.welcome.generate(
-                        login=plan.sam,
-                        domain_login=f"{print_domain.netbios}\\{plan.sam}",
-                        email=email,
-                        password=plan.password,
-                    )
-                    if plan.print_welcome:
-                        self.welcome.print_document(path)
+                    successful_names = {item["domain"] for item in successful}
+                    successful_domains = [
+                        item.domain for item in plan.domains if item.domain.name in successful_names
+                    ]
+                    if plan.welcome_kind == "contractor":
+                        secret_url = ""
+                        if self.yopass is not None:
+                            secret_lines: list[str] = []
+                            for domain in successful_domains:
+                                secret_lines.extend([
+                                    f"Логин: {domain.netbios}\\{plan.sam}",
+                                    f"Пароль: {plan.password}",
+                                    "",
+                                ])
+                            try:
+                                secret_url = self.yopass.create_secret(
+                                    "\n".join(secret_lines).strip(),
+                                    expiration=604800,
+                                    one_time=True,
+                                ).url
+                            except Exception as exc:
+                                operation.warnings.append(
+                                    "YoPass недоступен — временный пароль оставлен в HTML открытым: "
+                                    + str(exc)
+                                )
+                        path = self.welcome.generate_contractor_response(
+                            login=plan.sam,
+                            password=plan.password,
+                            domains=successful_domains,
+                            secret_url=secret_url,
+                        )
+                    else:
+                        print_domain = select_welcome_domain(successful_domains)
+                        email = (
+                            plan.request.email.strip()
+                            or (plan.sam + print_domain.email_suffix if plan.request.need_mail else "")
+                        )
+                        path = self.welcome.generate(
+                            login=plan.sam,
+                            domain_login=f"{print_domain.netbios}\\{plan.sam}",
+                            email=email,
+                            password=plan.password,
+                        )
+                        if plan.print_welcome:
+                            self.welcome.print_document(path)
                     operation.data["welcome_path"] = str(path)
                     step.finish("success", "Документ создан", {"path": str(path), "printed": plan.print_welcome})
                 except Exception as exc:
@@ -217,12 +256,15 @@ class OnboardingService:
             "department": domain_plan.department,
             "division": domain_plan.division,
             "section": domain_plan.section,
-            "company": COMPANY_NAME,
+            "company": request.company.strip() or COMPANY_NAME,
             "office": request.office_room,
             "street_address": plan.address,
             "address_meta": address_meta,
             "description": request.title.strip().lower(),
-            "mail": plan.sam + domain_plan.domain.email_suffix if request.need_mail else "",
+            "mail": (
+                request.email.strip()
+                or (plan.sam + domain_plan.domain.email_suffix if request.need_mail else "")
+            ),
             "mobile": "" if is_omg else mobile,
             "otp_mobile": mobile if is_omg else "",
             "manager_dn": domain_plan.manager_dn,

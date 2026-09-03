@@ -32,11 +32,14 @@ class RequestTextEdit(QTextEdit):
 
 
 class OnboardingPage(QWidget):
+    PAGE_TITLE = "Создание сотрудника"
+    PAGE_SUBTITLE = "Пошаговый мастер: заявка и карточка → AD-план → выполнение."
     FIELDS = [
         ("last_name", "Фамилия"), ("first_name", "Имя"), ("middle_name", "Отчество"),
         ("manager_name", "Руководитель"), ("management", "Управление"),
         ("department", "Отдел / подразделение"), ("title", "Должность"),
         ("office_room", "Кабинет"), ("mobile_phone", "Мобильный телефон"),
+        ("email", "Электронная почта"), ("company", "Организация"),
         ("start_date", "Дата выхода"), ("work_mode", "Режим работы"),
         ("equipment", "Оборудование"), ("office_os", "ОС ноутбука"),
         ("notes", "Примечание"),
@@ -61,7 +64,7 @@ class OnboardingPage(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
-        root.addWidget(PageHeader("Создание сотрудника", "Пошаговый мастер: заявка и карточка → AD-план → выполнение."))
+        root.addWidget(PageHeader(self.PAGE_TITLE, self.PAGE_SUBTITLE))
 
         self.external_source_label = QLabel()
         self.external_source_label.setObjectName("Muted")
@@ -465,12 +468,16 @@ class OnboardingPage(QWidget):
             address,
             password,
             self.context.settings.address_details(address),
+            self._explicit_ous_for_plan(),
         )
         self._track_worker(worker)
         worker.signals.progress.connect(self._plan_progress)
         worker.signals.result.connect(self._plan_ready)
         worker.signals.error.connect(self._worker_error)
         self.pool.start(worker)
+
+    def _explicit_ous_for_plan(self) -> dict[str, str] | None:
+        return None
 
     def _plan_progress(self, _key: str, message: str) -> None:
         self._plan_progress_current = min(

@@ -24,6 +24,8 @@ class ParsedRequest:
     need_mail: bool = False
     need_internal_phone: bool = False
     mobile_phone: str = ""
+    email: str = ""
+    company: str = ""
     equipment: str = ""
     office_os: str = ""
     need_servers_access: bool = False
