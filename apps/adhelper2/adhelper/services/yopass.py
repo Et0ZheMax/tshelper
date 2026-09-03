@@ -75,5 +75,5 @@ class YopassClient:
         secret_id = str(response_data.get("message") or "").strip()
         if not secret_id or any(character in secret_id for character in "/?#"):
             raise YopassError("YoPass вернул некорректный идентификатор секрета")
-        url = f"{self.base_url}/#/{quote(secret_id, safe='')}/{quote(decryption_key, safe='')}"
+        url = f"{self.base_url}/#/s/{quote(secret_id, safe='')}/{quote(decryption_key, safe='')}"
         return YopassResult(url=url, secret_id=secret_id)

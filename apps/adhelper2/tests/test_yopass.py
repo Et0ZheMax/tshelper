@@ -39,7 +39,7 @@ class YopassClientTests(unittest.TestCase):
         self.assertTrue(captured["body"]["message"].startswith("-----BEGIN PGP MESSAGE-----"))
         self.assertEqual(captured["body"]["expiration"], 604800)
         self.assertTrue(captured["body"]["one_time"])
-        self.assertTrue(result.url.startswith("https://yopass.example.test/#/safe-id/"))
+        self.assertTrue(result.url.startswith("https://yopass.example.test/#/s/safe-id/"))
         PGPMessage.from_blob(captured["body"]["message"])
 
     def test_http_is_rejected(self) -> None:

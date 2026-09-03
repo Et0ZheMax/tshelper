@@ -66,14 +66,15 @@ class WelcomeDomainTests(unittest.TestCase):
                 login="i.ivanov",
                 password="Do-not-put-this-password-in-html!",
                 domains=[pak],
-                secret_url="https://yopass.example.test/#/secret/key",
+                secret_url="https://yopass.example.test/#/s/secret/key",
             )
             content = path.read_text(encoding="utf-8")
 
         self.assertNotIn("Do-not-put-this-password-in-html!", content)
         self.assertNotIn("PAK-CSPMZ\\i.ivanov", content)
-        self.assertIn("https://yopass.example.test/#/secret/key", content)
-        self.assertIn("только один раз", content)
+        self.assertIn("https://yopass.example.test/#/s/secret/key", content)
+        self.assertIn("<strong>ТОЛЬКО ОДИН РАЗ</strong>", content)
+        self.assertNotIn("Не открывайте", content)
 
 
 if __name__ == "__main__":

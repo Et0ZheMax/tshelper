@@ -129,8 +129,7 @@ class WelcomeDocumentService:
   <div class="secret-link">
     <strong>Данные для входа переданы через защищённый сервис YoPass.</strong>
     <p><a href="{escape(secret_url, quote=True)}">Открыть логины и временный пароль</a></p>
-    <p class="notice">Ссылка действует 7 дней и раскрывает данные только один раз.
-    Не открывайте её для проверки — после раскрытия получатель не сможет воспользоваться ссылкой.</p>
+    <p class="notice">Ссылка действует 7 дней и раскрывает данные <strong>ТОЛЬКО ОДИН РАЗ</strong>.</p>
   </div>
         """ if secret_url else """
   <div class="fallback">
