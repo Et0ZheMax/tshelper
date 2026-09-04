@@ -7884,7 +7884,65 @@ class UserButton(ttk.Frame):
                 return messagebox.showerror("PowerShell Remote", "Не удалось определить целевой ПК")
 
             ps_target = target_host.replace("'", "''")
-            remote_command = f"Enter-PSSession -ComputerName '{ps_target}'"
+            remote_command = f"""
+$session = New-PSSession -ComputerName '{ps_target}'
+Invoke-Command -Session $session -ScriptBlock {{
+    function global:Invoke-NativeRemote {{
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory)]
+            [string]$FilePath,
+
+            [string[]]$ArgumentList = @()
+        )
+
+        $quotedArguments = foreach ($argument in $ArgumentList) {{
+            if ($argument -notmatch '[\s"]') {{
+                $argument
+                continue
+            }}
+            $escapedArgument = $argument -replace '(\\*)"', '$1$1\\"'
+            $escapedArgument = $escapedArgument -replace '(\\+)$', '$1$1'
+            '"{0}"' -f $escapedArgument
+        }}
+
+        $encoding = [System.Text.Encoding]::GetEncoding(
+            [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
+        )
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $FilePath
+        $startInfo.Arguments = $quotedArguments -join ' '
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.CreateNoWindow = $true
+        $startInfo.StandardOutputEncoding = $encoding
+        $startInfo.StandardErrorEncoding = $encoding
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        [void]$process.Start()
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+
+        if ($standardOutput) {{ $standardOutput }}
+        if ($standardError) {{ $standardError }}
+        $global:LASTEXITCODE = $process.ExitCode
+    }}
+
+    foreach ($commandName in 'powercfg', 'ipconfig', 'net', 'netsh', 'route') {{
+        Set-Item -Path "Function:global:$commandName" -Value {{
+            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+            $executable = "$($MyInvocation.MyCommand.Name).exe"
+            Invoke-NativeRemote -FilePath $executable -ArgumentList $Arguments
+        }}
+    }}
+}}
+Enter-PSSession -Session $session
+"""
             launcher = shutil.which("wt.exe")
             if launcher:
                 subprocess.Popen([launcher, "powershell.exe", "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", remote_command])
