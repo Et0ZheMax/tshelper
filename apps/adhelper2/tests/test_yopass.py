@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from pgpy import PGPMessage
 
@@ -45,6 +46,11 @@ class YopassClientTests(unittest.TestCase):
     def test_http_is_rejected(self) -> None:
         with self.assertRaisesRegex(YopassError, "HTTPS"):
             YopassClient("http://example.test").create_secret("test")
+
+    def test_missing_openpgp_library_does_not_block_adhelper_startup(self) -> None:
+        with patch("adhelper.services.yopass.PGPMessage", None):
+            with self.assertRaisesRegex(YopassError, "не удалось загрузить библиотеку OpenPGP"):
+                YopassClient("https://yopass.example.test").create_secret("test")
 
 
 if __name__ == "__main__":

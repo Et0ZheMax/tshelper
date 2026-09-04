@@ -8,8 +8,15 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import quote
 
-from pgpy import PGPMessage
-from pgpy.constants import CompressionAlgorithm, HashAlgorithm, SymmetricKeyAlgorithm
+try:
+    from pgpy import PGPMessage
+    from pgpy.constants import CompressionAlgorithm, HashAlgorithm, SymmetricKeyAlgorithm
+except ImportError as exc:
+    PGPMessage = None
+    CompressionAlgorithm = HashAlgorithm = SymmetricKeyAlgorithm = None
+    _PGPY_IMPORT_ERROR: ImportError | None = exc
+else:
+    _PGPY_IMPORT_ERROR = None
 
 
 class YopassError(RuntimeError):
@@ -41,6 +48,11 @@ class YopassClient:
         one_time: bool = True,
         timeout: int = 15,
     ) -> YopassResult:
+        if PGPMessage is None:
+            raise YopassError(
+                "YoPass недоступен: не удалось загрузить библиотеку OpenPGP "
+                f"({_PGPY_IMPORT_ERROR})."
+            )
         if not self.base_url.startswith("https://"):
             raise YopassError("Адрес YoPass должен использовать HTTPS")
         if expiration not in {3600, 86400, 604800}:
