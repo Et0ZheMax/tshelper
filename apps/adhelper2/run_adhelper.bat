@@ -1,6 +1,13 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
+if exist ".venv\Scripts\python.exe" (
+  .venv\Scripts\python.exe -c "import sys" >nul 2>&1
+  if errorlevel 1 (
+    echo ADHelper virtual environment is invalid. Recreating it...
+    rmdir /s /q ".venv"
+  )
+)
 if not exist ".venv\Scripts\python.exe" (
   where py >nul 2>&1
   if errorlevel 1 (
@@ -31,10 +38,15 @@ if "!NEEDS_INSTALL!"=="1" (
 
 > ".venv\.adhelper-ready" echo ready
 
+set "ADHELPER_LOG_DIR=%APPDATA%\ADHelper\logs"
+if not exist "%ADHELPER_LOG_DIR%" md "%ADHELPER_LOG_DIR%" >nul 2>&1
+set "ADHELPER_LAUNCH_LOG=%ADHELPER_LOG_DIR%\launcher.log"
+>> "%ADHELPER_LAUNCH_LOG%" echo [%date% %time%] Запуск ADHelper.
+
 if exist ".venv\Scripts\pythonw.exe" (
-  start "" ".venv\Scripts\pythonw.exe" main.py %*
+  start "" /b ".venv\Scripts\pythonw.exe" main.py %* >> "%ADHELPER_LAUNCH_LOG%" 2>&1
 ) else (
-  .venv\Scripts\python.exe main.py %*
+  .venv\Scripts\python.exe main.py %* >> "%ADHELPER_LAUNCH_LOG%" 2>&1
 )
 exit /b 0
 
