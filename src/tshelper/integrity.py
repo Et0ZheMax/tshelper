@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from .paths import DATA_DIR, INSTALL_ROOT
 from .updater import (
     MANAGED_DIRECTORIES, MANAGED_FILES, ProgressCallback,
     get_latest_release, get_release_for_version, prepare_update, sha256_file,
+    validate_file_manifest,
 )
 
 
@@ -37,6 +40,7 @@ class IntegrityReport:
     checked: int = 0
     matched: int = 0
     issues: list[IntegrityIssue] = field(default_factory=list)
+    reference_root: Path | None = field(default=None, repr=False)
 
     def summary(self) -> str:
         if self.reference_error:
@@ -90,7 +94,12 @@ def _inventory(root: Path, progress: ProgressCallback | None = None) -> dict[str
             with os.scandir(path) as entries:
                 for entry in entries:
                     child = Path(entry.path)
-                    if child.name.lower() in IGNORED_DIRECTORIES or child.suffix.lower() in IGNORED_SUFFIXES:
+                    child_name = child.name.lower()
+                    if (
+                        child_name in IGNORED_DIRECTORIES
+                        or child_name.endswith(".egg-info")
+                        or child.suffix.lower() in IGNORED_SUFFIXES
+                    ):
                         continue
                     register(child)
         else:
@@ -176,9 +185,48 @@ def check_integrity(
             reference, progress=reference_progress, update_root=cache_root or DATA_DIR / "integrity",
             http_client=http_client,
         )
+        report.reference_root = prepared.package_root
         compare_installation(prepared.package_root, install_root.resolve(), report, progress)
     except IntegrityCancelled:
         raise
     except Exception as exc:
         report.reference_error = str(exc)
     return report
+
+
+def repair_installation(
+    report: IntegrityReport, *, install_root: Path = INSTALL_ROOT,
+    progress: ProgressCallback | None = None,
+) -> int:
+    """Атомарно восстановить только отсутствующие и изменённые файлы из эталона."""
+    reference_root = report.reference_root
+    if reference_root is None or not reference_root.is_dir():
+        raise ValueError("Проверенный эталон больше недоступен; запустите проверку повторно")
+    validate_file_manifest(reference_root, report.version)
+    eligible = [item for item in report.issues if item.status in {"Отсутствует", "Изменён"}]
+    repaired = 0
+    install_root = install_root.resolve()
+    for index, issue in enumerate(eligible, 1):
+        if progress:
+            progress("Восстановление файлов", index, len(eligible))
+        relative = Path(issue.path)
+        source = reference_root / relative
+        target = install_root / relative
+        if not source.is_file() or sha256_file(source) == "":
+            raise ValueError(f"Эталонный файл недоступен: {issue.path}")
+        parents = [target.parent, *list(target.parent.parents)[:max(0, len(relative.parts) - 1)]]
+        if any(_is_link(parent) for parent in parents if parent.exists()):
+            raise ValueError(f"Путь восстановления содержит ссылку: {issue.path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".tshelper-repair-", dir=target.parent)
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            shutil.copy2(source, temporary)
+            if sha256_file(temporary) != sha256_file(source):
+                raise OSError(f"Контрольная сумма копии не совпала: {issue.path}")
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        repaired += 1
+    return repaired

@@ -165,14 +165,27 @@ def test_secure_portable_update_contract():
         os.makedirs(root)
         archive = os.path.join(temp_dir, 'update.zip')
         package = 'TSHelper-v9.9.9'
+        package_files = {
+            'src/tshelper/version.py': '__version__ = "9.9.9"\n',
+            'scripts/apply_update.ps1': '# updater\n',
+            'requirements.txt': 'requests\n',
+            'pyproject.toml': '[project]\nname="tshelper"\n',
+            'run_tshelper.bat': '@echo off\n',
+        }
+        manifest = {
+            'format': 1,
+            'version': '9.9.9',
+            'files': [
+                {'path': name, 'sha256': hashlib.sha256(value.encode()).hexdigest(), 'size': len(value.encode())}
+                for name, value in package_files.items()
+            ],
+        }
         with zipfile.ZipFile(archive, 'w') as bundle:
             for directory in MANAGED_DIRECTORIES:
                 bundle.writestr(f'{package}/{directory}/', '')
-            bundle.writestr(f'{package}/src/tshelper/version.py', '__version__ = "9.9.9"\n')
-            bundle.writestr(f'{package}/scripts/apply_update.ps1', '# updater\n')
-            bundle.writestr(f'{package}/requirements.txt', 'requests\n')
-            bundle.writestr(f'{package}/pyproject.toml', '[project]\nname="tshelper"\n')
-            bundle.writestr(f'{package}/run_tshelper.bat', '@echo off\n')
+            for name, value in package_files.items():
+                bundle.writestr(f'{package}/{name}', value)
+            bundle.writestr(f'{package}/integrity-manifest.json', json.dumps(manifest))
         archive_digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
         archive_size = os.path.getsize(archive)
         archive_release = ReleaseInfo(

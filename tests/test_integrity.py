@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import sys
 import tempfile
 import time
@@ -36,13 +37,28 @@ class IntegrityTests(unittest.TestCase):
         )
 
     def test_clean_and_runtime_exclusions(self):
-        for folder in ("src/__pycache__", "apps/adhelper2/.venv"):
+        for folder in ("src/__pycache__", "apps/adhelper2/.venv", "src/tshelper_desktop.egg-info"):
             (self.install / folder).mkdir(parents=True)
             (self.install / folder / "generated.py").write_text("тест", encoding="utf-8")
         (self.install / "users.json").write_text("{}", encoding="utf-8")
         report = self.compare()
         self.assertEqual(report.matched, 2)
         self.assertEqual(report.issues, [])
+
+    def test_repair_missing_and_changed_files_without_removing_extra(self):
+        (self.install / "requirements.txt").unlink()
+        (self.install / "src/app.py").write_text("изменено", encoding="utf-8")
+        extra = self.install / "src/local.txt"
+        extra.write_text("оставить", encoding="utf-8")
+        report = self.compare()
+        report.reference_root = self.reference
+        with patch.object(integrity, "validate_file_manifest"):
+            repaired = integrity.repair_installation(report, install_root=self.install)
+        self.assertEqual(repaired, 2)
+        self.assertEqual((self.install / "src/app.py").read_bytes(), (self.reference / "src/app.py").read_bytes())
+        self.assertTrue((self.install / "requirements.txt").is_file())
+        self.assertEqual(extra.read_text(encoding="utf-8"), "оставить")
+        self.assertEqual(self.compare().issues, [integrity.IntegrityIssue("src/local.txt", "Нет в эталоне", "")])
 
     def test_missing_changed_extra_and_nested_layout(self):
         (self.install / "requirements.txt").unlink()
@@ -113,6 +129,13 @@ class IntegrityTests(unittest.TestCase):
             "pyproject.toml": "[project]\n",
             "run_tshelper.bat": "@echo off\n",
         }
+        manifest = {
+            "format": 1, "version": "5.15.5",
+            "files": [
+                {"path": name, "sha256": hashlib.sha256(content.encode()).hexdigest(), "size": len(content.encode())}
+                for name, content in files.items()
+            ],
+        }
         with zipfile.ZipFile(buffer, "w") as bundle:
             for folder in MANAGED_DIRECTORIES:
                 bundle.writestr(f"TSHelper-v5.15.5/{folder}/", "")
@@ -121,6 +144,9 @@ class IntegrityTests(unittest.TestCase):
                 target = self.install / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8", newline="\n")
+            manifest_text = json.dumps(manifest)
+            bundle.writestr("TSHelper-v5.15.5/integrity-manifest.json", manifest_text)
+            (self.install / "integrity-manifest.json").write_text(manifest_text, encoding="utf-8")
         archive = buffer.getvalue()
         payload = {
             "tag_name": "v5.15.5", "assets": [{
@@ -148,7 +174,7 @@ class IntegrityTests(unittest.TestCase):
             "5.15.5", install_root=self.install, cache_root=self.root / "cache", http_client=Client(),
         )
         self.assertFalse(report.reference_error)
-        self.assertEqual(report.matched, len(files))
+        self.assertEqual(report.matched, len(files) + 1)
         self.assertEqual(report.issues[0].path, "src/app.py")
         self.assertEqual((self.install / "src/app.py").read_bytes(), before)
         self.assertIn("Версия актуальна", report.summary())
@@ -169,6 +195,10 @@ class IntegrityTests(unittest.TestCase):
         self.assertLess(update, check)
         self.assertNotIn("add_separator", source[update:check])
         self.assertIn("integrity_window.running", source)
+        build = (Path(__file__).resolve().parents[1] / "scripts/build_release.ps1").read_text(encoding="utf-8-sig")
+        installer = (Path(__file__).resolve().parents[1] / "scripts/apply_update.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn('"integrity-manifest.json"', build)
+        self.assertEqual(installer.count("Assert-FileManifest -Root"), 2)
 
 
 class IntegrityDialogTests(unittest.TestCase):

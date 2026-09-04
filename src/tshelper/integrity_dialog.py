@@ -5,7 +5,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from .integrity import IntegrityCancelled, check_integrity
+from .integrity import IntegrityCancelled, check_integrity, repair_installation
 
 
 class IntegrityDialog(tk.Toplevel):
@@ -55,6 +55,8 @@ class IntegrityDialog(tk.Toplevel):
         buttons.pack(fill="x", pady=(12, 0))
         self.copy_button = ttk.Button(buttons, text="Скопировать отчёт", command=self.copy_report, state="disabled")
         self.copy_button.pack(side="left")
+        self.repair_button = ttk.Button(buttons, text="Восстановить файлы", command=self.repair, state="disabled")
+        self.repair_button.pack(side="left", padx=(8, 0))
         self.close_button = ttk.Button(buttons, text="Отмена", command=self.close)
         self.close_button.pack(side="right")
 
@@ -92,12 +94,21 @@ class IntegrityDialog(tk.Toplevel):
             self.destroy()
         elif kind == "error":
             self.status.set(f"Не удалось завершить проверку: {result}")
+        elif kind == "repaired":
+            self.status.set(f"Восстановлено файлов: {result}. Перезапустите TSHelper и повторите проверку.")
+            messagebox.showinfo(
+                "Восстановление файлов",
+                f"Восстановлено файлов: {result}.\n\nПерезапустите TSHelper и повторите проверку целостности.",
+                parent=self,
+            )
         else:
             self.report = result
             self.status.set(result.summary())
             for item in result.issues:
                 self.table.insert("", "end", values=(item.path, item.status, item.detail))
             self.copy_button.configure(state="normal")
+            if any(item.status in {"Отсутствует", "Изменён"} for item in result.issues):
+                self.repair_button.configure(state="normal")
 
     def close(self):
         if self.running:
@@ -112,3 +123,33 @@ class IntegrityDialog(tk.Toplevel):
             self.clipboard_clear()
             self.clipboard_append(self.report.as_text())
             messagebox.showinfo("Проверка целостности", "Отчёт скопирован в буфер обмена.", parent=self)
+
+    def repair(self):
+        if self.report is None or not messagebox.askyesno(
+            "Восстановление файлов",
+            "Восстановить отсутствующие и изменённые файлы из проверенного архива?\n\n"
+            "Лишние файлы удаляться не будут. После восстановления рекомендуется перезапустить TSHelper.",
+            parent=self,
+        ):
+            return
+        self.running = True
+        self.repair_button.configure(state="disabled")
+        self.close_button.configure(text="Отмена", state="normal")
+        self.progress.start(15)
+
+        def progress(stage, current, total):
+            if self.cancelled.is_set():
+                raise IntegrityCancelled()
+            self.progress_event = (stage, current, total)
+
+        def work():
+            try:
+                count = repair_installation(self.report, progress=progress)
+                self.events.put(("repaired", count))
+            except IntegrityCancelled:
+                self.events.put(("cancelled", None))
+            except Exception as exc:
+                self.events.put(("error", str(exc)))
+
+        threading.Thread(target=work, daemon=True, name="tshelper-integrity-repair").start()
+        self.after(100, self.poll)

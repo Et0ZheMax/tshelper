@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ RELEASE_API_URL = "https://api.github.com/repos/Et0ZheMax/tshelper/releases/late
 MAX_ARCHIVE_SIZE = 300 * 1024 * 1024
 MAX_EXTRACTED_SIZE = 1024 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 20_000
+FILE_MANIFEST_NAME = "integrity-manifest.json"
 
 MANAGED_DIRECTORIES = ("src", "apps", "assets", "config", "scripts", "extensions")
 MANAGED_FILES = (
@@ -29,6 +31,7 @@ MANAGED_FILES = (
     "requirements.txt",
     "pyproject.toml",
     "run_tshelper.bat",
+    FILE_MANIFEST_NAME,
 )
 REQUIRED_PACKAGE_PATHS = (
     "src/tshelper/version.py",
@@ -241,6 +244,41 @@ def validate_package_root(package_root: Path, expected_version: str) -> None:
     if not match or match.group(1) != expected_version:
         actual = match.group(1) if match else "не определена"
         raise UpdateError(f"Версия внутри архива {actual} не совпадает с {expected_version}")
+    validate_file_manifest(package_root, expected_version)
+
+
+def validate_file_manifest(package_root: Path, expected_version: str) -> None:
+    """Проверить каждый файл пакета по подписанному SHA-256 архива манифесту."""
+    manifest_path = package_root / FILE_MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise UpdateError(f"В архиве отсутствует {FILE_MANIFEST_NAME}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise UpdateError("Некорректный манифест целостности") from exc
+    if manifest.get("format") != 1 or str(manifest.get("version")) != expected_version:
+        raise UpdateError("Версия манифеста целостности не совпадает с релизом")
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise UpdateError("Манифест целостности не содержит файлов")
+    declared = set()
+    for entry in entries:
+        relative = str(entry.get("path") or "") if isinstance(entry, dict) else ""
+        digest = str(entry.get("sha256") or "").lower() if isinstance(entry, dict) else ""
+        path = _validate_archive_member(zipfile.ZipInfo(relative))
+        if relative == FILE_MANIFEST_NAME or relative in declared or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise UpdateError(f"Некорректная запись манифеста: {relative or '?'}")
+        declared.add(relative)
+        target = package_root.joinpath(*path.parts)
+        if not target.is_file() or sha256_file(target) != digest:
+            raise UpdateError(f"Файл не прошёл проверку целостности: {relative}")
+    actual = {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*")
+        if path.is_file() and path.name != FILE_MANIFEST_NAME
+    }
+    if actual != declared:
+        raise UpdateError("Состав файлов пакета не совпадает с манифестом")
 
 
 def extract_release_archive(

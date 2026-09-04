@@ -3,6 +3,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-PortableSha256 {
+    param([string]$Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($stream)) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = & python -c "import sys; sys.path.insert(0, 'src'); from tshelper.version import __version__; print(__version__)"
 if ($LASTEXITCODE -ne 0 -or -not $version) {
@@ -44,7 +57,28 @@ foreach ($file in $files) {
 }
 
 Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\run_tshelper.bat") -Destination (Join-Path $stage "run_tshelper.bat")
-Get-ChildItem -LiteralPath $stage -Directory -Recurse -Filter "__pycache__" | Remove-Item -Recurse -Force
+$excludedDirectoryNames = @("__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv")
+Get-ChildItem -LiteralPath $stage -Directory -Recurse | Where-Object {
+    $_.Name -in $excludedDirectoryNames -or $_.Name.EndsWith(".egg-info", [System.StringComparison]::OrdinalIgnoreCase)
+} | Sort-Object { $_.FullName.Length } -Descending | Remove-Item -Recurse -Force
+$manifestEntries = Get-ChildItem -LiteralPath $stage -File -Recurse | ForEach-Object {
+    [pscustomobject]@{
+        path = $_.FullName.Substring($stage.Length + 1).Replace("\", "/")
+        sha256 = Get-PortableSha256 $_.FullName
+        size = $_.Length
+    }
+} | Sort-Object path
+$manifest = [pscustomobject]@{
+    format = 1
+    version = $version
+    files = @($manifestEntries)
+}
+$manifestJson = $manifest | ConvertTo-Json -Depth 4
+[System.IO.File]::WriteAllText(
+    (Join-Path $stage "integrity-manifest.json"),
+    $manifestJson,
+    (New-Object System.Text.UTF8Encoding($false))
+)
 Compress-Archive -LiteralPath $stage -DestinationPath $archive -CompressionLevel Optimal
 Compress-Archive -Path (Join-Path $repositoryRoot "extensions\tshelper-glpi-inventory-bridge\*") -DestinationPath $extensionArchive -CompressionLevel Optimal
 Write-Output $archive

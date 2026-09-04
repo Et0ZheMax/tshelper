@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $managedPaths = @(
     "src", "apps", "assets", "config", "scripts", "extensions",
     "README.md", "CHANGELOG.md", "SECURITY.md", "requirements.txt",
-    "pyproject.toml", "run_tshelper.bat"
+    "pyproject.toml", "run_tshelper.bat", "integrity-manifest.json"
 )
 $installedPaths = [System.Collections.Generic.List[string]]::new()
 $backedUpPaths = [System.Collections.Generic.List[string]]::new()
@@ -176,6 +176,40 @@ function Get-FileSha256 {
     }
 }
 
+function Assert-FileManifest {
+    param([string]$Root, [string]$Version)
+    $manifestPath = Assert-ChildPath $Root (Join-Path $Root "integrity-manifest.json")
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Отсутствует манифест целостности обновления"
+    }
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
+    if ($manifest.format -ne 1 -or [string]$manifest.version -ne $Version -or -not $manifest.files) {
+        throw "Некорректный манифест целостности обновления"
+    }
+    $seen = @{}
+    foreach ($entry in $manifest.files) {
+        $relativePath = [string]$entry.path
+        $expectedHash = ([string]$entry.sha256).ToLowerInvariant()
+        if (
+            [string]::IsNullOrWhiteSpace($relativePath) -or
+            $relativePath -eq "integrity-manifest.json" -or
+            $relativePath.Contains("..") -or $relativePath.Contains(":") -or
+            $expectedHash -notmatch '^[0-9a-f]{64}$' -or
+            $seen.ContainsKey($relativePath)
+        ) {
+            throw "Некорректная запись манифеста: $relativePath"
+        }
+        $seen[$relativePath] = $true
+        $filePath = Assert-ChildPath $Root (Join-Path $Root $relativePath)
+        $actualHash = Get-FileSha256 $filePath
+        if ($actualHash -ne $expectedHash) {
+            throw "Файл не прошёл проверку целостности: $relativePath"
+        }
+        Update-ProgressEvents
+    }
+    Write-UpdateLog "Проверено файлов по манифесту: $($seen.Count)"
+}
+
 function Preserve-AdHelperEnvironment {
     param([string]$EnvironmentPath, [string]$PreservedPath)
     if (Test-Path -LiteralPath $PreservedPath) { return }
@@ -275,6 +309,7 @@ if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -ne $ExpectedVe
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot "run_tshelper.bat") -PathType Leaf)) {
     throw "В источнике обновления отсутствует run_tshelper.bat"
 }
+Assert-FileManifest -Root $sourceRoot -Version $ExpectedVersion
 if (-not (Test-Path -LiteralPath (Join-Path $targetRoot "src\tshelper\version.py") -PathType Leaf)) {
     throw "Каталог установки TSHelper не прошёл проверку структуры"
 }
@@ -395,6 +430,8 @@ try {
         }
     }
 
+    Set-UpdateProgress -Message "Проверка установленных файлов…" -Percent 92 -Marquee
+    Assert-FileManifest -Root $targetRoot -Version $ExpectedVersion
     Set-UpdateProgress -Message "Запуск обновлённого TSHelper…" -Percent 94
     Write-UpdateLog "Обновление до $ExpectedVersion успешно установлено"
     Set-UpdateProgress -Message "Обновление успешно установлено" -Percent 100
